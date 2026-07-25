@@ -1,0 +1,1 @@
+{"indexes":[{"v":{"$numberInt":"2"},"key":{"_id":{"$numberInt":"1"}},"name":"_id_"}],"uuid":"0a609209e19044d4bbb9e76a0e141f25","collectionName":"hours_calendars","type":"collection"}

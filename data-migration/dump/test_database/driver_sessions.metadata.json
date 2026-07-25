@@ -1,0 +1,1 @@
+{"indexes":[{"v":{"$numberInt":"2"},"key":{"_id":{"$numberInt":"1"}},"name":"_id_"},{"v":{"$numberInt":"2"},"key":{"driver_name":{"$numberInt":"1"}},"name":"driver_name_1"},{"v":{"$numberInt":"2"},"key":{"report_date":{"$numberInt":"1"}},"name":"report_date_1"}],"uuid":"e2cf0308273446e387d7521112b884f0","collectionName":"driver_sessions","type":"collection"}

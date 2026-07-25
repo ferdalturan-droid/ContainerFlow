@@ -1,0 +1,1 @@
+{"indexes":[{"v":{"$numberInt":"2"},"key":{"_id":{"$numberInt":"1"}},"name":"_id_"}],"uuid":"1bc8c928ffe04ef6ade4c47764793b30","collectionName":"holiday_deltas","type":"collection"}

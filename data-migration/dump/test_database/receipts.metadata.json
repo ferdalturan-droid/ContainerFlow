@@ -1,0 +1,1 @@
+{"indexes":[{"v":{"$numberInt":"2"},"key":{"_id":{"$numberInt":"1"}},"name":"_id_"},{"v":{"$numberInt":"2"},"key":{"driver_name":{"$numberInt":"1"}},"name":"driver_name_1"}],"uuid":"efce7a0b645c4ce7bbc921d178ec31b0","collectionName":"receipts","type":"collection"}

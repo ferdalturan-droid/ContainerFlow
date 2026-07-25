@@ -1,0 +1,19 @@
+<analysis>TenantAwareDBContextVarX-Acting-Company-IdApp.js/app/scripts/gdrive_uploader.pyX-Acting-Company-Idserves_company_idsMobileTourPanelv5-OCRv6-genbrug-raporv7-logo.zipLoader2Check
+/app/
+├── backend/
+│   ├── server.py (FastAPI main app + TenantAwareDB wrapper + route optimization)
+│   ├── auth.py (JWT, managed_company_ids, ContextVars)
+├── deploy/ 
+├── scripts/ (Google Drive Backups)
+│   ├── backup_mongo.sh, restore_mongo.sh
+│   ├── gdrive_uploader.py, gdrive_download.py
+├── frontend/
+│   ├── public/ (PWA manifest, custom logos)
+│   ├── src/
+│   │   ├── App.js (Massive main router, Driver UI, MobileTourPanel, Order UI)
+│   │   ├── pages/
+│   │   │   ├── LoginPage.jsx (Branded)
+│   │   │   ├── SuperAdminPage.jsx
+│   │   │   ├── GenbrugPladsPage.jsx
+│   │   │   └── PrijsPage.jsx (Priser & Rapport)
+current_company_idcurrent_extra_visible_company_idsmanaged_company_idsX-Acting-Company-Iduserscompaniestourspladsgoogle-api-python-clienttesseract.js/app/backend/server.pyTenantAwareCollection/app/backend/auth.pyContextVar/app/frontend/src/App.jsMobileTourPanel/app/frontend/public/index.html/app/scripts/gdrive_uploader.pyApp.jsGET /api/pladsserves_company_idsPOST /api/optimize-routelat/lngGET /api/auth/managed-companiesX-Acting-Company-Idserves_company_idsTenantAwareDBAfslut/app/scripts/README.md/app/memory/PRD.md/app/test_reports/iteration_4.jsonslet tusunu kaldir slet olmasin ama geri tilbag labilirchat bolumu simdi waatsaba benziyor massenger gibi yapabilirmisincontainerflow-v6-genbrug-rapor.zip yenilikler yaptim bozmadan accontainerflow-v6-final.zip simdi bunnu acalimLoader2containerflow-v7-logo.zip simid nasil olduapple-touch-icon.pngindex.htmlsimdi sana sirliyacam benim bu sayfa nasil calisiyor diye sende ona gore bir analiz ve fikrini soyle... Rol 1: super_admin, Rol 2: genbrug_plads (admin), Rol 3: order, Rol 4: logistics_admin, Rol 5: driver. simdi bi bak eksiklerimiz ne kaldi/app/secrets//app/test_reports/iteration_4.json/app/memory/test_credentials.mdferdalturan@gmail.comSuperAdmin2026!admin@default.localilk2026driver@default.localdriver2026genbrug@default.localgenbrug2026bestil@default.localbestil2026</analysis>

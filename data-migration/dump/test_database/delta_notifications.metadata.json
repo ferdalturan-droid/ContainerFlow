@@ -1,0 +1,1 @@
+{"indexes":[{"v":{"$numberInt":"2"},"key":{"_id":{"$numberInt":"1"}},"name":"_id_"}],"uuid":"f193106e871a40968386a9b486ba85e2","collectionName":"delta_notifications","type":"collection"}

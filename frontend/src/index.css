@@ -1,0 +1,723 @@
+
+/* Prevent zoom on mobile */
+* {
+  touch-action: manipulation;
+}
+input, select, textarea {
+  font-size: 16px; /* prevents iOS auto-zoom on input focus */
+}
+html {
+  -webkit-text-size-adjust: 100%;
+  touch-action: pan-x pan-y;
+}
+@import url('https://fonts.googleapis.com/css2?family=Chivo:ital,wght@0,100..900;1,100..900&family=JetBrains+Mono:wght@400;500;700&family=Public+Sans:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+    margin: 0;
+    font-family: "Public Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    background-color: #0f172a;
+}
+
+/* Global horizontal scroll lock (Fase 18.41: brug `clip` i stedet for
+   `hidden` så vi ikke skaber en scroll-container der bryder position:sticky
+   på nested elementer som app-header. `clip` skjuler overflow uden at
+   ændre elementets scroll-context. Fallback til hidden på ældre browsere.) */
+html, body {
+    overflow-x: clip;
+    max-width: 100vw;
+    background-color: #0f172a;
+}
+
+#root {
+    overflow-x: clip;
+    max-width: 100vw;
+    width: 100%;
+}
+
+*, *::before, *::after {
+    box-sizing: border-box;
+}
+
+code {
+    font-family: "JetBrains Mono", source-code-pro, Menlo, Monaco, Consolas, monospace;
+}
+
+.font-heading {
+    font-family: "Chivo", sans-serif;
+}
+
+.font-mono {
+    font-family: "JetBrains Mono", monospace;
+}
+
+@layer base {
+    :root {
+        --background: 0 0% 100%;
+        --foreground: 222.2 84% 4.9%;
+        --card: 0 0% 100%;
+        --card-foreground: 222.2 84% 4.9%;
+        --popover: 0 0% 100%;
+        --popover-foreground: 222.2 84% 4.9%;
+        --primary: 222.2 47.4% 11.2%;
+        --primary-foreground: 210 40% 98%;
+        --secondary: 210 40% 96.1%;
+        --secondary-foreground: 222.2 47.4% 11.2%;
+        --muted: 210 40% 96.1%;
+        --muted-foreground: 215.4 16.3% 46.9%;
+        --accent: 38 92% 50%;
+        --accent-foreground: 0 0% 0%;
+        --brand: 217 91% 60%;
+        --brand-foreground: 0 0% 100%;
+        --success: 160 84% 39%;
+        --success-foreground: 0 0% 100%;
+        --destructive: 0 84.2% 60.2%;
+        --destructive-foreground: 0 0% 98%;
+        --border: 214.3 31.8% 91.4%;
+        --input: 214.3 31.8% 91.4%;
+        --ring: 222.2 84% 4.9%;
+        --radius: 0.5rem;
+    }
+    .dark {
+        --background: 222.2 84% 4.9%;
+        --foreground: 210 40% 98%;
+        --card: 222.2 47.4% 11.2%;
+        --card-foreground: 210 40% 98%;
+        --popover: 222.2 47.4% 11.2%;
+        --popover-foreground: 210 40% 98%;
+        --primary: 210 40% 98%;
+        --primary-foreground: 222.2 47.4% 11.2%;
+        --secondary: 217.2 32.6% 17.5%;
+        --secondary-foreground: 210 40% 98%;
+        --muted: 217.2 32.6% 17.5%;
+        --muted-foreground: 215 20.2% 65.1%;
+        --accent: 38 92% 50%;
+        --accent-foreground: 0 0% 0%;
+        --brand: 217 91% 60%;
+        --brand-foreground: 0 0% 100%;
+        --success: 160 84% 39%;
+        --success-foreground: 0 0% 100%;
+        --destructive: 0 62.8% 30.6%;
+        --destructive-foreground: 0 0% 98%;
+        --border: 217.2 32.6% 17.5%;
+        --input: 217.2 32.6% 17.5%;
+        --ring: 212.7 26.8% 83.9%;
+    }
+}
+
+@layer base {
+    * {
+        @apply border-border;
+    }
+    body {
+        @apply bg-background text-foreground;
+    }
+}
+
+@layer base {
+    [data-debug-wrapper="true"] {
+        display: contents !important;
+    }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: hsl(var(--muted));
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: hsl(var(--muted-foreground) / 0.3);
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground) / 0.5);
+}
+
+/* Table row states */
+.tour-row-completed {
+    @apply bg-green-50 dark:bg-green-950/30;
+}
+
+.tour-row-onway {
+    @apply bg-amber-50 dark:bg-amber-950/30;
+}
+
+.tour-row-pause {
+    @apply bg-slate-100 dark:bg-slate-800/50;
+}
+
+.tour-row-sameday {
+    @apply bg-blue-50 dark:bg-blue-950/30;
+}
+
+/* Animation for parse button */
+@keyframes magic-glow {
+    0%, 100% {
+        box-shadow: 0 0 5px hsl(var(--accent)), 0 0 10px hsl(var(--accent)), 0 0 15px hsl(var(--accent));
+    }
+    50% {
+        box-shadow: 0 0 10px hsl(var(--accent)), 0 0 20px hsl(var(--accent)), 0 0 30px hsl(var(--accent));
+    }
+}
+
+.magic-button:hover {
+    animation: magic-glow 1.5s ease-in-out infinite;
+}
+
+/* Stat card animation */
+@keyframes pulse-stat {
+    0%, 100% {
+        transform: scale(1);
+    }
+    50% {
+        transform: scale(1.02);
+    }
+}
+
+.stat-card:hover {
+    animation: pulse-stat 0.3s ease-out;
+}
+
+/* Hide Emergent badge - FORCE REMOVE */
+[data-testid="emergent-badge"],
+[class*="emergent"],
+[class*="Emergent"],
+a[href*="emergent"],
+a[href*="Emergent"],
+div[class*="Made with"],
+div[class*="made-with"],
+.emergent-badge,
+#emergent-badge,
+[id*="emergent"],
+[id*="Emergent"],
+div[style*="emergent"],
+iframe[src*="emergent"],
+script[src*="emergent"],
+/* Target fixed position badges at bottom */
+body > div[style*="fixed"][style*="bottom"],
+body > a[style*="fixed"][style*="bottom"],
+body > div[style*="position: fixed"][style*="bottom"],
+/* Target any badge-like element */
+[class*="badge"][class*="powered"],
+[class*="watermark"],
+[class*="branding"] {
+    display: none !important;
+    visibility: hidden !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+    width: 0 !important;
+    height: 0 !important;
+    overflow: hidden !important;
+    position: absolute !important;
+    left: -9999px !important;
+    top: -9999px !important;
+}
+
+/* ============= MOBILE RESPONSIVE STYLES ============= */
+
+/* Mobile viewport fix — Fase 18.42: brug `clip` så sticky-headere ikke brydes */
+@media screen and (max-width: 768px) {
+    body {
+        overflow-x: clip;
+        -webkit-overflow-scrolling: touch;
+    }
+    
+    /* Header mobile adjustments */
+    header {
+        padding: 0.75rem 1rem !important;
+    }
+    
+    header h1 {
+        font-size: 1rem !important;
+    }
+    
+    header .flex {
+        flex-wrap: wrap;
+        gap: 0.5rem;
+    }
+    
+    /* Make admin button visible on mobile */
+    header button[title="Admin"],
+    header button:has(svg.lucide-shield) {
+        display: flex !important;
+        padding: 0.5rem !important;
+        min-width: 40px;
+        min-height: 40px;
+    }
+    
+    /* Stats cards mobile */
+    .stat-card,
+    section > div.grid {
+        grid-template-columns: repeat(2, 1fr) !important;
+        gap: 0.5rem !important;
+    }
+    
+    .stat-card > div {
+        padding: 0.75rem !important;
+    }
+    
+    .stat-card .text-3xl,
+    .stat-card .text-4xl {
+        font-size: 1.25rem !important;
+    }
+    
+    /* Plads badges mobile - contained horizontal scroll */
+    .plads-badges-scroll {
+        flex-wrap: nowrap !important;
+        overflow-x: auto !important;
+        padding-bottom: 0.5rem;
+        -webkit-overflow-scrolling: touch;
+    }
+    
+    .plads-badges-scroll > button {
+        flex-shrink: 0;
+        font-size: 0.75rem !important;
+        padding: 0.375rem 0.75rem !important;
+    }
+    
+    /* Driver selection mobile */
+    .relative > button {
+        font-size: 0.875rem !important;
+        padding: 0.5rem 0.75rem !important;
+    }
+    
+    /* Mail text area mobile */
+    textarea {
+        min-height: 100px !important;
+        font-size: 14px !important;
+    }
+    
+    /* Buttons row mobile - stack if needed */
+    .flex.flex-wrap.gap-3 {
+        gap: 0.5rem !important;
+    }
+    
+    .flex.flex-wrap.gap-3 > button,
+    .flex.flex-wrap.gap-3 > div {
+        max-width: 100% !important;
+        justify-content: center !important;
+    }
+    
+    /* Pause buttons container */
+    .flex.items-center.gap-1.bg-slate-100 {
+        width: 100% !important;
+        justify-content: space-between !important;
+    }
+    
+    /* Manual tour form mobile */
+    .grid.grid-cols-1.md\\:grid-cols-5,
+    .grid.grid-cols-1.md\\:grid-cols-6 {
+        gap: 0.5rem !important;
+    }
+    
+    .grid.grid-cols-1.md\\:grid-cols-5 input,
+    .grid.grid-cols-1.md\\:grid-cols-6 input {
+        font-size: 14px !important;
+        padding: 0.625rem !important;
+    }
+    
+    /* Tours table mobile - contained scroll within card */
+    .overflow-x-auto {
+        margin: 0;
+        padding: 0;
+        max-width: 100%;
+    }
+    
+    table {
+        font-size: 0.75rem !important;
+        min-width: 600px;
+    }
+    
+    table th,
+    table td {
+        padding: 0.5rem 0.375rem !important;
+        white-space: nowrap;
+    }
+    
+    table input {
+        width: 60px !important;
+        font-size: 0.75rem !important;
+        padding: 0.25rem !important;
+    }
+    
+    table select {
+        font-size: 0.75rem !important;
+        padding: 0.25rem !important;
+        min-width: 80px;
+    }
+    
+    table button {
+        padding: 0.25rem !important;
+    }
+    
+    table button svg {
+        width: 14px !important;
+        height: 14px !important;
+    }
+    
+    /* PDF button mobile */
+    button:has(svg.lucide-download) {
+        width: 100% !important;
+        padding: 1rem !important;
+    }
+    
+    /* Notes section mobile */
+    .p-4 textarea {
+        font-size: 14px !important;
+    }
+    
+    /* Section padding mobile - no horizontal margin to prevent overflow */
+    section {
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+        margin-top: 0.5rem !important;
+        margin-bottom: 0.5rem !important;
+        border-radius: 0.75rem !important;
+        max-width: 100% !important;
+    }
+    
+    section > div.p-4,
+    section > div.p-6 {
+        padding: 0.75rem !important;
+    }
+    
+    /* Main container mobile */
+    main.max-w-7xl {
+        padding: 0.5rem !important;
+        max-width: 100% !important;
+    }
+}
+
+/* Extra small devices (phones in portrait) */
+@media screen and (max-width: 480px) {
+    header h1 {
+        font-size: 0.875rem !important;
+    }
+    
+    header p {
+        font-size: 0.625rem !important;
+    }
+    
+    .stat-card,
+    section > div.grid {
+        grid-template-columns: 1fr 1fr !important;
+    }
+    
+    .stat-card .text-3xl,
+    .stat-card .text-4xl {
+        font-size: 1rem !important;
+    }
+    
+    .stat-card .text-sm {
+        font-size: 0.625rem !important;
+    }
+    
+    /* Tour table even smaller */
+    table {
+        font-size: 0.625rem !important;
+    }
+    
+    table input {
+        width: 50px !important;
+    }
+}
+
+/* Admin page mobile styles */
+@media screen and (max-width: 768px) {
+    /* Admin header mobile */
+    [data-testid="admin-page"] header {
+        padding: 0.75rem !important;
+    }
+    
+    [data-testid="admin-page"] header h1 {
+        font-size: 1rem !important;
+    }
+    
+    /* Admin tabs mobile - horizontal scroll */
+    [data-testid="admin-page"] .flex.gap-1 {
+        overflow-x: auto !important;
+        -webkit-overflow-scrolling: touch;
+        padding-bottom: 0.25rem;
+    }
+    
+    [data-testid="admin-page"] .flex.gap-1 > button {
+        flex-shrink: 0;
+        font-size: 0.75rem !important;
+        padding: 0.5rem 0.75rem !important;
+        white-space: nowrap;
+    }
+    
+    /* Admin stats cards */
+    [data-testid="admin-page"] .grid-cols-4 {
+        grid-template-columns: repeat(2, 1fr) !important;
+    }
+    
+    /* Schedule table mobile */
+    [data-testid="admin-page"] table {
+        min-width: 500px;
+    }
+    
+    [data-testid="admin-page"] table select {
+        min-width: 70px !important;
+        font-size: 0.625rem !important;
+    }
+    
+    /* Weekly view mobile - make scrollable */
+    [data-testid="admin-page"] .overflow-x-auto {
+        margin: 0;
+        padding: 0;
+    }
+    
+    /* Driver schedule header buttons */
+    [data-testid="admin-page"] .flex.flex-wrap.items-center.justify-between {
+        flex-direction: column !important;
+        align-items: stretch !important;
+        gap: 0.75rem !important;
+    }
+    
+    [data-testid="admin-page"] .flex.flex-wrap.items-center.justify-between > div {
+        width: 100% !important;
+        justify-content: center !important;
+        flex-wrap: wrap !important;
+        gap: 0.5rem !important;
+    }
+    
+    /* Plads management grid */
+    [data-testid="admin-page"] .grid-cols-2.md\\:grid-cols-3.lg\\:grid-cols-4 {
+        grid-template-columns: repeat(2, 1fr) !important;
+    }
+    
+    /* History table */
+    [data-testid="admin-page"] .p-4.border-t.bg-slate-50 .grid-cols-3 {
+        grid-template-columns: repeat(3, 1fr) !important;
+        gap: 0.5rem !important;
+    }
+    
+    [data-testid="admin-page"] .p-4.border-t.bg-slate-50 .text-2xl {
+        font-size: 1rem !important;
+    }
+}
+
+/* Touch-friendly buttons */
+@media (hover: none) and (pointer: coarse) {
+    button {
+        min-height: 40px;
+    }
+    
+    select {
+        min-height: 40px;
+    }
+    
+    input[type="text"],
+    input[type="email"],
+    input[type="number"] {
+        min-height: 44px;
+        font-size: 16px !important; /* Prevents zoom on iOS */
+    }
+    
+    textarea {
+        font-size: 16px !important;
+    }
+}
+
+/* Landscape phone */
+@media screen and (max-height: 500px) and (orientation: landscape) {
+    header {
+        padding: 0.5rem 1rem !important;
+    }
+    
+    .stat-card > div {
+        padding: 0.5rem !important;
+    }
+}
+
+/* ============= MOBILE SLIDE-UP PANEL ANIMATION ============= */
+@keyframes slide-up {
+    from {
+        transform: translateY(100%);
+        opacity: 0;
+    }
+    to {
+        transform: translateY(0);
+        opacity: 1;
+    }
+}
+
+.animate-slide-up {
+    animation: slide-up 0.3s ease-out forwards;
+}
+
+@keyframes fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+.animate-fade-in {
+    animation: fade-in 0.2s ease-out forwards;
+}
+
+/* Mobile tour list styles */
+@media screen and (max-width: 768px) {
+    /* Hide desktop table on mobile */
+    .desktop-tour-table {
+        display: none !important;
+    }
+    
+    /* Show mobile tour list */
+    .mobile-tour-list {
+        display: block !important;
+    }
+    
+    /* Mobile stats - more compact */
+    .mobile-stats-grid {
+        display: grid !important;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 0.5rem;
+    }
+    
+    .mobile-stats-grid > div {
+        padding: 0.5rem !important;
+    }
+    
+    .mobile-stats-grid .text-2xl {
+        font-size: 1.25rem !important;
+    }
+    
+    .mobile-stats-grid .text-xs {
+        font-size: 0.625rem !important;
+    }
+}
+
+/* Desktop shows table, hides mobile list */
+@media screen and (min-width: 769px) {
+    .desktop-tour-table {
+        display: block !important;
+    }
+    
+    .mobile-tour-list {
+        display: none !important;
+    }
+}
+
+
+/* ============================================
+   DRIVER LIGHT MODE OVERRIDES
+   Apply only when wrapper has `.driver-light` class.
+   Goal: white/light backgrounds + dark, readable text.
+   ============================================ */
+.driver-light { color: #1e293b; background-color: #ffffff; }
+.driver-light .bg-slate-900 { background-color: #ffffff !important; }
+.driver-light .bg-slate-800 { background-color: #f1f5f9 !important; }
+.driver-light .bg-slate-700, .driver-light .bg-slate-700\/50 { background-color: #e2e8f0 !important; }
+.driver-light .bg-slate-700\/60 { background-color: rgba(226, 232, 240, 0.7) !important; }
+.driver-light .bg-slate-700\/30 { background-color: rgba(226, 232, 240, 0.5) !important; }
+.driver-light .bg-slate-600 { background-color: #cbd5e1 !important; }
+.driver-light .bg-slate-600\/50 { background-color: rgba(203, 213, 225, 0.6) !important; }
+
+/* Gradient header in hero card → soft gradient */
+.driver-light .bg-gradient-to-br.from-slate-800 { background-image: linear-gradient(to bottom right, #f8fafc, #ffffff) !important; }
+
+/* Text colors */
+.driver-light .text-white { color: #1e293b !important; }
+.driver-light .text-slate-300 { color: #334155 !important; }
+.driver-light .text-slate-400 { color: #475569 !important; }
+.driver-light .text-slate-500 { color: #64748b !important; }
+.driver-light .text-slate-600 { color: #94a3b8 !important; }
+
+/* Borders */
+.driver-light .border-slate-700 { border-color: #cbd5e1 !important; }
+.driver-light .border-slate-600 { border-color: #cbd5e1 !important; }
+
+/* Inputs and form fields */
+.driver-light input,
+.driver-light select,
+.driver-light textarea {
+  background-color: #ffffff !important;
+  color: #1e293b !important;
+  border-color: #cbd5e1 !important;
+}
+.driver-light input::placeholder,
+.driver-light textarea::placeholder { color: #94a3b8 !important; }
+
+/* Toolbar buttons keep their accent backgrounds (success, warn, danger remain visible) */
+.driver-light .toolbar-btn:not(.success):not(.warn):not(.danger) {
+  background-color: #e2e8f0 !important;
+  color: #1e293b !important;
+}
+.driver-light .toolbar-btn:not(.success):not(.warn):not(.danger):hover {
+  background-color: #cbd5e1 !important;
+}
+
+/* Keep colored backgrounds intact for accent elements */
+.driver-light .bg-orange-500,
+.driver-light .bg-red-500,
+.driver-light .bg-red-600,
+.driver-light .bg-emerald-500,
+.driver-light .bg-blue-500,
+.driver-light .bg-blue-600,
+.driver-light .bg-indigo-500,
+.driver-light .bg-purple-500,
+.driver-light .bg-rose-500,
+.driver-light .bg-amber-500 {
+  /* keep as-is */
+}
+
+/* Cards/panels backgrounds for divs that we use */
+.driver-light .bg-slate-50 { background-color: #f8fafc !important; }
+
+/* Progress bar background segments */
+.driver-light .bg-slate-600 { background-color: #cbd5e1 !important; }
+
+/* Chat panel keeps WhatsApp colors regardless (already white-ish) */
+/* Fase 15.24 (2026-02-21): Pulserende ring til HASTER tour-kort. */
+@keyframes haster-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7), 0 0 0 0 rgba(239, 68, 68, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(239, 68, 68, 0), 0 0 12px 2px rgba(239, 68, 68, 0.5);
+  }
+}
+.animate-haster-pulse {
+  animation: haster-pulse 1.8s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* Fase 15.27 (2026-02-21): Forstærket HASTER-puls til mine ture. */
+@keyframes haster-pulse-strong {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.85), 0 0 0 0 rgba(239, 68, 68, 0.5);
+    transform: scale(1);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(239, 68, 68, 0), 0 0 18px 4px rgba(239, 68, 68, 0.7);
+    transform: scale(1.04);
+  }
+}
+.animate-haster-pulse-strong {
+  animation: haster-pulse-strong 1.2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes haster-border-pulse {
+  0%, 100% {
+    border-left-color: rgb(239, 68, 68);
+    box-shadow: -4px 0 0 0 rgba(239, 68, 68, 0.0);
+  }
+  50% {
+    border-left-color: rgb(248, 113, 113);
+    box-shadow: -4px 0 12px 0 rgba(239, 68, 68, 0.55);
+  }
+}
+.animate-haster-border-pulse {
+  animation: haster-border-pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}

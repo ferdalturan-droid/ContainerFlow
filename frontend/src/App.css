@@ -1,0 +1,185 @@
+/* ===== TOOLBAR BUTTON SYSTEM ===== */
+
+.toolbar-btn {
+  position: relative;
+  width: 38px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: #1E293B;
+  color: #94A3B8;
+  border: none;
+  cursor: pointer;
+  transition: background 0.2s ease, color 0.15s ease, transform 0.15s ease, box-shadow 0.2s ease;
+  flex-shrink: 0;
+}
+
+@media (min-width: 640px) {
+  .toolbar-btn {
+    width: 44px;
+    height: 44px;
+  }
+}
+
+.toolbar-btn:hover {
+  background: #334155;
+  color: #F8FAFC;
+  box-shadow: 0 0 0 2px rgba(249,115,22,0.25);
+}
+
+.toolbar-btn:active {
+  transform: scale(0.88);
+}
+
+.toolbar-btn.active {
+  background: #F97316;
+  color: #FFFFFF;
+  box-shadow: 0 0 12px rgba(249,115,22,0.4);
+}
+
+.toolbar-btn.success {
+  background: #22C55E;
+  color: #FFFFFF;
+}
+.toolbar-btn.success:hover {
+  background: #16A34A;
+  box-shadow: 0 0 0 2px rgba(34,197,94,0.3);
+}
+
+.toolbar-btn.danger {
+  background: #EF4444;
+  color: #FFFFFF;
+}
+.toolbar-btn.danger:hover {
+  background: #DC2626;
+  box-shadow: 0 0 0 2px rgba(239,68,68,0.3);
+}
+
+.toolbar-btn.warn {
+  background: #F97316;
+  color: #FFFFFF;
+}
+.toolbar-btn.warn:hover {
+  background: #EA580C;
+  box-shadow: 0 0 0 2px rgba(249,115,22,0.3);
+}
+
+.toolbar-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  transform: none !important;
+  box-shadow: none !important;
+}
+
+/* Badge on toolbar button */
+.toolbar-btn .badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 3px;
+  border-radius: 8px;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  background: #EF4444;
+  color: #FFFFFF;
+  border: 2px solid #0F172A;
+}
+
+/* Tooltip — desktop only */
+@media (min-width: 768px) {
+  .toolbar-btn[data-tip]::after {
+    content: attr(data-tip);
+    position: absolute;
+    bottom: -30px;
+    left: 50%;
+    transform: translateX(-50%) translateY(4px);
+    padding: 3px 8px;
+    border-radius: 5px;
+    background: #0F172A;
+    color: #E2E8F0;
+    font-size: 10px;
+    font-weight: 500;
+    white-space: nowrap;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s ease, transform 0.15s ease;
+    z-index: 50;
+  }
+  .toolbar-btn[data-tip]:hover::after {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+/* Divider between groups */
+.toolbar-divider {
+  width: 1px;
+  height: 24px;
+  background: #334155;
+  margin: 0 2px;
+  flex-shrink: 0;
+}
+
+/* Toolbar wrapper — horizontal scroll on mobile */
+.toolbar-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.toolbar-wrap::-webkit-scrollbar { display: none; }
+
+/* Mobile toolbar: smaller buttons */
+@media (max-width: 639px) {
+  .toolbar-btn {
+    width: 36px;
+    height: 36px;
+  }
+}
+
+/* Confirm modal animation */
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.9); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* ===== SOFOR SAYFASI - YENI TASARIM ===== */
+
+/* HASTER kart — dikkat çekici kırmızı */
+[data-testid^="mobile-tour-"].haster-card {
+  animation: haster-pulse 2s ease-in-out infinite;
+}
+@keyframes haster-pulse {
+  0%, 100% { border-left-color: #EF4444; }
+  50%       { border-left-color: #FCA5A5; }
+}
+
+/* Aksiyon butonu — büyük, net basılabilir */
+[data-testid^="tour-action-btn-"] {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+/* More menu backdrop close */
+body.menu-open::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+
+/* Toolbar büyütme — mobil için */
+@media (max-width: 640px) {
+  .toolbar-btn {
+    min-width: 40px;
+    min-height: 40px;
+  }
+}

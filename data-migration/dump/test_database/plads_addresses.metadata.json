@@ -1,0 +1,1 @@
+{"indexes":[{"v":{"$numberInt":"2"},"key":{"_id":{"$numberInt":"1"}},"name":"_id_"}],"uuid":"7d3d9622d3914375b6af22550e0b417d","collectionName":"plads_addresses","type":"collection"}
