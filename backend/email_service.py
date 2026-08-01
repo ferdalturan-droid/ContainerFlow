@@ -167,7 +167,8 @@ async def send_invitation_email(
       </p>
     """
     html = _branded_shell(headline="Velkommen til ContainerFlow", body_html=body)
-    return await _send(to_email, f"Du er inviteret til ContainerFlow ({company_name})", html, original_to=to_email)
+    subject = f"{company_name} har inviteret dig til ContainerFlow" if company_name else "Du er inviteret til ContainerFlow"
+    return await _send(to_email, subject, html, original_to=to_email)
 
 
 async def send_missing_clock_reminder_email(

@@ -64,7 +64,7 @@ export default function SetPasswordPage({ mode }) {
   };
 
   return (
-    <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4" data-testid="set-password-page">
+    <div className="relative min-h-[100dvh] bg-slate-900 flex items-center justify-center p-4 overflow-hidden" data-testid="set-password-page">
       <div className="pointer-events-none absolute inset-0 opacity-30">
         <div className="absolute top-1/4 -left-32 w-96 h-96 rounded-full bg-orange-500/20 blur-3xl" />
         <div className="absolute bottom-1/4 -right-32 w-96 h-96 rounded-full bg-blue-600/20 blur-3xl" />
