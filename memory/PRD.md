@@ -44,8 +44,13 @@ på logistik admin-siden. Fuld specifikation: `PRICING_SPEC.md`.
 - **Chauffør:** ser afregningsform (aldrig beløb, undtagen timeprisen), vælger
   Med/Uden hænger pr. tur mens den kører, og kan anmode om rettelse af tid,
   hænger og ventetid efter turen → **Godkendelser** hos logistik admin.
-- **Dagrapport-PDF:** viser nu alle arbejds-/pauseperioder, alle ture afsluttet
-  på dagen og pause pr. tur. "Timer i dag" står ikke længere på 0 efter login.
+- **Dagrapport-PDF:** nyt design (liggende A4, tabeller, nøgletal øverst) i
+  `frontend/src/lib/dayReportPdf.js`, fælles for chauffør og Arkiv. Viser alle
+  arbejds-/pauseperioder, alle ture afsluttet på dagen, pause i tur, netto-tid,
+  afregning (fast/timepris + om pausen fratrækkes) og afregnet tid. I Arkiv
+  bygges PDF'en FRISKT ved Download/ZIP (`/admin/day-report`), så godkendte
+  rettelser og prisregler altid er med; den gemte fil ligger under "Original".
+  "Timer i dag" står ikke længere på 0 efter login.
 - **Logistik admin → Arkiv → Ture:** nyt tur-overblik (egne ture).
 - Motor: `backend/pricing.py` (rene funktioner), tests i
   `backend/tests/test_pricing_engine.py`. Nye collections: `price_rules`,

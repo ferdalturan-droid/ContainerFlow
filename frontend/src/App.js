@@ -24,6 +24,8 @@ import SuperAdminPage from "@/pages/SuperAdminPage";
 import CustomerAdminPage from "@/pages/CustomerAdminPage";
 import LocationAdminPage, { ArchiveTab as TourArchive } from "@/pages/LocationAdminPage";
 import EconomyPanel from "@/pages/EconomyPanel";
+import { buildDayReportPdf, dayReportFileName } from "@/lib/dayReportPdf";
+import { saveAs } from "file-saver";
 import GenbrugPladsPage from "@/pages/GenbrugPladsPage";
 import PladsPickerPage from "@/pages/PladsPickerPage";
 import AdminPladsAddressesModal from "@/components/AdminPladsAddressesModal";
@@ -129,226 +131,6 @@ const getDriverColor = (name) => {
 const getCurrentTime = () => {
   const now = new Date();
   return now.toTimeString().slice(0, 5);
-};
-
-// 2026-10-16: Fælles PDF for chaufførens dagrapport (manuel download OG
-// "Afslut dag"). Bygger på /driver/day-report: alle arbejds- og pause-
-// perioder (ikke kun sidste IND/UD) + alle ture chaufføren afsluttede på
-// dagen, med start/slut/varighed pr. tur.
-const fmtMinutes = (m) => {
-  if (m == null || Number.isNaN(m)) return "-";
-  return `${Math.floor(m / 60)}t ${String(m % 60).padStart(2, "0")}m`;
-};
-
-const buildDayReportPdf = ({ title, report, driverName, vehicleReg, date, notes, footerLabel }) => {
-  const doc = new jsPDF();
-  const pageWidth = doc.internal.pageSize.getWidth();
-  const pageHeight = doc.internal.pageSize.getHeight();
-  const red = [220, 38, 38];
-  const ts = report?.time_summary || {};
-  const tours = report?.tours || [];
-  const slices = [...(ts.work_slices || []), ...(ts.pause_slices || [])]
-    .sort((a, b) => (a.start_time || "").localeCompare(b.start_time || ""));
-  const totalWeight = tours.reduce((sum, t) => sum + (Number(t.weight) || 0), 0);
-  const pladsNames = [...new Set(tours.map(t => t.plads).filter(Boolean))].join(", ") || "-";
-  const formattedDate = (date || "").split("-").reverse().join(".");
-  const pageBreak = (y, need = 25) => {
-    if (y > pageHeight - need) { doc.addPage(); return 15; }
-    return y;
-  };
-  const label = (txt, x, y) => {
-    doc.setFont("helvetica", "bold"); doc.setFontSize(9); doc.setTextColor(...red); doc.text(txt, x, y);
-  };
-  const value = (txt, x, y) => {
-    doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(0, 0, 0); doc.text(String(txt), x, y);
-  };
-
-  // Header
-  doc.setFillColor(...red);
-  doc.rect(0, 0, pageWidth, 35, "F");
-  doc.setTextColor(255, 255, 255);
-  doc.setFontSize(24);
-  doc.setFont("helvetica", "bold");
-  doc.text("ContainerFlow", 14, 20);
-  doc.setFontSize(16);
-  doc.text(title, pageWidth - 14, 18, { align: "right" });
-  doc.setFontSize(10);
-  doc.setFont("helvetica", "normal");
-  doc.text(`Dato: ${formattedDate}`, pageWidth - 14, 26, { align: "right" });
-
-  // Info box
-  doc.setDrawColor(...red);
-  doc.setLineWidth(0.5);
-  doc.rect(14, 42, pageWidth - 28, 40);
-  const rows = [50, 58, 66, 74];
-  const rx = pageWidth / 2 + 10;
-  const vx = pageWidth / 2 + 42;
-  label("CHAUFFØR NAVN:", 18, rows[0]); value(driverName || "Ikke valgt", 55, rows[0]);
-  label("VOGN NR.:", 18, rows[1]);      value(vehicleReg || "-", 55, rows[1]);
-  label("PLADS:", 18, rows[2]);         value(doc.splitTextToSize(pladsNames, pageWidth / 2 - 50)[0], 55, rows[2]);
-  label("TURE / VÆGT:", 18, rows[3]);   value(`${tours.length} / ${totalWeight} kg`, 55, rows[3]);
-  label("FØRSTE START:", rx, rows[0]);  value(ts.start || "-", vx, rows[0]);
-  label("SIDSTE SLUT:", rx, rows[1]);   value(ts.end ? `${ts.end}${ts.open ? " (i gang)" : ""}` : (ts.open ? "i gang" : "-"), vx, rows[1]);
-  label("ARBEJDSTID:", rx, rows[2]);    value(ts.any ? fmtMinutes(ts.work_min) : "-", vx, rows[2]);
-  label("PAUSE:", rx, rows[3]);         value(ts.any ? fmtMinutes(ts.pause_min) : "-", vx, rows[3]);
-
-  // Arbejdstid - every work/pause period
-  let y = 92;
-  doc.setFont("helvetica", "bold");
-  doc.setFontSize(10);
-  doc.setTextColor(...red);
-  doc.text("ARBEJDSTID - PERIODER", 14, y);
-  y += 4;
-  if (slices.length === 0) {
-    value("Ingen stemplinger registreret denne dag.", 16, y + 5);
-    y += 14;
-  } else {
-    doc.setFillColor(...red);
-    doc.rect(14, y, pageWidth - 28, 7, "F");
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(7);
-    doc.setTextColor(255, 255, 255);
-    doc.text("TYPE", 18, y + 5);
-    doc.text("FRA", 60, y + 5);
-    doc.text("TIL", 85, y + 5);
-    doc.text("VARIGHED", 110, y + 5);
-    doc.text("BEMÆRKNING", 140, y + 5);
-    y += 12;
-    slices.forEach((s) => {
-      y = pageBreak(y);
-      const isPause = s.slice_type === "pause";
-      if (isPause) {
-        doc.setFillColor(255, 237, 213);
-        doc.rect(14, y - 5, pageWidth - 28, 8, "F");
-      }
-      doc.setFontSize(8);
-      doc.setFont("helvetica", "bold");
-      doc.setTextColor(...(isPause ? [194, 65, 12] : [22, 101, 52]));
-      doc.text(isPause ? "Pause" : "Arbejde", 18, y);
-      doc.setFont("helvetica", "normal");
-      doc.setTextColor(0, 0, 0);
-      doc.text(s.start_time || "-", 60, y);
-      doc.text(s.end_time || "i gang", 85, y);
-      doc.text(fmtMinutes(s.duration_minutes), 110, y);
-      const note = [s.manual ? "Manuel" : "", s.reason || ""].filter(Boolean).join(": ");
-      if (note) doc.text(doc.splitTextToSize(note, pageWidth - 14 - 140)[0], 140, y);
-      doc.setDrawColor(230, 230, 230);
-      doc.setLineWidth(0.2);
-      doc.line(14, y + 3, pageWidth - 14, y + 3);
-      y += 8;
-    });
-    y = pageBreak(y);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(8);
-    doc.setTextColor(0, 0, 0);
-    const gap = ts.gap_min ? `     Ikke stemplet: ${fmtMinutes(ts.gap_min)}` : "";
-    doc.text(`Arbejde i alt: ${fmtMinutes(ts.work_min)}     Pause i alt: ${fmtMinutes(ts.pause_min)}${gap}`, 18, y + 1);
-    y += 12;
-  }
-
-  // Ture - grouped by plads, with start/slut/varighed per tour
-  y = pageBreak(y, 40);
-  doc.setFont("helvetica", "bold");
-  doc.setFontSize(10);
-  doc.setTextColor(...red);
-  doc.text(`TURE: ${tours.length} | TOTAL: ${totalWeight} kg`, 14, y);
-  y += 4;
-  if (tours.length === 0) {
-    value("Ingen afsluttede ture denne dag.", 16, y + 5);
-    y += 14;
-  } else {
-    doc.setFillColor(...red);
-    doc.rect(14, y, pageWidth - 28, 8, "F");
-    doc.setFontSize(5.5);
-    doc.setTextColor(255, 255, 255);
-    doc.text("NR", 16, y + 5.5);
-    doc.text("FRAKTION", 24, y + 5.5);
-    doc.text("MODTAGER", 52, y + 5.5);
-    doc.text("CONT.", 86, y + 5.5);
-    doc.text("ADRESSE", 100, y + 5.5);
-    doc.text("START", 136, y + 5.5);
-    doc.text("SLUT", 148, y + 5.5);
-    doc.text("PAUSE", 160, y + 5.5);
-    doc.text("TID", 172, y + 5.5);
-    doc.text("VÆGT", 186, y + 5.5);
-    y += 11;
-    let lastPlads = "";
-    let tourNum = 0;
-    tours.forEach((item) => {
-      y = pageBreak(y);
-      const plads = item.plads || "-";
-      if (plads !== lastPlads) {
-        if (lastPlads !== "") y += 2;
-        y = pageBreak(y, 30);
-        doc.setFillColor(...red);
-        doc.rect(14, y - 3, pageWidth - 28, 10, "F");
-        doc.setTextColor(255, 255, 255);
-        doc.setFontSize(8);
-        doc.setFont("helvetica", "bold");
-        doc.text(plads.toUpperCase(), 18, y + 4);
-        lastPlads = plads;
-        y += 11;
-        tourNum = 0;
-      }
-      tourNum++;
-      if (tourNum % 2 === 0) {
-        doc.setFillColor(248, 250, 252);
-        doc.rect(14, y - 5, pageWidth - 28, 9, "F");
-      }
-      doc.setDrawColor(230, 230, 230);
-      doc.setLineWidth(0.2);
-      doc.line(14, y + 4, pageWidth - 14, y + 4);
-      doc.setFontSize(6);
-      doc.setFont("helvetica", "normal");
-      doc.setTextColor(0, 0, 0);
-      doc.text(`${tourNum}`, 16, y + 1);
-      doc.text((item.fraction || "").substring(0, 14), 24, y + 1);
-      if (item.is_same_day) {
-        doc.setTextColor(234, 88, 12);
-        doc.setFont("helvetica", "bold");
-        doc.text("SD", 19, y + 1);
-        doc.setFont("helvetica", "normal");
-        doc.setTextColor(0, 0, 0);
-      }
-      doc.text((item.facility || "-").substring(0, 18), 52, y + 1);
-      doc.text((item.container || "-").substring(0, 8), 86, y + 1);
-      doc.text((item.address || "").substring(0, 22), 100, y + 1);
-      doc.setTextColor(22, 163, 74);
-      doc.text(item.start_time || "-", 136, y + 1);
-      doc.text(item.end_time || "-", 148, y + 1);
-      doc.setTextColor(194, 65, 12);
-      doc.text(item.pause_min ? fmtMinutes(item.pause_min) : "-", 160, y + 1);
-      doc.setTextColor(0, 0, 0);
-      doc.setFont("helvetica", "bold");
-      // TID = turens tid uden pauser registreret under "Tid"
-      doc.text(item.duration_min != null ? fmtMinutes(Math.max(0, item.duration_min - (item.pause_min || 0))) : "-", 172, y + 1);
-      doc.text(item.weight ? `${item.weight} kg` : "-", 186, y + 1);
-      doc.setFont("helvetica", "normal");
-      y += 9;
-    });
-  }
-
-  if (notes) {
-    y = pageBreak(y + 5, 30);
-    doc.setFont("helvetica", "bold");
-    doc.setTextColor(...red);
-    doc.setFontSize(9);
-    doc.text("BEMÆRKNINGER:", 18, y);
-    doc.setFont("helvetica", "normal");
-    doc.setTextColor(0, 0, 0);
-    doc.setFontSize(8);
-    doc.text(doc.splitTextToSize(notes, pageWidth - 40), 18, y + 6);
-  }
-
-  const totalPages = doc.internal.getNumberOfPages();
-  for (let i = 1; i <= totalPages; i++) {
-    doc.setPage(i);
-    doc.setFontSize(7);
-    doc.setTextColor(128, 128, 128);
-    doc.text(`${footerLabel} - ${new Date().toLocaleString("da-DK")} | ContainerFlow | Side ${i}/${totalPages}`,
-      pageWidth / 2, pageHeight - 8, { align: "center" });
-  }
-  return doc;
 };
 
 // Open address in maps
@@ -8886,27 +8668,48 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
               };
 
               // Bulk PDF ZIP download
+              // 2026-10-16: Dagrapporter bygges FRISKT ud fra nuværende data
+              // (alle stemplinger, ture, godkendte rettelser og prisreglernes
+              // pause-regel) - ikke den fil chaufføren gemte ved "Afslut dag".
+              const freshDayReportPdf = (a, rep) => buildDayReportPdf({
+                title: "Dagrapport", report: rep, driverName: a.driver_name,
+                vehicleReg: rep.vehicle_reg || a.vehicle_reg, date: a.report_date, notes: rep.notes,
+              });
+              const downloadFreshPdf = async (a) => {
+                try {
+                  const { data: rep } = await axios.get(`${API}/admin/day-report/${a.id}`);
+                  freshDayReportPdf(a, rep).save(dayReportFileName("dagrapport", a.report_date, a.driver_name));
+                } catch (e) {
+                  toast.error(formatApiError(e) + " - åbner den gemte original i stedet");
+                  window.open(`${API}/pdf-archive/${a.id}`, "_blank");
+                }
+              };
               const downloadPdfZip = async (rows, filename) => {
-                const ids = rows.filter(a => a.has_pdf !== false).map(a => a.id);
-                if (ids.length === 0) {
+                const list = rows.filter(a => a.has_pdf !== false);
+                if (list.length === 0) {
                   toast.error("Ingen PDF'er at downloade");
                   return;
                 }
                 try {
-                  toast.info(`Henter ${ids.length} PDF'er...`);
-                  const res = await axios.post(`${API}/pdf-archive/zip`, { ids, filename }, { responseType: "blob" });
-                  const blob = new Blob([res.data], { type: "application/zip" });
-                  const url = URL.createObjectURL(blob);
-                  const link = document.createElement("a");
-                  link.href = url;
-                  link.download = filename;
-                  document.body.appendChild(link);
-                  link.click();
-                  document.body.removeChild(link);
-                  URL.revokeObjectURL(url);
-                  toast.success(`${ids.length} PDF'er downloadet`);
+                  toast.info(`Bygger ${list.length} PDF'er...`);
+                  const { data: reps } = await axios.post(`${API}/admin/day-reports`, { ids: list.map(a => a.id) });
+                  const { default: JSZip } = await import("jszip");
+                  const zip = new JSZip();
+                  const used = {};
+                  let skipped = 0;
+                  reps.forEach(rep => {
+                    const a = list.find(x => x.id === rep.archive_id);
+                    if (!a || rep.error) { skipped += 1; return; }
+                    let name = dayReportFileName("dagrapport", a.report_date, a.driver_name);
+                    used[name] = (used[name] || 0) + 1;
+                    if (used[name] > 1) name = name.replace(/\.pdf$/, `_${used[name]}.pdf`);
+                    zip.file(name, freshDayReportPdf(a, rep).output("arraybuffer"));
+                  });
+                  const blob = await zip.generateAsync({ type: "blob" });
+                  saveAs(blob, filename);
+                  toast.success(`${list.length - skipped} PDF'er downloadet${skipped ? ` (${skipped} kunne ikke bygges)` : ""}`);
                 } catch (e) {
-                  toast.error("Fejl ved ZIP download");
+                  toast.error("Fejl ved ZIP download: " + formatApiError(e));
                 }
               };
               const months = {};
@@ -9183,17 +8986,26 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
                                           <td className="p-2 font-mono text-xs text-slate-600 dark:text-slate-300" title="Fra første IND til sidste UD (inkl. pauser og huller)">{spanM > 0 ? fmtDur(spanM) : "-"}</td>
                                           <td className="p-2">
                                             {a.has_pdf !== false ? (
-                                              <a
-                                                href={`${API}/pdf-archive/${a.id}`}
-                                                download={a.file_name || `dagrapport_${a.report_date}_${a.driver_name || "rapport"}.pdf`}
-                                                target="_blank"
-                                                rel="noopener noreferrer"
-                                                className="px-3 py-1.5 bg-purple-500 hover:bg-purple-600 text-white rounded inline-flex items-center gap-1 text-xs font-bold transition-colors"
-                                                title={a.file_name || "Download PDF rapport"}
-                                                data-testid={`archive-pdf-download-${a.id}`}
-                                              >
-                                                <Download className="w-3.5 h-3.5" /> Download
-                                              </a>
+                                              <div className="flex items-center gap-2">
+                                                <button
+                                                  type="button"
+                                                  onClick={() => downloadFreshPdf(a)}
+                                                  className="px-3 py-1.5 bg-purple-500 hover:bg-purple-600 text-white rounded inline-flex items-center gap-1 text-xs font-bold transition-colors"
+                                                  title="Dagrapport bygget ud fra de nuværende stemplinger, ture og godkendte rettelser"
+                                                  data-testid={`archive-pdf-download-${a.id}`}
+                                                >
+                                                  <Download className="w-3.5 h-3.5" /> Download
+                                                </button>
+                                                <a
+                                                  href={`${API}/pdf-archive/${a.id}`}
+                                                  target="_blank"
+                                                  rel="noopener noreferrer"
+                                                  className="text-[11px] text-slate-500 hover:text-purple-600 underline"
+                                                  title="Den PDF chaufføren gemte ved Afslut dag (uændret)"
+                                                >
+                                                  Original
+                                                </a>
+                                              </div>
                                             ) : (
                                               <span className="px-2 py-1 bg-slate-200 text-slate-500 rounded text-xs italic" title="PDF data ikke gemt">PDF mangler</span>
                                             )}
@@ -16793,11 +16605,9 @@ function App() {
     try {
       const { data: report } = await axios.get(`${API}/driver/day-report`, { params: { date: reportDate } });
       const doc = buildDayReportPdf({
-        title: "KØRSELSRAPPORT", report, driverName, vehicleReg, date: reportDate,
-        notes, footerLabel: "Genereret",
+        title: "Kørselsrapport", report, driverName, vehicleReg, date: reportDate, notes,
       });
-      const formattedDate = reportDate.split("-").reverse().join(".");
-      doc.save(`korselsrapport_${formattedDate}_${driverName || "rapport"}.pdf`);
+      doc.save(dayReportFileName("korselsrapport", reportDate, driverName));
       toast.success("PDF genereret!");
     } catch (error) {
       console.error("PDF error:", error);
@@ -16906,8 +16716,7 @@ function App() {
       const ts = report.time_summary || {};
       const formattedDate = reportDate.split("-").reverse().join(".");
       const doc = buildDayReportPdf({
-        title: "DAGRAPPORT", report, driverName, vehicleReg, date: reportDate,
-        notes, footerLabel: "Dagrapport",
+        title: "Dagrapport", report, driverName, vehicleReg, date: reportDate, notes,
       });
       const pdfBase64 = doc.output('datauristring').split(',')[1];
       const reportPlads = [...new Set((report.tours || []).map(t => t.plads).filter(Boolean))].join(", ")

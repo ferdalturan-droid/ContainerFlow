@@ -5923,26 +5923,23 @@ def _tour_duration_min(start_hhmm: str, end_hhmm: str) -> Optional[int]:
 # blev desuden kun taget med hvis turens `date` var rapportdagen — en tur
 # bestilt til i morgen men kørt i dag manglede. Nu: alle stemplinger
 # (samme summering som PDF-arkivet) + alle ture chaufføren AFSLUTTEDE på dagen.
-@api_router.get("/driver/day-report")
-async def driver_day_report(
-    date: str,
-    token_payload: dict = Depends(require_role("driver")),
-):
-    driver_id = token_payload.get("sub") or token_payload.get("user_id") or ""
-    user = await _raw_db.users.find_one({"id": driver_id}, {"_id": 0, "name": 1}) or {}
+async def _build_day_report(driver_id: str, day: str) -> dict:
+    """Datagrundlaget for dagrapport-PDF'en (chaufførens egen + logistik
+    admins arkiv). Bygges altid friskt fra stemplinger, ture, godkendte
+    rettelser og prisreglernes pause-regel - derfor er PDF'en aldrig et
+    forældet øjebliksbillede."""
+    user = await _raw_db.users.find_one({"id": driver_id}, {"_id": 0, "name": 1, "company_id": 1}) or {}
     driver_name = user.get("name") or ""
-
     entries = await _raw_db.driver_time_entries.find(
-        {"driver_id": driver_id, "date": date, **_not_deleted_filter()}, {"_id": 0},
+        {"driver_id": driver_id, "date": day, **_not_deleted_filter()}, {"_id": 0},
     ).to_list(500)
     now = datetime.now(DK_TZ)
-    is_today = date == now.strftime("%Y-%m-%d")
+    is_today = day == now.strftime("%Y-%m-%d")
     summary = _summarize_day_entries(
         entries,
-        today_str=date if is_today else "",
+        today_str=day if is_today else "",
         now_hhmm=now.strftime("%H:%M") if is_today else "",
     )
-
     mine = [{"claimed_by_id": driver_id}]
     if driver_name:
         mine.append({"claimed_by": driver_name})
@@ -5951,9 +5948,9 @@ async def driver_day_report(
             {"completed": True},
             {"$or": mine},
             {"$or": [
-                {"completed_at": {"$regex": f"^{re.escape(date)}"}},
-                {"completed_at": {"$in": ["", None]}, "date": date},
-                {"completed_at": {"$exists": False}, "date": date},
+                {"completed_at": {"$regex": f"^{re.escape(day)}"}},
+                {"completed_at": {"$in": ["", None]}, "date": day},
+                {"completed_at": {"$exists": False}, "date": day},
             ]},
             {"$or": [{"is_pause": {"$exists": False}}, {"is_pause": False}]},
             {"$or": [{"deleted": {"$exists": False}}, {"deleted": False}]},
@@ -5961,38 +5958,101 @@ async def driver_day_report(
         ]},
         {"_id": 0, "receipt_image": 0},
     ).to_list(1000)
+    # Afregnings-tid pr. tur (samme motor som Økonomi): pause-regel,
+    # deling ved samtidige ture og afrunding - men ingen beløb.
+    logi = user.get("company_id") or ""
+    rules = await _active_rules(logi) if logi else []
+    ctx = _PricingContext(logi, await _price_settings(logi), rules)
+    await ctx.load(tours)
+    pauses = [(_time_to_min(p.get("start_time") or ""), _time_to_min(p.get("effective_end") or p.get("end_time") or ""))
+              for p in summary.get("pause_slices") or []]
     out_tours = []
     for t in tours:
-        start = t.get("on_way_time") or ""
-        end = t.get("time") or ""
+        start, end = _tour_times(t)
+        s_min, e_min = _time_to_min(start), _time_to_min(end)
+        pause_min = 0
+        if s_min >= 0 and e_min > s_min:
+            pause_min = sum(max(0, min(e_min, pe) - max(s_min, ps)) for ps, pe in pauses if ps >= 0 and pe > ps)
+        base, _sur = _pricing.select_rules(rules, ctx.attrs(t))
+        p = (base or {}).get("pricing") or {}
+        po = t.get("price_override") or {}
+        model = "fixed" if po.get("mode") == "fixed" else (p.get("model") or "")
+        deduct = (t.get("fact_overrides") or {}).get("deduct_pause", p.get("deduct_pause", True))
+        price = ctx.price(t)
+        tm = price.get("time") or {}
         out_tours.append({
             "id": t.get("id", ""),
             "date": t.get("date", ""),
             "plads": t.get("plads", ""),
             "fraction": t.get("fraction", ""),
-            "facility": t.get("facility", ""),
+            "task_type": t.get("tour_type") or "normal",
+            "facility": ctx.delivery_label(t) or t.get("facility", ""),
             "container": t.get("container", ""),
             "address": t.get("address", ""),
             "weight": t.get("weight"),
             "is_same_day": bool(t.get("is_same_day")),
-            "tour_type": t.get("tour_type") or "normal",
             "tour_number": t.get("tour_number", ""),
+            "used_trailer": bool(_fact(t, "used_trailer", t.get("used_trailer"))),
+            "waiting_min": int(_fact(t, "waiting_min", 0) or 0),
             "start_time": start,
             "end_time": end,
             "duration_min": _tour_duration_min(start, end),
+            "pause_min": pause_min,
+            "billing": {
+                "model": model,
+                "deduct_pause": bool(deduct) if model == "hourly" else None,
+                "shared_min": tm.get("shared_min") or 0,
+                "billable_min": tm.get("billable_min"),
+                "rounding": tm.get("rounding") or "",
+                "corrected": bool(t.get("fact_overrides")),
+            },
             "completed_at": t.get("completed_at", ""),
         })
-    # 2026-10-16: Pause (fra "Tid") der faldt inden for turens tidsrum - så
-    # PDF'en kan vise turens tid både med og uden pause.
-    pauses = [(_time_to_min(p.get("start_time") or ""), _time_to_min(p.get("effective_end") or p.get("end_time") or ""))
-              for p in summary.get("pause_slices") or []]
-    for t in out_tours:
-        s, e = _time_to_min(t["start_time"]), _time_to_min(t["end_time"])
-        t["pause_min"] = 0
-        if s >= 0 and e > s:
-            t["pause_min"] = sum(max(0, min(e, pe) - max(s, ps)) for ps, pe in pauses if ps >= 0 and pe > ps)
-    out_tours.sort(key=lambda x: (x["plads"], x["end_time"] or "99:99"))
-    return {"date": date, "driver_name": driver_name, "time_summary": summary, "tours": out_tours}
+    out_tours.sort(key=lambda x: (x["start_time"] or "99:99", x["plads"]))
+    return {"date": day, "driver_name": driver_name, "time_summary": summary, "tours": out_tours}
+
+
+@api_router.get("/driver/day-report")
+async def driver_day_report(
+    date: str,
+    token_payload: dict = Depends(require_role("driver")),
+):
+    return await _build_day_report(token_payload.get("sub") or token_payload.get("user_id") or "", date)
+
+
+@api_router.get("/admin/day-report/{archive_id}")
+async def admin_day_report(archive_id: str,
+                           token_payload: dict = Depends(require_role("logistics_admin", "super_admin"))):
+    """Logistik admin åbner en dagrapport fra Arkiv: bygges friskt ud fra
+    nuværende data (inkl. godkendte rettelser), ikke den gemte fil."""
+    a = await _raw_db.pdf_archives.find_one({"id": archive_id}, {"_id": 0, "file_data": 0})
+    if not a:
+        raise HTTPException(status_code=404, detail="Dagrapport ikke fundet")
+    q: Dict[str, Any] = {"role": "driver", "name": a.get("driver_name") or ""}
+    if token_payload.get("role") == "logistics_admin":
+        me = await _raw_db.users.find_one({"id": token_payload.get("sub")}, {"_id": 0, "company_id": 1}) or {}
+        q["company_id"] = me.get("company_id")
+    driver = await _raw_db.users.find_one(q, {"_id": 0, "id": 1})
+    if not driver:
+        raise HTTPException(status_code=404, detail="Chaufføren findes ikke længere")
+    rep = await _build_day_report(driver["id"], a.get("report_date") or "")
+    rep["vehicle_reg"] = a.get("vehicle_reg") or ""
+    rep["notes"] = a.get("notes") or ""
+    return rep
+
+
+@api_router.post("/admin/day-reports")
+async def admin_day_reports(body: dict = Body(...),
+                            token_payload: dict = Depends(require_role("logistics_admin", "super_admin"))):
+    """Samme som /admin/day-report/{id} for mange dagrapporter i ét kald
+    (ZIP-download af en hel måned uden at ramme rate-limit)."""
+    out = []
+    for aid in [str(x) for x in (body.get("ids") or [])][:500]:
+        try:
+            out.append({"archive_id": aid, **(await admin_day_report(aid, token_payload))})
+        except HTTPException as e:
+            out.append({"archive_id": aid, "error": e.detail})
+    return out
 
 
 # Fase 15.3 (2026-06-19): Logistik Admin overblik over alle chaufførers
