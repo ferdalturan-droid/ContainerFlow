@@ -38,10 +38,10 @@ Login locally: `doganmiketuran@gmail.com` + the local password.
 ## 4. Put it live (Scaleway)
 | Step | Command / action |
 |---|---|
-| 1. Build + upload (use the next number every time) | `./scripts/deploy-scaleway.sh v4` |
+| 0. See used versions + which number is next | `./scripts/deploy-scaleway.sh` |
+| 1. Build + upload with that number | `./scripts/deploy-scaleway.sh v4` |
 | 2. Switch the live site to it | console.scaleway.com → Serverless → Containers → containerflow → image tag → `v4` → Deploy |
 | 3. Check | open https://containerflow.dk |
-| Which versions were deployed | `git tag -l "deploy-*"` |
 | Something broke after deploy | In the Scaleway console set the tag back to the previous version → Deploy |
 
 ---
