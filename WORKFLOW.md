@@ -11,7 +11,8 @@ All commands are typed in **Terminal** (⌘ Cmd + Space → type `Terminal` → 
 | Go to the project | `cd ~/containerflow/super-admin-sayfasi--main` |
 | Start the app on your Mac | `./scripts/local-test.sh` → open http://localhost:8080 |
 
-Login locally: `doganmiketuran@gmail.com` + the local password.
+Login locally: any email from `local-logins.txt` (super admin, customer admins, location admins, employees, drivers).
+All test users share one password: `LOCAL_TEST_PASSWORD` in `.env.local`.
 
 ---
 
@@ -21,8 +22,10 @@ Login locally: `doganmiketuran@gmail.com` + the local password.
 | After every code change (rebuilds + restarts) | `./scripts/local-test.sh` |
 | See which files changed | `git status` |
 | See errors from the app (stop with Ctrl + C) | `docker logs -f cf-app` |
-| Forgot the local password | `grep LOCAL_SUPERADMIN_PASSWORD .env.local` |
-| Wipe local test data and start fresh | `./scripts/local-test.sh --reset` |
+| Forgot the local password | `grep LOCAL_TEST_PASSWORD .env.local` |
+| See the test logins (who is who) | `cat local-logins.txt` |
+| See invitation/reset emails the app made | `./scripts/local-test.sh --mails` |
+| Wipe local data and create clean test data (~10 min) | `./scripts/local-test.sh --seed` |
 | Page looks blank/old in the browser | ⌘ Cmd + Shift + R (hard refresh) |
 
 ---
