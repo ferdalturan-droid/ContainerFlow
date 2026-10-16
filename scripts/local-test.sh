@@ -121,5 +121,11 @@ start_app "$ENV_FILE"
 
 echo "ContainerFlow is running:  http://localhost:8080"
 echo "Logins:                    local-logins.txt  (password: LOCAL_TEST_PASSWORD in $ENV_FILE)"
-grep -q '^RESEND_API_KEY=' "$ENV_FILE" && echo "Emails:                    sent for real via Resend" \
-  || echo "Emails:                    not sent - see them with ./scripts/local-test.sh --mails"
+RESEND_KEY=$(val RESEND_API_KEY || true)
+if [ -z "$RESEND_KEY" ]; then
+  echo "Emails:                    not sent - see them with ./scripts/local-test.sh --mails"
+elif [[ "$RESEND_KEY" != re_* ]]; then
+  echo "Emails:                    WARNING - RESEND_API_KEY in $ENV_FILE does not look like a Resend key (should start with re_)"
+else
+  echo "Emails:                    sent for real via Resend"
+fi
