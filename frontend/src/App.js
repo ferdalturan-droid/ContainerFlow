@@ -10,7 +10,7 @@ import {
   Wand2, Plus, Trash2, Clock, Weight, X, 
   Pause, RotateCcw, Download, Settings, ChevronDown, Calendar,
   Shield, Send, Eye, Phone, Car, BarChart3, Navigation, Edit2, LogOut,
-  History, Building2, ChevronLeft, ChevronRight, MessageCircle, GripVertical,
+  History, Building2, ChevronLeft, ChevronRight, MessageCircle, MessageSquare, GripVertical,
   AlertTriangle, AlertCircle, Circle, WifiOff, Wifi, Archive,
   Camera, Image, ZoomIn, RotateCw, Crop, ScanLine, FolderOpen, FileUp, Megaphone,
   Sun, Moon, MoreVertical, ExternalLink, DollarSign, Loader2, Search, Wrench, Ruler, Upload, Leaf, Package2, UserCheck, Check, ListFilter, ChevronsDown, ChevronsUp, Flag, Filter, Save, XCircle, RefreshCw
@@ -22,7 +22,10 @@ import SetPasswordPage from "@/pages/SetPasswordPage";
 import PrijsPage from "@/pages/PrijsPage";
 import SuperAdminPage from "@/pages/SuperAdminPage";
 import CustomerAdminPage from "@/pages/CustomerAdminPage";
-import LocationAdminPage, { ArchiveTab as TourArchive } from "@/pages/LocationAdminPage";
+import LocationAdminPage from "@/pages/LocationAdminPage";
+import ToursWorkspace from "@/pages/ToursWorkspace";
+import AdminTabNav from "@/components/AdminTabNav";
+import DriverTourCard, { DriverChatSheet } from "@/components/DriverTourCard";
 import EconomyPanel from "@/pages/EconomyPanel";
 import LogisticsLocations from "@/pages/LogisticsLocations";
 import { buildDayReportPdf, dayReportFileName } from "@/lib/dayReportPdf";
@@ -6721,7 +6724,7 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
   const [newPladsLng, setNewPladsLng] = useState("");
   const [editingPlads, setEditingPlads] = useState(null);
   const [reportHistory, setReportHistory] = useState([]);
-  const [activeTab, setActiveTab] = useState("statistics"); // statistics (default), tours, schedule, drivers, plads, archives (merged with receipts), priser
+  const [activeTab, setActiveTab] = useState("tours"); // tours (default), schedule, drivers, statistics (Rapportering), priser | Mere: plads, archives, settings
   const [archivesSubTab, setArchivesSubTab] = useState("pdf"); // pdf | receipts | tours - within "Arkiv" tab
   const [receiptsArchiveView, setReceiptsArchiveView] = useState("table"); // table | drivers - Fase 17 merged archive view mode
   
@@ -6943,8 +6946,8 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
   }, [fetchDailyOverview, fetchAdminMessages, fetchPdfArchives, actingCompanyId]);
 
   // Fetch statistics when tab is active
-  const fetchStatistics = useCallback(async () => {
-    setStatsLoading(true);
+  const fetchStatistics = useCallback(async (silent = false) => {
+    if (silent !== true) setStatsLoading(true);
     try {
       const res = await axios.get(`${API}/admin/statistics?months=${statsPeriod}`);
       setStatisticsData(res.data);
@@ -6955,8 +6958,16 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
     }
   }, [statsPeriod]);
 
+  // 2026-10-16: Rapportering er live - genindlæses hvert 30. sekund mens fanen
+  // er åben og synlig, og straks når man vender tilbage til vinduet.
   useEffect(() => {
-    if (activeTab === "statistics") fetchStatistics();
+    if (activeTab !== "statistics") return;
+    fetchStatistics();
+    const tick = () => { if (!document.hidden) fetchStatistics(true); };
+    const iv = setInterval(tick, 30000);
+    document.addEventListener("visibilitychange", tick);
+    window.addEventListener("focus", tick);
+    return () => { clearInterval(iv); document.removeEventListener("visibilitychange", tick); window.removeEventListener("focus", tick); };
   }, [activeTab, fetchStatistics, actingCompanyId]);
   
   // Auto-refresh overview every 15 seconds
@@ -7143,11 +7154,8 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
   // Fase 11 (2026-06-18): Auto-refresh admin tours hvert 5. sekund for at
   // give "near real-time" opdatering på bestillinger fra container-siden
   // og chauffør-handlinger. (Tidligere 10 sekunder.)
-  useEffect(() => {
-    if (!adminReportDate) return;
-    const interval = setInterval(() => { fetchAdminTours(); }, 5000);
-    return () => clearInterval(interval);
-  }, [adminReportId, fetchAdminTours]);
+  // 2026-10-16: 5-sekunders polling fjernet - Ture-arbejdsfladen henter selv
+  // (hvert 10. sek. og kun mens fanen er synlig).
 
 
   // Admin auto-optimize when plads changes or tours change
@@ -7761,8 +7769,8 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-900" data-testid="admin-page">
       {/* Admin Header - sticky, dark, tabs inline (matches CustomerAdminPage style) */}
-      <header className="bg-[#0F172A] text-white sticky top-0 z-20 shadow-md">
-        <div className="max-w-screen-2xl mx-auto px-8 py-3 flex items-center justify-between gap-4">
+      <header className="bg-[#0F172A] text-white sticky top-0 z-20 shadow-md" style={{ paddingTop: "env(safe-area-inset-top)" }}>
+        <div className="max-w-screen-2xl mx-auto px-3 sm:px-8 py-2.5 sm:py-3 flex items-center justify-between gap-2 sm:gap-4">
           <div className="flex items-center gap-3 min-w-0">
             <div className="w-10 h-10 rounded-xl bg-red-600 flex items-center justify-center shadow-lg">
               <Shield className="w-5 h-5 text-white" />
@@ -7806,41 +7814,30 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
           </div>
         </div>
 
-        {/* Tab navigation INSIDE the dark header - pill style, red accent */}
-        <div className="max-w-screen-2xl mx-auto px-8 flex gap-1 overflow-x-auto scrollbar-none border-t border-slate-800">
-          {[
-            { id: "statistics", label: "Statistik",        icon: BarChart3,  testid: "admin-statistics-tab" },
-            { id: "tours",      label: "Manuelle ture",    icon: FileText },
-            { id: "schedule",   label: "Planlægning",       icon: Calendar },
-            { id: "drivers",    label: "Chauffører",        icon: Users },
+        {/* 2026-10-16: Daglige faner fremme, resten i "Mere" (samme mønster som
+            Location Admin). Ture er flyttet ud af Arkiv og er nu startfanen. */}
+        <AdminTabNav
+          active={activeTab}
+          onChange={setActiveTab}
+          title={activeCompany ? activeCompany.name : "Logistik-administration"}
+          tabs={[
+            { id: "tours",      label: "Ture",          icon: Truck,      testid: "admin-tab-tours" },
+            { id: "schedule",   label: "Planlægning",   icon: Calendar },
+            { id: "drivers",    label: "Chauffører",    icon: Users },
+            { id: "statistics", label: "Rapportering",  icon: BarChart3,  testid: "admin-statistics-tab" },
+            { id: "priser",     label: "Økonomi",       icon: DollarSign },
+          ]}
+          moreTabs={[
             isPremiumLogistics
-              ? { id: "plads",  label: "Lokationer",        icon: MapPin }
-              : { id: "plads",  label: "Genbrugsplads",     icon: Building2 },
-            { id: "archives",   label: "Arkiv",             icon: Archive,   testid: "admin-archives-tab" },
-            { id: "priser",     label: "Økonomi",           icon: DollarSign },
-            { id: "settings",   label: "Indstillinger",     icon: Settings,  testid: "admin-settings-tab" },
-          ].map(t => {
-            const Icon = t.icon;
-            const active = activeTab === t.id;
-            return (
-              <button
-                key={t.id}
-                onClick={() => setActiveTab(t.id)}
-                data-testid={t.testid || `admin-tab-${t.id}`}
-                className={`px-4 py-2.5 text-sm font-medium flex items-center gap-1.5 whitespace-nowrap border-b-2 transition-colors ${
-                  active
-                    ? "border-red-500 text-white"
-                    : "border-transparent text-slate-400 hover:text-slate-200 hover:border-slate-700"
-                }`}
-              >
-                <Icon className="w-4 h-4" /> {t.label}
-              </button>
-            );
-          })}
-        </div>
+              ? { id: "plads",  label: "Lokationer",    icon: MapPin }
+              : { id: "plads",  label: "Genbrugspladser", icon: Building2 },
+            { id: "archives",   label: "Arkiv",         icon: Archive,    testid: "admin-archives-tab", hint: "PDF og kvitteringer" },
+            { id: "settings",   label: "Indstillinger", icon: Settings,   testid: "admin-settings-tab" },
+          ]}
+        />
       </header>
 
-      <main className="max-w-screen-2xl mx-auto p-8 space-y-6">
+      <main className="max-w-screen-2xl mx-auto px-3 py-4 sm:p-8 space-y-6">
         {/* OVERVIEW TAB - Daily Statistics */}
         {activeTab === "overview" && dailyOverview && (
           <section className="space-y-6">
@@ -8053,9 +8050,17 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
             {/* Period Selector */}
             <div className="bg-white dark:bg-slate-800 rounded-xl shadow-lg p-6">
               <div className="flex items-center justify-between flex-wrap gap-4">
-                <h2 className="font-heading font-bold text-xl flex items-center gap-2">
-                  <BarChart3 className="w-6 h-6 text-orange-500" /> Statistik &amp; Analyse
-                </h2>
+                <div>
+                  <h2 className="font-heading font-bold text-xl flex items-center gap-2">
+                    <BarChart3 className="w-6 h-6 text-orange-500" /> Rapportering
+                  </h2>
+                  {statisticsData?.generated_at && (
+                    <p className="text-xs text-slate-400 mt-1 inline-flex items-center gap-1.5" data-testid="stats-updated-at">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                      Live · opdateret {new Date(statisticsData.generated_at).toLocaleTimeString("da-DK", { hour: "2-digit", minute: "2-digit", second: "2-digit" })} · opdateres hvert 30. sek.
+                    </p>
+                  )}
+                </div>
                 <div className="flex items-center gap-2">
                   <label className="text-sm text-slate-500">Periode:</label>
                   <select
@@ -8069,22 +8074,54 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
                     <option value={6}>Sidste 6 måneder</option>
                     <option value={12}>Sidste år</option>
                   </select>
-                  <button onClick={fetchStatistics} className="px-3 py-2 bg-orange-500 text-white rounded-lg text-sm hover:bg-orange-600" data-testid="stats-refresh-btn">
+                  <button onClick={() => fetchStatistics()} className="px-3 py-2 bg-orange-500 text-white rounded-lg text-sm hover:bg-orange-600" data-testid="stats-refresh-btn" title="Opdatér nu">
                     <RotateCcw className="w-4 h-4" />
                   </button>
                 </div>
               </div>
             </div>
 
-            {statsLoading && (
+            {statsLoading && !statisticsData && (
               <div className="text-center py-12">
                 <div className="w-8 h-8 border-4 border-orange-500 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
                 <p className="text-slate-500">Indlæser statistik...</p>
               </div>
             )}
 
-            {statisticsData && !statsLoading && (
+            {statisticsData && (
               <>
+                {/* I dag - live */}
+                {statisticsData.today && (
+                  <div className="bg-white dark:bg-slate-800 rounded-xl shadow-lg p-5" data-testid="stats-today">
+                    <div className="flex items-center justify-between mb-3">
+                      <h3 className="font-bold text-lg">I dag</h3>
+                      <button onClick={() => setActiveTab("tours")} className="text-sm font-semibold text-emerald-700 hover:underline">Åbn Ture →</button>
+                    </div>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-3">
+                      {[
+                        ["Ture", statisticsData.today.total, "text-slate-800 dark:text-white"],
+                        ["Færdige", statisticsData.today.completed, "text-emerald-600"],
+                        ["På vej", statisticsData.today.on_way, "text-amber-600"],
+                        ["Uden chauffør", statisticsData.today.unassigned, "text-slate-500"],
+                        ["Haster åbne", statisticsData.today.haster_open, "text-rose-600"],
+                        ["Kg i dag", (statisticsData.today.weight || 0).toLocaleString("da-DK"), "text-blue-600"],
+                        ["Ikke kørt (14 d.)", statisticsData.today.overdue, "text-amber-700"],
+                      ].map(([l, v, c]) => (
+                        <div key={l} className="rounded-lg bg-slate-50 dark:bg-slate-900 px-3 py-2.5">
+                          <div className={`text-2xl font-black tabular-nums ${c}`}>{v}</div>
+                          <div className="text-xs text-slate-500">{l}</div>
+                        </div>
+                      ))}
+                    </div>
+                    {statisticsData.today.total > 0 && (
+                      <div className="mt-3 h-2 rounded-full bg-slate-100 dark:bg-slate-700 overflow-hidden flex">
+                        <div className="bg-emerald-500" style={{ width: `${(statisticsData.today.completed / statisticsData.today.total) * 100}%` }} />
+                        <div className="bg-amber-400" style={{ width: `${(statisticsData.today.on_way / statisticsData.today.total) * 100}%` }} />
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* Summary Cards */}
                 <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                   <div className="bg-white dark:bg-slate-800 rounded-xl shadow-lg p-5 text-center" data-testid="stats-total-tours">
@@ -8410,28 +8447,14 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
                 <Camera className="w-4 h-4 inline mr-2" /> Kvittering-arkiv
               </button>
               <button
-                onClick={() => setArchivesSubTab("tours")}
+                onClick={() => setActiveTab("tours")}
                 data-testid="archives-subtab-tours"
-                className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
-                  archivesSubTab === "tours"
-                    ? "bg-blue-600 text-white"
-                    : "text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700"
-                }`}
+                title="Tur-historikken ligger nu under Ture > Historik"
+                className="px-4 py-2 rounded-lg text-sm font-semibold text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700"
               >
-                <Truck className="w-4 h-4 inline mr-2" /> Ture
+                <Truck className="w-4 h-4 inline mr-2" /> Ture → Historik
               </button>
             </div>
-
-            {/* 2026-10-16: Tur-overblik for logistik admin - samme visning som
-                Location Admins Arkiv, men kun dette firmas egne ture på de
-                pladser det betjener. */}
-            {archivesSubTab === "tours" && (
-              <TourArchive
-                locations={(pladsList || [])
-                  .filter(p => p.location_code || p.code)
-                  .map(p => ({ code: p.location_code || p.code, name: p.name }))}
-              />
-            )}
 
             {archivesSubTab === "receipts" && (
               <section className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm p-6 border border-border" data-testid="merged-receipts-archive-section">
@@ -9122,704 +9145,15 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
         </section>
         )}
 
-        {/* Tours Management Tab - Admin assigns tours by plads */}
+        {/* 2026-10-16: "Ture" - ny daglig arbejdsflade (erstatter Manuelle ture
+            og Arkiv > Ture). Se frontend/src/pages/ToursWorkspace.jsx. */}
         {activeTab === "tours" && (
-        <section className="space-y-6">
-
-          {/* Filter Controls */}
-          <div className="bg-white dark:bg-slate-800 rounded-xl shadow-lg p-4">
-            <h2 className="font-heading font-bold text-lg flex items-center gap-2 mb-4">
-              <Eye className="w-5 h-5 text-blue-600" /> Filtre
-            </h2>
-            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
-              <div>
-                <label className="block text-xs font-medium text-slate-500 mb-1">Dato</label>
-                <input type="date" value={adminReportDate} onChange={(e) => setAdminReportDate(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-sm bg-white dark:bg-slate-700" data-testid="filter-date" />
-                <p className="text-xs text-muted-foreground mt-1">{new Date(adminReportDate + "T12:00:00").toLocaleDateString("da-DK", { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</p>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-slate-500 mb-1">Kunde</label>
-                <select value={adminCustomerFilter} onChange={(e) => { setAdminCustomerFilter(e.target.value); setAdminSelectedPlads(""); }}
-                  className="w-full px-3 py-2 border rounded-lg text-sm bg-white dark:bg-slate-700" data-testid="filter-customer">
-                  <option value="">Alle kunder</option>
-                  {Array.from(new Set(pladsList.map(p => p.customer_name).filter(Boolean))).sort().map(name => (
-                    <option key={name} value={name}>{name}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-slate-500 mb-1">Chauffør</label>
-                <select value={adminTourFilterDriver} onChange={(e) => setAdminTourFilterDriver(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-sm bg-white dark:bg-slate-700" data-testid="filter-driver">
-                  <option value="">Alle chauffører</option>
-                  {drivers.map(d => <option key={d.id} value={d.name}>{d.name}</option>)}
-                </select>
-              </div>
-              <div className="flex items-end">
-                <button onClick={() => { const today = new Date(); setAdminReportDate(`${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,"0")}-${String(today.getDate()).padStart(2,"0")}`); setAdminTourFilterDriver(""); setAdminCustomerFilter(""); }}
-                  className="px-4 py-2 bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-white rounded-lg text-sm hover:bg-slate-300" data-testid="filter-reset">
-                  <RotateCcw className="w-4 h-4 inline mr-1" /> Nulstil
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* Plads selection for tours - grouped by kunde for clear visual separation */}
-          <div className="bg-white dark:bg-slate-800 rounded-xl shadow-lg p-4">
-            <h2 className="font-heading font-bold text-lg flex items-center gap-2 mb-4">
-              <MapPin className="w-5 h-5 text-red-600" /> {isPremiumLogistics ? "Vælg lokation" : "Vælg Genbrugsplads"}
-              {adminCustomerFilter && (
-                <span className="ml-2 text-sm font-normal text-muted-foreground">- filtreret: <strong>{adminCustomerFilter}</strong></span>
-              )}
-            </h2>
-            {(() => {
-              const filtered = adminCustomerFilter
-                ? pladsList.filter(p => (p.customer_name || "") === adminCustomerFilter)
-                : pladsList;
-              // Group plads by customer_name
-              const groups = {};
-              filtered.forEach(p => {
-                const key = p.customer_name || "Ukendt kunde";
-                (groups[key] ||= []).push(p);
-              });
-              const groupNames = Object.keys(groups).sort();
-              if (filtered.length === 0) {
-                return <div className="text-sm text-muted-foreground italic py-3">Ingen genbrugspladser for valgte kunde.</div>;
-              }
-              return (
-                <div className="space-y-4">
-                  {groupNames.map(gname => (
-                    <div key={gname}>
-                      <div className="flex items-center gap-2 mb-2 pb-1 border-b border-slate-200 dark:border-slate-700">
-                        <Building2 className="w-3.5 h-3.5 text-slate-500" />
-                        <span className="text-xs font-bold uppercase tracking-wide text-slate-600 dark:text-slate-400">{gname}</span>
-                        <span className="text-xs text-slate-400">({groups[gname].length} {groups[gname].length === 1 ? "plads" : "pladser"})</span>
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        {groups[gname].map(p => (
-                          <div key={p.id} className="inline-flex items-center bg-slate-100 dark:bg-slate-700 rounded-lg overflow-hidden">
-                            <button
-                              onClick={() => setAdminSelectedPlads(p.name)}
-                              className={`px-4 py-2 text-sm font-medium transition-all ${
-                                adminSelectedPlads === p.name
-                                  ? "bg-red-600 text-white shadow-lg"
-                                  : "text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600"
-                              }`}
-                              data-testid={`admin-plads-${p.name.toLowerCase()}`}
-                            >
-                              {p.name}
-                              <span className={`ml-2 px-1.5 py-0.5 rounded-full text-xs font-bold ${
-                                adminSelectedPlads === p.name ? "bg-white text-red-600" : "bg-red-600 text-white"
-                              }`}>
-                                {adminTours.filter(t => t.plads === p.name && !t.is_pause).length}
-                              </span>
-                            </button>
-                            <button
-                              onClick={() => setAdminAddressesFor(p)}
-                              className={`px-2 py-2 border-l ${
-                                adminSelectedPlads === p.name
-                                  ? "bg-red-700 border-red-800 text-white hover:bg-red-800"
-                                  : "border-slate-200 dark:border-slate-600 text-orange-600 hover:bg-orange-50 dark:hover:bg-orange-950/30"
-                              }`}
-                              title="Adresser under denne plads"
-                              data-testid={`admin-plads-addresses-${p.name.toLowerCase()}`}
-                            >
-                              <Building2 className="w-4 h-4" />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              );
-            })()}
-          </div>
-
-          {adminSelectedPlads && (
-          <>
-            {/* Fase 4.1 (2026-06-16): Indsæt ture via standardiseret Excel-skabelon.
-                "Indsæt fra mail", "Upload PDF" og "Argo" er erstattet - alle
-                manuelle ture indtastes i samme skabelon. Lokationen vælges
-                via dropdown i Excel-arket. */}
-            <div className="bg-white dark:bg-slate-800 rounded-xl border-2 border-red-500/50 shadow-lg">
-              <div className="p-4 border-b border-border bg-orange-50 dark:bg-orange-950/20 rounded-t-xl">
-                <h2 className="font-heading font-bold text-lg flex items-center gap-2">
-                  <FileUp className="w-5 h-5 text-red-600" /> Indsæt ture via skabelon
-                </h2>
-                <p className="text-xs text-slate-500 mt-1">
-                  Hent Excel-skabelonen, udfyld rækker (én tur pr. række), og upload den udfyldte fil. Lokation vælges via dropdown - kundenavn beregnes automatisk.
-                </p>
-              </div>
-              <div className="p-4 flex flex-wrap gap-3">
-                <button onClick={handleDownloadTourTemplate}
-                  className="flex items-center gap-2 px-6 py-3 bg-emerald-600 text-white font-bold rounded-lg hover:bg-emerald-700"
-                  data-testid="download-tour-template-btn">
-                  <Download className="w-5 h-5" /> Hent skabelon
-                </button>
-                <label className={`flex items-center gap-2 px-6 py-3 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700 cursor-pointer ${templateUploading ? "opacity-50 pointer-events-none" : ""}`}
-                  data-testid="upload-tour-template-btn">
-                  <Upload className="w-5 h-5" /> {templateUploading ? "Uploader..." : "Upload udfyldt skabelon"}
-                  <input type="file" accept=".xlsx" className="hidden" onChange={handleUploadTourTemplate} disabled={templateUploading} />
-                </label>
-                <button onClick={() => setShowFirmaModal(true)}
-                  className="flex items-center gap-2 px-6 py-3 bg-indigo-600 text-white font-bold rounded-lg hover:bg-indigo-700"
-                  data-testid="admin-firma-btn">
-                  <Building2 className="w-5 h-5" /> + Firma tur
-                </button>
-                <button onClick={handleAdminClearPlads}
-                  className="flex items-center gap-2 px-4 py-3 bg-slate-600 text-white rounded-lg font-medium hover:bg-slate-500"
-                  data-testid="admin-clear-plads-btn">
-                  <Trash2 className="w-5 h-5" /> Slet alle i {adminSelectedPlads}
-                </button>
-              </div>
-              {templateUploadResult && (
-                <div className={`px-4 pb-4 ${templateUploadResult.errors?.length ? "" : ""}`}>
-                  <div className={`p-3 rounded-lg text-sm ${
-                    templateUploadResult.errors?.length
-                      ? "bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-300"
-                      : "bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-300"
-                  }`}>
-                    <p className="font-semibold">{templateUploadResult.message}</p>
-                    {templateUploadResult.errors?.length > 0 && (
-                      <ul className="mt-1.5 text-xs space-y-0.5">
-                        {templateUploadResult.errors.map((e, i) => (
-                          <li key={i}>• Række {e.row}: {e.reason}</li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Firma Tur (Private Company) Modal */}
-            {showFirmaModal && (
-              <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={() => setShowFirmaModal(false)}>
-                <div className="bg-white dark:bg-slate-900 rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden shadow-2xl" onClick={e => e.stopPropagation()} data-testid="firma-modal">
-                  <div className="flex items-center justify-between px-6 py-4 border-b bg-indigo-600 text-white">
-                    <div className="flex items-center gap-2">
-                      <Building2 className="w-5 h-5" />
-                      <h2 className="font-bold text-lg">+ Firma tur (Privat)</h2>
-                    </div>
-                    <button onClick={() => setShowFirmaModal(false)} className="p-1 hover:bg-white/20 rounded" data-testid="firma-modal-close">
-                      <X className="w-5 h-5" />
-                    </button>
-                  </div>
-
-                  <div className="p-6 space-y-5 overflow-y-auto" style={{ maxHeight: "calc(90vh - 140px)" }}>
-                    <div className="text-xs text-slate-500 dark:text-slate-400">
-                      Plads: <span className="font-bold text-indigo-600">{adminSelectedPlads}</span> &middot; Dato: <span className="font-bold">{adminReportDate}</span>
-                    </div>
-
-                    {/* Firma navn */}
-                    <div>
-                      <label className="text-sm font-bold text-slate-700 dark:text-slate-300 mb-1.5 block">Firma navn *</label>
-                      <input
-                        type="text"
-                        value={firmaForm.firma}
-                        onChange={e => setFirmaForm({ ...firmaForm, firma: e.target.value })}
-                        placeholder="F.eks. ABC Entreprise ApS"
-                        className="w-full px-3 py-2.5 border rounded-lg bg-slate-50 dark:bg-slate-800 text-sm focus:outline-none focus:border-indigo-500"
-                        data-testid="firma-name-input"
-                      />
-                    </div>
-
-                    {/* Afhentningsadresser (pickups) */}
-                    <div>
-                      <div className="flex items-center justify-between mb-1.5">
-                        <label className="text-sm font-bold text-slate-700 dark:text-slate-300">Afhentningsadresse(r) *</label>
-                        <button
-                          onClick={() => setFirmaForm({ ...firmaForm, pickups: [...firmaForm.pickups, ""] })}
-                          className="flex items-center gap-1 px-2.5 py-1 bg-indigo-500 text-white text-xs font-bold rounded-md hover:bg-indigo-600"
-                          data-testid="firma-add-pickup-btn"
-                        >
-                          <Plus className="w-3.5 h-3.5" /> Tilføj adresse
-                        </button>
-                      </div>
-                      <div className="space-y-2">
-                        {firmaForm.pickups.map((p, idx) => (
-                          <div key={idx} className="flex items-center gap-2">
-                            <span className="flex-shrink-0 w-6 h-6 rounded-full bg-indigo-100 text-indigo-700 text-xs font-bold flex items-center justify-center">{idx + 1}</span>
-                            <input
-                              type="text"
-                              value={p}
-                              onChange={e => {
-                                const pk = [...firmaForm.pickups];
-                                pk[idx] = e.target.value;
-                                setFirmaForm({ ...firmaForm, pickups: pk });
-                              }}
-                              placeholder="Startadresse (hvor turen afhentes)"
-                              className="flex-1 px-3 py-2 border rounded-lg bg-slate-50 dark:bg-slate-800 text-sm focus:outline-none focus:border-indigo-500"
-                              data-testid={`firma-pickup-input-${idx}`}
-                            />
-                            {firmaForm.pickups.length > 1 && (
-                              <button
-                                onClick={() => setFirmaForm({ ...firmaForm, pickups: firmaForm.pickups.filter((_, i) => i !== idx) })}
-                                className="p-2 text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 rounded-lg"
-                                data-testid={`firma-pickup-remove-${idx}`}
-                              >
-                                <Trash2 className="w-4 h-4" />
-                              </button>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* Afleveringer (deliveries) */}
-                    <div>
-                      <div className="flex items-center justify-between mb-1.5">
-                        <label className="text-sm font-bold text-slate-700 dark:text-slate-300">Aflevering - firma og adresse *</label>
-                        <button
-                          onClick={() => setFirmaForm({ ...firmaForm, deliveries: [...firmaForm.deliveries, { company: "", address: "" }] })}
-                          className="flex items-center gap-1 px-2.5 py-1 bg-indigo-500 text-white text-xs font-bold rounded-md hover:bg-indigo-600"
-                          data-testid="firma-add-delivery-btn"
-                        >
-                          <Plus className="w-3.5 h-3.5" /> Tilføj modtager
-                        </button>
-                      </div>
-                      <div className="space-y-2">
-                        {firmaForm.deliveries.map((d, idx) => (
-                          <div key={idx} className="flex items-start gap-2 p-2 bg-slate-50 dark:bg-slate-800/60 rounded-lg border border-slate-200 dark:border-slate-700">
-                            <span className="flex-shrink-0 w-6 h-6 rounded-full bg-emerald-100 text-emerald-700 text-xs font-bold flex items-center justify-center mt-1">{idx + 1}</span>
-                            <div className="flex-1 grid grid-cols-1 sm:grid-cols-2 gap-2">
-                              <input
-                                type="text"
-                                value={d.company}
-                                onChange={e => {
-                                  const dl = [...firmaForm.deliveries];
-                                  dl[idx] = { ...dl[idx], company: e.target.value };
-                                  setFirmaForm({ ...firmaForm, deliveries: dl });
-                                }}
-                                placeholder="Modtager firma"
-                                className="px-3 py-2 border rounded-lg bg-white dark:bg-slate-900 text-sm focus:outline-none focus:border-indigo-500"
-                                data-testid={`firma-delivery-company-${idx}`}
-                              />
-                              <input
-                                type="text"
-                                value={d.address}
-                                onChange={e => {
-                                  const dl = [...firmaForm.deliveries];
-                                  dl[idx] = { ...dl[idx], address: e.target.value };
-                                  setFirmaForm({ ...firmaForm, deliveries: dl });
-                                }}
-                                placeholder="Adresse"
-                                className="px-3 py-2 border rounded-lg bg-white dark:bg-slate-900 text-sm focus:outline-none focus:border-indigo-500"
-                                data-testid={`firma-delivery-address-${idx}`}
-                              />
-                            </div>
-                            {firmaForm.deliveries.length > 1 && (
-                              <button
-                                onClick={() => setFirmaForm({ ...firmaForm, deliveries: firmaForm.deliveries.filter((_, i) => i !== idx) })}
-                                className="p-2 text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 rounded-lg"
-                                data-testid={`firma-delivery-remove-${idx}`}
-                              >
-                                <Trash2 className="w-4 h-4" />
-                              </button>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* Note */}
-                    <div>
-                      <label className="text-sm font-bold text-slate-700 dark:text-slate-300 mb-1.5 block">Bemærkning (valgfri)</label>
-                      <textarea
-                        value={firmaForm.note}
-                        onChange={e => setFirmaForm({ ...firmaForm, note: e.target.value })}
-                        rows={2}
-                        placeholder="F.eks. Ring til kunden 10 min før..."
-                        className="w-full px-3 py-2 border rounded-lg bg-slate-50 dark:bg-slate-800 text-sm resize-none focus:outline-none focus:border-indigo-500"
-                        data-testid="firma-note-input"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="px-6 py-3 border-t bg-slate-50 dark:bg-slate-900/60 flex items-center justify-between gap-2">
-                    <span className="text-xs text-slate-500">
-                      {firmaForm.pickups.filter(p => p.trim()).length} afhentning(er) × {firmaForm.deliveries.filter(d => (d.company || "").trim() || (d.address || "").trim()).length} modtager(e)
-                    </span>
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => setShowFirmaModal(false)}
-                        className="px-4 py-2 bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold rounded-lg hover:bg-slate-300 dark:hover:bg-slate-600"
-                      >
-                        Annuller
-                      </button>
-                      <button
-                        onClick={handleFirmaSubmit}
-                        disabled={firmaLoading}
-                        className="flex items-center gap-2 px-5 py-2 bg-indigo-600 text-white font-bold rounded-lg hover:bg-indigo-700 disabled:opacity-50"
-                        data-testid="firma-submit-btn"
-                      >
-                        <CheckCircle2 className="w-4 h-4" /> {firmaLoading ? "Opretter..." : "Opret tur"}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-            {adminRouteOptimization?.optimized && (
-              <div className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-950/30 dark:to-indigo-950/30 rounded-xl p-4 border border-blue-200 dark:border-blue-800">
-                <div className="flex flex-wrap items-center gap-3">
-                  <Navigation className="w-5 h-5 text-blue-600" />
-                  <span className="font-bold text-blue-900 dark:text-blue-100">Rute</span>
-                  <span className="px-2 py-1 bg-red-100 text-red-700 rounded-full text-xs font-bold" data-testid="admin-haenger-count">
-                    HÆNGER: {adminRouteOptimization.haenger_count}
-                  </span>
-                  <span className="px-2 py-1 bg-slate-100 text-slate-700 rounded-full text-xs font-bold" data-testid="admin-solo-count">
-                    SOLO: {adminRouteOptimization.solo_count}
-                  </span>
-                  <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded-full text-xs font-bold">
-                    {adminRouteOptimization.total_distance_km} km
-                  </span>
-                  <span className="px-2 py-1 bg-amber-100 text-amber-700 rounded-full text-xs font-bold">
-                    ~{Math.floor(adminRouteOptimization.total_estimated_minutes / 60)}t {adminRouteOptimization.total_estimated_minutes % 60}m
-                  </span>
-                  {adminRouteOptimization.google_maps_used && (
-                    <span className="px-2 py-1 bg-green-100 text-green-700 rounded-full text-xs font-bold">
-                      Google Maps
-                    </span>
-                  )}
-                  <span className="text-xs text-muted-foreground ml-auto">Max {adminRouteOptimization.max_haenger_size} cont./hænger</span>
-                </div>
-              </div>
-            )}
-
-            {/* Activity Summary for this plads */}
-            <div className="bg-white dark:bg-slate-800 rounded-xl shadow-lg">
-              <div className="p-4 border-b border-border">
-                <h2 className="font-heading font-bold text-lg flex items-center gap-2">
-                  <BarChart3 className="w-5 h-5 text-red-600" /> Overblik - {adminSelectedPlads}
-                </h2>
-              </div>
-              <div className="p-4">
-                {(() => {
-                  const pladsT = adminTours.filter(t => t.plads === adminSelectedPlads);
-                  const pTours = pladsT.filter(t => !t.is_pause);
-                  const pPauses = pladsT.filter(t => t.is_pause);
-                  const pCompleted = pTours.filter(t => t.completed);
-                  const pOnWay = pTours.filter(t => t.on_way);
-                  const pWaiting = pTours.filter(t => !t.completed && !t.on_way);
-                  const pTotalKg = pTours.reduce((s, t) => s + (t.weight || 0), 0);
-                  const completedTimes = pCompleted.map(t => t.time).filter(Boolean).sort();
-                  const firstDone = completedTimes[0] || "-";
-                  const lastDone = completedTimes[completedTimes.length - 1] || "-";
-                  return (
-                    <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
-                      <div className="bg-slate-50 dark:bg-slate-900 rounded-lg p-3 text-center">
-                        <div className="text-2xl font-bold">{pTours.length}</div>
-                        <div className="text-xs text-muted-foreground">Total ture</div>
-                      </div>
-                      <div className="bg-emerald-50 dark:bg-emerald-950/30 rounded-lg p-3 text-center">
-                        <div className="text-2xl font-bold text-emerald-600">{pCompleted.length}</div>
-                        <div className="text-xs text-emerald-600">Færdig</div>
-                      </div>
-                      <div className="bg-yellow-50 dark:bg-yellow-950/30 rounded-lg p-3 text-center">
-                        <div className="text-2xl font-bold text-yellow-600">{pOnWay.length}</div>
-                        <div className="text-xs text-yellow-600">På vej</div>
-                      </div>
-                      <div className="bg-slate-100 dark:bg-slate-700 rounded-lg p-3 text-center">
-                        <div className="text-2xl font-bold text-slate-500">{pWaiting.length}</div>
-                        <div className="text-xs text-muted-foreground">Venter</div>
-                      </div>
-                      <div className="bg-blue-50 dark:bg-blue-950/30 rounded-lg p-3 text-center">
-                        <div className="text-2xl font-bold text-blue-600">{pTotalKg}</div>
-                        <div className="text-xs text-blue-600">Total kg</div>
-                      </div>
-                      <div className="bg-orange-50 dark:bg-orange-950/30 rounded-lg p-3 text-center">
-                        <div className="text-2xl font-bold text-orange-600">{pPauses.length}</div>
-                        <div className="text-xs text-orange-600">Pauser</div>
-                      </div>
-                      <div className="bg-purple-50 dark:bg-purple-950/30 rounded-lg p-3 text-center">
-                        <div className="text-sm font-bold text-purple-600">{firstDone} - {lastDone}</div>
-                        <div className="text-xs text-purple-600">Første / Sidste</div>
-                      </div>
-                    </div>
-                  );
-                })()}
-              </div>
-            </div>
-
-            {/* Detailed Tours list for selected plads */}
-            <div className="bg-white dark:bg-slate-800 rounded-xl shadow-lg">
-              <div className="p-4 border-b border-border flex items-center justify-between">
-                <h2 className="font-heading font-bold text-lg flex items-center gap-2">
-                  <FileText className="w-5 h-5 text-orange-500" /> Ture i {adminSelectedPlads}
-                </h2>
-                <span className="text-sm font-bold text-muted-foreground">
-                  {adminTours.filter(t => t.plads === adminSelectedPlads && !t.is_pause
-                    && (!adminTourFilterDriver || t.claimed_by === adminTourFilterDriver || t.driver_name === adminTourFilterDriver)
-                  ).length} ture
-                  {adminTourFilterDriver && <span className="ml-1 text-orange-500">(filtreret)</span>}
-                </span>
-              </div>
-              <div className="overflow-x-auto">
-                {/* === HÆNGER GROUPS SECTION === */}
-                {adminRouteOptimization?.optimized && adminRouteOptimization.haenger_count > 0 && (
-                  <div className="mb-6">
-                    <h3 className="text-sm font-bold text-red-700 uppercase tracking-wider mb-3 flex items-center gap-2">
-                      <Truck className="w-4 h-4" /> Hænger Ture
-                    </h3>
-                    <div className="grid gap-4">
-                      {Object.entries(adminRouteOptimization.groups || {}).map(([gid, memberIds]) => {
-                        const groupTours = memberIds.map(mid => adminTours.find(t => t.id === mid)).filter(Boolean);
-                        const groupRouteInfos = memberIds.map(mid => getAdminRouteInfo(mid)).filter(Boolean);
-                        const firstRi = groupRouteInfos[0];
-                        const addr = groupTours[0]?.address || "";
-                        const totalKm = firstRi?.distance_km || 0;
-                        const totalMin = firstRi?.estimated_minutes || 0;
-                        return (
-                          <div key={gid} className="bg-gradient-to-r from-red-50 to-orange-50 dark:from-red-950/20 dark:to-orange-950/20 border-2 border-red-200 dark:border-red-800 rounded-xl overflow-hidden" data-testid={`haenger-group-${gid}`}>
-                            <div className="px-4 py-3 bg-red-100/60 dark:bg-red-900/30 border-b border-red-200 flex items-center justify-between">
-                              <div className="flex items-center gap-3">
-                                <span className="px-3 py-1 bg-red-600 text-white text-xs font-black rounded-lg tracking-wide">{gid}</span>
-                                <span className="font-bold text-red-900 dark:text-red-100">HÆNGER</span>
-                                <span className="text-sm text-red-700 dark:text-red-300">{groupTours.length} containere</span>
-                              </div>
-                              <div className="flex items-center gap-2 text-xs">
-                                <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded-full font-bold">{totalKm} km</span>
-                                <span className="px-2 py-1 bg-amber-100 text-amber-700 rounded-full font-bold">~{totalMin} min</span>
-                              </div>
-                            </div>
-                            <div className="p-3 text-sm text-red-800 dark:text-red-200 font-medium border-b border-red-100">
-                              <MapPin className="w-3.5 h-3.5 inline mr-1" />{addr}
-                            </div>
-                            <div className="divide-y divide-red-100 dark:divide-red-900">
-                              {groupTours.map((tour, idx) => {
-                                const ri = getAdminRouteInfo(tour.id);
-                                const traekNr = ri?.traek_nr || (idx + 1);
-                                const h = extractOpenHours(tour);
-                                return (
-                                  <div key={tour.id} className="px-4 py-3 flex items-center gap-4 hover:bg-red-50/50" data-testid={`haenger-tour-${tour.id}`}>
-                                    <div className="flex-shrink-0 w-20">
-                                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-red-600 text-white rounded-lg text-xs font-black">
-                                        Træk {traekNr}
-                                      </span>
-                                    </div>
-                                    <div className="flex-1 min-w-0">
-                                      <div className="font-bold text-slate-900 dark:text-white truncate">{tour.fraction}</div>
-                                      <div className="text-xs text-muted-foreground">{tour.tour_type === "loes_afhentning" ? `Løs (${tour.loose_estimated_count || "?"} containere)` : (tour.container || "-")} | {tour.facility}</div>
-                                      {h.cleanRemark && (
-                                        <div className="mt-1 flex items-center gap-1.5 text-xs">
-                                          <Megaphone className="w-3 h-3 text-rose-500" />
-                                          <span className="text-rose-600 dark:text-rose-400 font-medium">{h.cleanRemark}</span>
-                                        </div>
-                                      )}
-                                    </div>
-                                    {h.openFrom && (
-                                      <div className="text-xs font-mono text-center flex-shrink-0">
-                                        <div className="font-bold text-emerald-700">{h.openFrom}</div>
-                                        {h.openTo && <div className="text-slate-400">-{h.openTo}</div>}
-                                      </div>
-                                    )}
-                                    <div className="flex-shrink-0">
-                                      {tour.completed ? (
-                                        <span className="px-2 py-1 bg-emerald-100 text-emerald-700 rounded-full text-xs font-bold">Færdig</span>
-                                      ) : tour.on_way ? (
-                                        <span className="px-2 py-1 bg-yellow-100 text-yellow-700 rounded-full text-xs font-bold">På vej</span>
-                                      ) : (
-                                        <span className="px-2 py-1 bg-slate-100 text-slate-500 rounded-full text-xs">Venter</span>
-                                      )}
-                                    </div>
-                                    <button onClick={() => handleAdminDeleteTour(tour.id)} className="flex-shrink-0 p-1.5 text-red-400 hover:bg-red-100 rounded">
-                                      <Trash2 className="w-4 h-4" />
-                                    </button>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-
-                {/* === SOLO TOURS SECTION === */}
-                <div>
-                  {adminRouteOptimization?.optimized && adminRouteOptimization.solo_count > 0 && (
-                    <h3 className="text-sm font-bold text-slate-600 uppercase tracking-wider mb-3 flex items-center gap-2">
-                      <Navigation className="w-4 h-4" /> Solo Ture
-                    </h3>
-                  )}
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="bg-slate-50 dark:bg-slate-900 border-b">
-                        <th className="p-3 text-left w-8">#</th>
-                        <th className="p-3 text-left">Fraktion</th>
-                        <th className="p-3 text-left">Adresse</th>
-                        <th className="p-3 text-center">Åbningstid</th>
-                        <th className="p-3 text-center">Lukketid</th>
-                        <th className="p-3 text-left">Note</th>
-                        <th className="p-3 text-center">Afstand</th>
-                        <th className="p-3 text-center">Tildel</th>
-                        <th className="p-3 text-center">Status</th>
-                        <th className="p-3 text-center w-10">Slet</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {/* Pauses */}
-                      {adminTours.filter(t => t.plads === adminSelectedPlads && t.is_pause).map(tour => (
-                        <tr key={tour.id} className="border-b bg-orange-50 dark:bg-orange-950/20">
-                          <td className="p-3 text-center"><Pause className="w-4 h-4 text-orange-500" /></td>
-                          <td colSpan="6" className="p-3 font-bold text-orange-600">PAUSE {tour.time || "45 min"}</td>
-                          <td className="p-3 text-center text-slate-300">-</td>
-                          <td className="p-3 text-center"><span className="px-2 py-1 bg-orange-100 text-orange-700 rounded-full text-xs font-bold">Pause</span></td>
-                          <td className="p-3 text-center">
-                            <button onClick={() => handleAdminDeleteTour(tour.id)} className="p-1.5 text-red-500 hover:bg-red-100 rounded"><Trash2 className="w-4 h-4" /></button>
-                          </td>
-                        </tr>
-                      ))}
-                      {/* Solo tours - filter out HÆNGER tours */}
-                      {adminTours.filter(t => t.plads === adminSelectedPlads && !t.is_pause
-                        && (!adminTourFilterDriver || t.claimed_by === adminTourFilterDriver || t.driver_name === adminTourFilterDriver)
-                      )
-                        .filter(t => {
-                          const ri = getAdminRouteInfo(t.id);
-                          return !ri || ri.job_type !== "HAENGER";
-                        })
-                        .sort((a, b) => {
-                          const riA = getAdminRouteInfo(a.id);
-                          const riB = getAdminRouteInfo(b.id);
-                          if (riA && riB) return riA.route_order - riB.route_order;
-                          if (a.completed && !b.completed) return 1;
-                          if (!a.completed && b.completed) return -1;
-                          return 0;
-                        })
-                        .map(tour => {
-                          const ri = getAdminRouteInfo(tour.id);
-                          const h = extractOpenHours(tour);
-                          return (
-                            <tr key={tour.id} className={`border-b hover:bg-slate-50 dark:hover:bg-slate-900 ${
-                              tour.completed ? "bg-emerald-50/50" : tour.on_way ? "bg-yellow-50/50" : ""
-                            }`}>
-                              <td className="p-3 text-center">
-                                {ri?.route_order ? (
-                                  <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-slate-600 text-white text-[10px] font-bold">{ri.route_order}</span>
-                                ) : <span className="text-slate-300">-</span>}
-                              </td>
-                              <td className="p-3">
-                                <div className="font-medium">{tour.fraction}</div>
-                                <div className="text-xs text-muted-foreground">{tour.tour_type === "loes_afhentning" ? `Løs (${tour.loose_estimated_count || "?"} containere)` : (tour.container || "-")}{tour.container_type ? ` · ${tour.container_type}` : ""} | {tour.facility}</div>
-                              </td>
-                              <td className="p-3 text-sm">{tour.address}</td>
-                              <td className="p-3 text-center font-mono text-xs text-emerald-700 font-bold">
-                                {h.openFrom || <span className="text-slate-300">-</span>}
-                              </td>
-                              <td className="p-3 text-center font-mono text-xs text-emerald-700 font-bold">
-                                {h.openTo || <span className="text-slate-300">-</span>}
-                              </td>
-                              <td className="p-3 text-xs text-slate-600 dark:text-slate-300">
-                                {h.cleanRemark ? (
-                                  <span className="inline-flex items-center gap-1.5">
-                                    <Megaphone className="w-3 h-3 text-rose-500 flex-shrink-0" />
-                                    <span className="text-rose-600 dark:text-rose-400">{h.cleanRemark}</span>
-                                  </span>
-                                ) : <span className="text-slate-300">-</span>}
-                              </td>
-                              <td className="p-3 text-center">
-                                {ri && ri.distance_km > 0 ? (
-                                  <div className="text-xs">
-                                    <span className="font-bold text-blue-700">{ri.distance_km}km</span>
-                                    <span className="text-muted-foreground ml-1">~{ri.estimated_minutes}m</span>
-                                  </div>
-                                ) : <span className="text-slate-300">-</span>}
-                              </td>
-                              <td className="p-3 text-center">
-                                {/* Fase 11 (2026-06-18): Tildeling flyttet til
-                                    "Planlægning"-fanen - denne kolonne er
-                                    nu read-only. Klik audit-log for at se
-                                    historik for pre-tildelinger. */}
-                                <div className="flex items-center justify-center gap-1">
-                                  {tour.driver_id ? (
-                                    <span className="text-xs px-2 py-1 rounded bg-indigo-50 dark:bg-indigo-950/30 text-indigo-700 dark:text-indigo-300 font-semibold border border-indigo-200 dark:border-indigo-800"
-                                      data-testid={`assigned-driver-${tour.id}`}
-                                      title="Tildelt - skift fra Planlægning-fanen">
-                                      {(drivers.find(d => d.id === tour.driver_id)?.name) || "Tildelt"}
-                                    </span>
-                                  ) : (
-                                    <span className="text-xs px-2 py-1 rounded bg-slate-50 dark:bg-slate-700 text-slate-500 italic"
-                                      title="Åben for alle chauffører - tildel via Planlægning">
-                                      Åben
-                                    </span>
-                                  )}
-                                  <button
-                                    onClick={() => setAuditTour(tour)}
-                                    className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-950/30 rounded transition-colors"
-                                    title="Vis tildelings-historik"
-                                    data-testid={`audit-log-btn-${tour.id}`}
-                                  >
-                                    <History className="w-3.5 h-3.5" />
-                                  </button>
-                                </div>
-                                {/* Fase 15.3 (2026-06-19): "Tildelt af X" + tidsstempel
-                                    så admin kan se hvem der tildelte hvad uden at åbne
-                                    audit-log. Vises kun når en LA/SA har tildelt. */}
-                                {tour.assigned_by_name && (
-                                  <div className="text-[10px] text-indigo-600 dark:text-indigo-300 mt-1 italic" data-testid={`admin-assigned-by-${tour.id}`}>
-                                    Tildelt af {tour.assigned_by_name}
-                                  </div>
-                                )}
-                              </td>
-                              <td className="p-3 text-center">
-                                {tour.completed ? (
-                                  <span className="px-2 py-1 bg-emerald-100 text-emerald-700 rounded-full text-xs font-bold">Færdig</span>
-                                ) : tour.on_way ? (
-                                  <span className="px-2 py-1 bg-yellow-100 text-yellow-700 rounded-full text-xs font-bold">På vej</span>
-                                ) : tour.claimed_by ? (
-                                  <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded-full text-xs font-bold" title={`Taget af ${tour.claimed_by}`}>Taget</span>
-                                ) : tour.driver_id ? (
-                                  <span className="px-2 py-1 bg-indigo-100 text-indigo-700 rounded-full text-xs font-bold" title="Pre-tildelt en bestemt chauffør">Tildelt</span>
-                                ) : (
-                                  <span className="px-2 py-1 bg-slate-100 text-slate-500 rounded-full text-xs">Venter</span>
-                                )}
-                              </td>
-                              <td className="p-3 text-center">
-                                <div className="flex items-center justify-center gap-1">
-                                  {/* Fase 14 (2026-06-19): "Ret tur"-knap -
-                                      admin kan genåbne afsluttet tur, ændre
-                                      opgavetype, korrigere vægt mm. uden at
-                                      forlade overblikket. */}
-                                  <button onClick={() => setEditTour(tour)}
-                                    className="p-1.5 text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950/30 rounded"
-                                    title="Ret tur (genåben / korrigér / slet)"
-                                    data-testid={`edit-tour-btn-${tour.id}`}>
-                                    <Edit2 className="w-4 h-4" />
-                                  </button>
-                                  <button onClick={() => handleAdminDeleteTour(tour.id)} className="p-1.5 text-red-500 hover:bg-red-100 rounded" title="Slet tur">
-                                    <Trash2 className="w-4 h-4" />
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      {adminTours.filter(t => t.plads === adminSelectedPlads).length === 0 && (
-                        <tr>
-                          <td colSpan="10" className="p-8 text-center text-muted-foreground">
-                            Ingen ture i {adminSelectedPlads}. Hent skabelonen ovenfor, udfyld den, og upload den udfyldte fil.
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-            </div>
-          </div>
-          </>
-          )}
-
-          {!adminSelectedPlads && (
-            <div className="bg-white dark:bg-slate-800 rounded-xl shadow-lg p-12 text-center">
-              <MapPin className="w-12 h-12 mx-auto mb-3 text-slate-300" />
-              <p className="text-muted-foreground text-lg">Vælg en {siteWord} for at tilføje ture</p>
-            </div>
-          )}
-        </section>
+          <ToursWorkspace
+            drivers={drivers}
+            pladsList={pladsList}
+            profile={logisticsProfile}
+            siteWord={isPremiumLogistics ? "Lokation" : "Genbrugsplads"}
+          />
         )}
 
         {/* Schedule / Planning Tab
@@ -14222,7 +13556,8 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm p-0 sm:p-4" onClick={onClose} data-testid="mobile-tour-panel">
       <div
-        className="bg-white dark:bg-slate-900 w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl shadow-2xl max-h-[78vh] overflow-y-auto"
+        className="bg-white dark:bg-slate-900 w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl shadow-2xl max-h-[85vh] overflow-y-auto"
+        style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -14262,6 +13597,18 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
             <X className="w-5 h-5" />
           </button>
         </div>
+
+        {onChat && (
+          <div className="px-4 pt-3">
+            <button
+              onClick={onChat}
+              className="w-full min-h-[44px] rounded-xl border border-emerald-200 bg-emerald-50 text-emerald-800 font-semibold text-sm inline-flex items-center justify-center gap-2"
+              data-testid="mobile-tour-panel-chat"
+            >
+              <MessageSquare className="w-4 h-4" /> Besked til planlæggeren om denne tur
+            </button>
+          </div>
+        )}
 
         {/* Details */}
         <div className="p-4 space-y-3 text-sm">
@@ -15280,6 +14627,10 @@ function App() {
 
   // Mobile tour panel state
   const [selectedTourForPanel, setSelectedTourForPanel] = useState(null);
+  // 2026-10-16: Tur-beskeder (planlægger <-> chauffør) - ulæste pr. tur + åben tråd.
+  const [driverTourUnread, setDriverTourUnread] = useState({});
+  const [chatTour, setChatTour] = useState(null);
+  const driverUnreadTotalRef = useRef(null);
   const [inlineWeightTourId, setInlineWeightTourId] = useState(null);
   const [showInlineScanner, setShowInlineScanner] = useState(false);
   const [inlineWeight, setInlineWeight] = useState("");
@@ -15969,6 +15320,26 @@ function App() {
     }, 5000);
     return () => clearInterval(interval);
   }, [fetchTours]);
+
+  const fetchDriverTourUnread = useCallback(async () => {
+    if (!authUser || authUser.role !== "driver") return;
+    try {
+      const r = await axios.get(`${API}/tour-messages/unread`);
+      setDriverTourUnread(r.data.unread || {});
+      const total = r.data.total || 0;
+      if (driverUnreadTotalRef.current !== null && total > driverUnreadTotalRef.current) {
+        const m = (r.data.latest || [])[0];
+        if (m) toast.message(`Besked fra ${m.sender_name || "planlægger"}`, { description: m.text, duration: 8000 });
+        try { navigator.vibrate && navigator.vibrate([120, 60, 120]); } catch (_) { /* ikke understøttet */ }
+      }
+      driverUnreadTotalRef.current = total;
+    } catch (e) { /* ikke kritisk */ }
+  }, [authUser]);
+  useEffect(() => {
+    fetchDriverTourUnread();
+    const iv = setInterval(() => { if (!document.hidden) fetchDriverTourUnread(); }, 15000);
+    return () => clearInterval(iv);
+  }, [fetchDriverTourUnread]);
 
   // Pause countdown timer + finish notification
   useEffect(() => {
@@ -17842,26 +17213,31 @@ function App() {
                     bestillingstid, kvitteringer, container-nummer, etc.) og
                     fuld funktionalitet (claim, on-way, complete, edit,
                     scanner) via eksisterende handlers. === */}
-                <div className="rounded-2xl" style={{ background: '#0f172a', border: '0.5px solid #1e293b', padding: 10 }} data-testid="ture-list-cards">
+                <div className="space-y-2.5" data-testid="ture-list-cards">
                   {visibleTours.length === 0 ? (
-                    <div className="text-center" style={{ padding: '32px 16px' }} data-testid="ture-empty">
-                      <Truck style={{ width: 28, height: 28, color: '#475569', margin: '0 auto 8px' }} />
-                      <p className="font-bold" style={{ fontSize: 12, color: '#94a3b8' }}>
+                    <div className="text-center rounded-2xl bg-white border border-slate-200" style={{ padding: '32px 16px' }} data-testid="ture-empty">
+                      <Truck style={{ width: 28, height: 28, color: '#94a3b8', margin: '0 auto 8px' }} />
+                      <p className="font-bold" style={{ fontSize: 13, color: '#475569' }}>
                         {selectedPlads ? "Ingen ture matcher" : "Vælg en lokation eller 'Mine ture' for at se ture"}
                       </p>
                     </div>
                   ) : visibleTours.map((tour, idx) => (
-                    <MobileTourCard
+                    <DriverTourCard
                       key={tour.id || idx}
                       tour={tour}
                       index={idx}
-                      onUpdate={handleUpdateTour}
-                      onDelete={handleDeleteTour}
-                      onToggleOnWay={handleToggleOnWay}
-                      onToggleComplete={handleToggleComplete}
-                      onSelect={(t) => setSelectedTourForPanel(t)}
-                      currentDriverName={driverName}
-                      canDelete={false}
+                      routeInfo={getRouteInfo(tour.id)}
+                      unread={driverTourUnread[tour.id] || 0}
+                      onStart={(t) => handleToggleOnWay(t.id)}
+                      onFinish={(t) => {
+                        // Vægt kræves for "afhent container" og "løs afhentning" -
+                        // åbn panelet hvor den indtastes. Andre opgaver afsluttes direkte.
+                        const tt = t.tour_type || "normal";
+                        if (tt === "normal" || tt === "loes_afhentning") setSelectedTourForPanel(t);
+                        else handleToggleComplete(t.id);
+                      }}
+                      onOpen={(t) => setSelectedTourForPanel(t)}
+                      onChat={(t) => setChatTour(t)}
                     />
                   ))}
                 </div>
@@ -18974,1147 +18350,10 @@ function App() {
         {/* === TRIPS TAB === */}
         {activeDriverTab === "trips" && (
           <>
-            {/* God Morgen / God dag / God aften - Hero welcome card */}
-            {selectedPlads && !heroDismissed && filteredActive.length > 0 && (() => {
-              const total = filteredActive.length;
-              const myDone = filteredActive.filter(t => t.completed && (!t.claimed_by || t.claimed_by === driverName)).length;
-              const remaining = total - filteredCompleted.length;
-              const pct = total > 0 ? Math.round((filteredCompleted.length / total) * 100) : 0;
-              const next = sortedTours.find(t => !t.is_pause && !t.completed && (t.on_way || (!t.claimed_by || t.claimed_by === driverName)));
-              const hour = new Date().getHours();
-              const greeting = hour < 5 ? "Godnat" : hour < 11 ? "God morgen" : hour < 18 ? "God dag" : hour < 24 ? "God aften" : "Godnat";
-              // Estimate vagt: if startTime set, use elapsed since start; else 0.5h per remaining tour
-              let vagtH;
-              if (startTime && /^\d{2}:\d{2}$/.test(startTime)) {
-                const [sh, sm] = startTime.split(":").map(Number);
-                const now = new Date();
-                let mins = (now.getHours() * 60 + now.getMinutes()) - (sh * 60 + sm);
-                if (mins < 0) mins += 24 * 60;
-                vagtH = (mins / 60).toFixed(1);
-              } else {
-                vagtH = (remaining * 0.5).toFixed(1);
-              }
-              const ringColor = pct === 0 ? "#ef4444" : pct < 50 ? "#f97316" : pct < 100 ? "#3b82f6" : "#10b981";
-              return (
-                <div className={`relative bg-gradient-to-br from-slate-800 to-slate-900 rounded-2xl p-4 mb-3 border border-slate-700 shadow-lg ${activeTab === 'ture' || activeTab === 'tid' || activeTab === 'profil' ? 'hidden' : ''}`} data-testid="driver-hero-card">
-                  <button
-                    onClick={dismissHero}
-                    className="absolute top-2 right-2 p-1.5 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
-                    data-testid="hero-dismiss-btn"
-                    title="Skjul indtil i morgen"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                  <div className="flex items-center gap-4">
-                    {/* Progress ring */}
-                    <div className="relative flex-shrink-0 w-20 h-20" data-testid="hero-progress-ring">
-                      <svg className="w-20 h-20 -rotate-90" viewBox="0 0 36 36">
-                        <circle cx="18" cy="18" r="15.915" fill="none" stroke="#334155" strokeWidth="2.5" />
-                        <circle
-                          cx="18" cy="18" r="15.915"
-                          fill="none"
-                          stroke={ringColor}
-                          strokeWidth="2.5"
-                          strokeDasharray={`${pct} 100`}
-                          strokeLinecap="round"
-                          style={{ transition: "stroke-dasharray 0.6s ease-out" }}
-                        />
-                      </svg>
-                      <div className="absolute inset-0 flex items-center justify-center">
-                        <span className="text-xl font-black text-white" data-testid="hero-pct">{pct}%</span>
-                      </div>
-                    </div>
-
-                    {/* Texts */}
-                    <div className="flex-1 min-w-0">
-                      <p className="text-slate-400 text-xs uppercase tracking-wider font-bold">
-                        {greeting} <span className="text-slate-500">·</span> <span className="text-white">{driverName || "Chauffør"}</span>
-                      </p>
-                      <h2 className="text-2xl font-black text-white mt-0.5 leading-tight" data-testid="hero-remaining">
-                        {remaining > 0 ? `${remaining} ture tilbage` : "Alle ture færdige!"}
-                      </h2>
-                      <div className="flex items-center gap-3 text-sm mt-1">
-                        <span className="text-slate-400">
-                          <span className="text-white font-bold">{total}</span> ture
-                        </span>
-                        <span className="text-slate-600">·</span>
-                        <span className="text-slate-400">
-                          ~<span className="text-white font-bold">{vagtH}</span> t vagt
-                        </span>
-                        {myDone > 0 && (
-                          <>
-                            <span className="text-slate-600">·</span>
-                            <span className="text-emerald-400 font-bold">{myDone} mine</span>
-                          </>
-                        )}
-                      </div>
-                      {next && (
-                        <div className="flex items-center gap-1.5 mt-2 text-sm text-slate-300 truncate">
-                          <Navigation className="w-3.5 h-3.5 text-orange-400 flex-shrink-0" />
-                          <span className="text-slate-400">Næste ·</span>
-                          <span className="font-bold text-white truncate">{next.fraction}</span>
-                          <span className="text-slate-600">·</span>
-                          <span className="text-slate-300 truncate">{next.address?.split(",")[0]}</span>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              );
-            })()}
-
-            {/* Progress Bar - Visual status indicator */}
-            {selectedPlads && (
-              <div className={`bg-slate-800 rounded-xl p-4 mb-3 ${activeTab === 'ture' || activeTab === 'tid' || activeTab === 'profil' ? 'hidden' : ''}`} data-testid="progress-bar">
-                {/* Header */}
-                <div className="flex items-center justify-between mb-3">
-                  <div>
-                    <h2 className="text-xl font-black text-white uppercase">
-                      {selectedPlads === "__MINE__" ? "Mine ture" : selectedPlads}
-                    </h2>
-                    <p className="text-slate-400 text-sm">
-                      {new Date().toLocaleDateString("da-DK", { weekday: "long", day: "numeric", month: "long" })}
-                    </p>
-                  </div>
-                  <span className="px-3 py-1 bg-orange-500 text-white text-sm font-bold rounded-lg">
-                    {filteredActive.length} aktive
-                  </span>
-                </div>
-                
-                {/* Progress indicators */}
-                <div className="flex gap-1 mb-3">
-                  {filteredActive.slice(0, 12).map((tour, i) => (
-                    <div 
-                      key={tour.id || i}
-                      className={`flex-1 h-2 rounded-full ${
-                        tour.completed ? "bg-emerald-500" : 
-                        tour.on_way ? "bg-orange-500" : 
-                        "bg-slate-600"
-                      }`}
-                    />
-                  ))}
-                </div>
-                
-                {/* Stats row */}
-                <div className="flex items-center justify-between text-sm">
-                  <div className="flex items-center gap-4">
-                    <span className="flex items-center gap-1">
-                      <div className="w-3 h-3 rounded-full bg-orange-500" />
-                      <span className="text-orange-400 font-bold">{filteredOnWay.length}</span>
-                      <span className="text-slate-500">på vej</span>
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <div className="w-3 h-3 rounded-full bg-slate-600" />
-                      <span className="text-slate-400 font-bold">{filteredWaiting.length}</span>
-                      <span className="text-slate-500">venter</span>
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <div className="w-3 h-3 rounded-full bg-emerald-500" />
-                      <span className="text-emerald-400 font-bold">{filteredMyCompleted.length}</span>
-                      <span className="text-slate-500">færdig</span>
-                    </span>
-                  </div>
-                  <span className="text-slate-400">
-                    <span className="text-white font-bold">{filteredWeight}</span> kg
-                  </span>
-                </div>
-              </div>
-            )}
-
-            {/* Actions Bar - Optimize (Fase 15.31: Pause-quick-knapper fjernet) */}
-            {selectedPlads && (
-              <div className={`bg-slate-800 rounded-xl p-3 ${activeTab === 'ture' || activeTab === 'tid' || activeTab === 'profil' ? 'hidden' : ''}`}>
-                <div className="flex flex-wrap gap-2 items-center">
-                  <button onClick={handleOptimizeRoute} disabled={isOptimizing}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-medium text-xs transition-colors ${
-                      routeOptimization?.optimized
-                        ? "bg-emerald-600 text-white hover:bg-emerald-700"
-                        : "bg-orange-500 text-white hover:bg-orange-600"
-                    } ${isOptimizing ? "opacity-60 cursor-wait" : ""}`}
-                    data-testid="optimize-route-btn">
-                    <Navigation className="w-3.5 h-3.5" />
-                    {isOptimizing ? "Optimerer..." : routeOptimization?.optimized ? "Rute optimeret" : "Optimer rute"}
-                  </button>
-                  {routeOptimization?.optimized && (
-                    <button
-                      onClick={() => {
-                        setRouteOptimization(null);
-                        // Fase 12: Nulstil → slukker også automatisk optimering
-                        // så den ikke kører igen ved næste plads-skift.
-                        setRouteOptEnabled(false);
-                      }}
-                      className="flex items-center gap-1 px-2 py-1.5 bg-slate-600 text-slate-300 rounded-lg font-medium hover:bg-slate-500 text-xs"
-                      data-testid="clear-route-btn">
-                      <RotateCcw className="w-3 h-3" /> Nulstil
-                    </button>
-                  )}
-                </div>
-                {/* Route optimization summary */}
-                {routeOptimization?.optimized && (
-                  <div className="mt-2 flex flex-wrap gap-2 text-xs" data-testid="route-summary">
-                    <span className="px-2 py-1 bg-slate-700 text-blue-400 rounded-full font-medium">
-                      {routeOptimization.tours_with_coordinates}/{routeOptimization.total_tours} med GPS
-                    </span>
-                    <span className="px-2 py-1 bg-slate-700 text-slate-300 rounded-full font-medium" data-testid="solo-count">
-                      {routeOptimization.solo_count} SOLO
-                    </span>
-                    <span className="px-2 py-1 bg-slate-700 text-red-400 rounded-full font-bold" data-testid="haenger-count">
-                      {routeOptimization.haenger_count} HÆNGER
-                    </span>
-                    {routeOptimization.total_distance_km > 0 && (
-                      <span className="px-2 py-1 bg-slate-700 text-emerald-400 rounded-full font-medium" data-testid="total-distance">
-                        Total: {routeOptimization.total_distance_km} km
-                      </span>
-                    )}
-                    {routeOptimization.total_estimated_minutes > 0 && (
-                      <span className="px-2 py-1 bg-slate-700 text-amber-400 rounded-full font-medium" data-testid="total-time">
-                        ~{Math.floor(routeOptimization.total_estimated_minutes / 60)}t {routeOptimization.total_estimated_minutes % 60}m
-                      </span>
-                    )}
-                    {routeOptimization.google_maps_used && (
-                      <span className="px-2 py-1 bg-slate-700 text-green-400 rounded-full font-medium" data-testid="google-maps-badge">
-                        Google Maps
-                      </span>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Tours Section */}
-            <section className={`rounded-xl ${activeTab === 'ture' || activeTab === 'tid' || activeTab === 'profil' ? 'hidden' : ''}`}>
-              {/* No plads selected */}
-              {!selectedPlads && (
-                <div className="p-8 text-center">
-                  <MapPin className="w-12 h-12 mx-auto mb-3 text-slate-300" />
-                  <h3 className="text-lg font-bold text-slate-600 mb-2">Vælg din genbrugsplads</h3>
-                  <p className="text-slate-500 text-sm mb-3">Vælg hvilken genbrugsplads du kører fra i dag</p>
-                  <div className="flex flex-wrap gap-2 justify-center max-w-2xl mx-auto">
-                    {/* Fase 15.7 (2026-06-19): "Mine ture"-knap øverst i
-                        welcome-pickeren så chaufføren kan vælge denne option
-                        direkte (også uden at gå via dropdownen). Bevarer
-                        eksisterende dropdown-option ('plads-option-mine'). */}
-                    {(() => {
-                      // Fase 15.8: authUser fallback (selectedDriver er null i driver-flowet)
-                      const myId   = selectedDriver?.id || authUser?.id || "";
-                      const myName = driverName || authUser?.name || authUser?.driver_name || "";
-                      const mineCount = (tours || []).filter(t => {
-                        if (t.is_pause || t.completed) return false;
-                        const byClaim  = (myId && t.claimed_by_id === myId) || (myName && t.claimed_by === myName);
-                        const byAssign = (myId && (t.driver_id || "") === myId);
-                        return byClaim || byAssign;
-                      }).length;
-                      return (
-                        <button onClick={() => { setSelectedPlads("__MINE__"); setMineSelectedPlads(""); setCustomerFilter(""); }}
-                          className="px-3 py-1.5 rounded-lg font-bold text-sm transition-colors inline-flex items-center gap-1.5 bg-indigo-500 text-white hover:bg-indigo-600 shadow-md ring-2 ring-indigo-200"
-                          data-testid="driver-plads-btn-mine">
-                          <Users className="w-3.5 h-3.5" />
-                          Mine ture
-                          {mineCount > 0 && (
-                            <span className="bg-white/30 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">{mineCount}</span>
-                          )}
-                        </button>
-                      );
-                    })()}
-                    {(() => {
-                      // Prioritise plads that have tours today (so customer orders are always visible)
-                      const todaysPlads = new Set(
-                        (tours || [])
-                          .filter(t => !t.is_pause && t.plads)
-                          .map(t => t.plads)
-                      );
-                      const withTours = pladsOptions.filter(p => todaysPlads.has(p));
-                      const withoutTours = pladsOptions.filter(p => !todaysPlads.has(p));
-                      // Deduplicate while preserving order
-                      const seen = new Set();
-                      const merged = [...withTours, ...withoutTours].filter(p => {
-                        if (seen.has(p)) return false;
-                        seen.add(p); return true;
-                      });
-                      return merged.map(p => {
-                        const hasOrders = todaysPlads.has(p);
-                        return (
-                          <button key={p} onClick={() => { setSelectedPlads(p); setMineSelectedPlads(""); setCustomerFilter(""); }}
-                            className={`px-3 py-1.5 rounded-lg font-medium text-sm transition-colors inline-flex items-center gap-1.5 ${
-                              hasOrders
-                                ? "bg-orange-500 text-white hover:bg-orange-600 shadow-md ring-2 ring-orange-200"
-                                : "bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-600"
-                            }`}
-                            data-testid={`driver-plads-btn-${p}`}
-                          >
-                            {p}
-                            {hasOrders && (
-                              <span className="bg-white/30 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">
-                                {(tours || []).filter(t => t.plads === p && !t.is_pause).length}
-                              </span>
-                            )}
-                          </button>
-                        );
-                      });
-                    })()}
-                  </div>
-                </div>
-              )}
-          
-          {/* GROUPED TOUR VIEW - HÆNGER at top, SOLO at bottom */}
-          {/* Customer-scope tabs - visible only when the selected plads has tours
-              from more than one customer (driver serves multiple customers under
-              the same logistics co). Lets the driver visually isolate ARGO vs
-              MARTO tours, etc. */}
-          {selectedPlads && customerOptions.total > 1 && (
-            <div className="-mx-2 px-2 pt-1 pb-2 flex items-center gap-1.5 overflow-x-auto" data-testid="driver-customer-tabs">
-              <button
-                type="button"
-                onClick={() => setCustomerFilter("")}
-                className={`px-3 py-1 rounded-full text-xs font-bold whitespace-nowrap border ${
-                  customerFilter === ""
-                    ? "bg-orange-500 border-orange-500 text-white"
-                    : "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700"
-                }`}
-                data-testid="driver-customer-tab-all"
-              >
-                Alle kunder
-              </button>
-              {customerOptions.hasOwn && (
-                <button
-                  type="button"
-                  onClick={() => setCustomerFilter("__own__")}
-                  className={`px-3 py-1 rounded-full text-xs font-bold whitespace-nowrap border ${
-                    customerFilter === "__own__"
-                      ? "bg-emerald-500 border-emerald-500 text-white"
-                      : "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700"
-                  }`}
-                  data-testid="driver-customer-tab-own"
-                >
-                  Eget firma
-                </button>
-              )}
-              {customerOptions.customers.map(cn => (
-                <button
-                  key={cn}
-                  type="button"
-                  onClick={() => setCustomerFilter(cn)}
-                  className={`px-3 py-1 rounded-full text-xs font-bold whitespace-nowrap border ${
-                    customerFilter === cn
-                      ? "bg-blue-500 border-blue-500 text-white"
-                      : "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700"
-                  }`}
-                  data-testid={`driver-customer-tab-${cn}`}
-                >
-                  {cn}
-                </button>
-              ))}
-            </div>
-          )}
-
-          {/* Tour fraction (materyal) search box - sticky just above the first tour */}
-          {selectedPlads && (
-            <div className={`sticky top-0 z-20 -mx-2 px-2 py-2 bg-slate-900/95 backdrop-blur border-b border-slate-700 ${activeTab === 'ture' || activeTab === 'tid' || activeTab === 'profil' ? 'hidden' : ''}`} data-testid="driver-tour-search-wrap">
-              <div className="flex items-center gap-2">
-                <div className="relative flex-1">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
-                  <input
-                    type="text"
-                    value={tourSearch}
-                    onChange={(e) => setTourSearch(e.target.value)}
-                    placeholder="Søg fraktion (f.eks. træ, papir, jern...)"
-                    className="w-full pl-10 pr-9 py-2.5 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white placeholder:text-slate-500 focus:border-orange-500 focus:ring-1 focus:ring-orange-500 outline-none"
-                    data-testid="driver-tour-search-input"
-                  />
-                  {tourSearch && (
-                    <button
-                      type="button"
-                      onClick={() => setTourSearch("")}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-full text-slate-400 hover:text-white hover:bg-slate-700"
-                      data-testid="driver-tour-search-clear-inline"
-                      aria-label="Ryd søgning"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
-                  )}
-                </div>
-                {/* Fase 15.2 (2026-06-19): "Afventende ture"-toggle - flyttet
-                    ned tæt på tur-listen. Slår man den til udvider hovedlisten
-                    med afventende ture (i dag + tidligere, ikke afsluttede)
-                    fra hele chaufførens scope. Original dato på turen bevares. */}
-                <button
-                  type="button"
-                  onClick={() => setShowPendingInList(v => !v)}
-                  className={`flex-shrink-0 px-3 py-2.5 rounded-lg text-xs font-bold border-2 transition-colors flex items-center gap-1.5 ${
-                    showPendingInList
-                      ? "bg-amber-500 text-white border-amber-500 hover:bg-amber-600"
-                      : "bg-slate-800 text-amber-300 border-amber-700 hover:bg-amber-950/50"
-                  }`}
-                  data-testid="afventende-toggle-btn"
-                  title={showPendingInList ? "Skjul afventende ture fra tidligere datoer" : "Vis afventende ture fra i dag og tidligere"}
-                >
-                  <FileText className="w-3.5 h-3.5" />
-                  {showPendingInList ? "Skjul afventende" : "Vis afventende"}
-                </button>
-              </div>
-              {showPendingInList && (
-                <p className="mt-2 text-[11px] text-amber-300 italic flex items-center gap-1" data-testid="afventende-toggle-note">
-                  <Clock className="w-3 h-3" />
-                  Viser også afventende ture fra tidligere datoer - forsinkede ture er markeret rødt.
-                </p>
-              )}
-            </div>
-          )}
-
-          {selectedPlads && visibleTours.length === 0 && sortedTours.length === 0 && (
-            <div className="p-6 text-center text-muted-foreground">
-              <Truck className="w-10 h-10 mx-auto mb-2 opacity-30" />
-              {tourSearch
-                ? `Ingen ture matcher "${tourSearch}" i ${selectedPlads === "__MINE__" ? "Mine ture" : selectedPlads}`
-                : `Ingen ture i ${selectedPlads === "__MINE__" ? "Mine ture" : selectedPlads}`}
-            </div>
-          )}
-
-          {/* Fase 11 (2026-06-18): Når der KUN er færdige ture tilbage,
-              vis en tom-state med call-to-action knap til at vise dem. */}
-          {selectedPlads && visibleTours.length === 0 && sortedTours.length > 0 && (
-            <div className="p-6 text-center bg-emerald-950/20 border border-emerald-800/40 rounded-xl" data-testid="driver-all-done">
-              <CheckCircle2 className="w-10 h-10 mx-auto mb-2 text-emerald-400" />
-              <p className="text-emerald-300 font-bold mb-1">Alle dagens ture er fuldført 🎉</p>
-              <p className="text-slate-400 text-sm mb-3">
-                {sortedTours.filter(t => t.completed && !t.is_pause).length} færdige ture på {selectedPlads}
-              </p>
-              <button
-                onClick={() => setShowCompletedDriver(true)}
-                className="px-4 py-2 bg-emerald-600 text-white rounded-lg font-bold hover:bg-emerald-700 transition-colors"
-                data-testid="driver-show-completed-btn"
-              >
-                Vis færdiggjorte ture
-              </button>
-            </div>
-          )}
-
-          {selectedPlads && visibleTours.length > 0 && (
-          <div className="space-y-2" data-testid="driver-grouped-tours">
-            {/* Fase 11 (2026-06-18): Toggle for færdiggjorte - synlig når der
-                er færdige ture som er skjult. */}
-            {sortedTours.filter(t => t.completed && !t.is_pause).length > 0 && (
-              <div className="flex justify-end mb-1">
-                <button
-                  onClick={() => setShowCompletedDriver(v => !v)}
-                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
-                    showCompletedDriver
-                      ? "bg-emerald-600 text-white hover:bg-emerald-700"
-                      : "bg-slate-700 text-slate-300 hover:bg-slate-600"
-                  }`}
-                  data-testid="driver-toggle-completed-btn"
-                >
-                  {showCompletedDriver
-                    ? <>Skjul færdiggjorte ({sortedTours.filter(t => t.completed && !t.is_pause).length})</>
-                    : <>Vis færdiggjorte ture ({sortedTours.filter(t => t.completed && !t.is_pause).length})</>}
-                </button>
-              </div>
-            )}
-            {/* === HÆNGER GROUPS (Koyu Tema) === */}
-            {routeOptimization?.optimized && routeOptimization.haenger_count > 0 && (
-              <div className="space-y-2">
-                {Object.entries(routeOptimization.groups || {})
-                  .map(([gid, memberIds]) => {
-                    const groupTours = memberIds.map(mid => visibleTours.find(t => t.id === mid)).filter(Boolean);
-                    const allCompleted = groupTours.every(t => t.completed);
-                    const hasOnWay = groupTours.some(t => t.on_way && !t.completed);
-                    const hasUrgent = groupTours.some(t => t.priority === "urgent" || t.remark?.toLowerCase().includes("haster"));
-                    const statusOrder = hasOnWay ? 0 : allCompleted ? 2 : 1;
-                    return { gid, memberIds, groupTours, allCompleted, hasOnWay, hasUrgent, statusOrder };
-                  })
-                  .filter(g => g.groupTours.length > 0)
-                  .sort((a, b) => {
-                    // Completed groups at bottom
-                    if (a.allCompleted !== b.allCompleted) return a.allCompleted ? 1 : -1;
-                    // HASTER groups on top (overrides on_way)
-                    if (a.hasUrgent !== b.hasUrgent) return a.hasUrgent ? -1 : 1;
-                    // Then on_way
-                    return a.statusOrder - b.statusOrder;
-                  })
-                  .map(({ gid, groupTours, allCompleted, hasOnWay, hasUrgent }) => {
-                    const firstRi = getRouteInfo(groupTours[0]?.id);
-                    const addr = groupTours[0]?.address || "";
-                    const totalKm = firstRi?.distance_km || 0;
-                    const totalMin = firstRi?.estimated_minutes || 0;
-                    
-                    // Group status
-                    const getGroupBorder = () => {
-                      if (allCompleted) return "border-l-emerald-500";
-                      if (hasOnWay) return "border-l-orange-500";
-                      return "border-l-red-500";
-                    };
-                    
-                    return (
-                      <div key={gid} className={`border-l-4 ${getGroupBorder()} bg-slate-800 rounded-xl overflow-hidden ${allCompleted ? "opacity-60" : ""}`} data-testid={`driver-haenger-group-${gid}`}>
-                        {/* Group header */}
-                        <div className="px-3 py-2 bg-slate-700/50 flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                            <span className="px-2 py-0.5 bg-red-600 text-white text-[10px] font-black rounded-md">{gid}</span>
-                            <span className={`px-2 py-0.5 ${allCompleted ? "bg-emerald-500" : hasOnWay ? "bg-orange-500" : "bg-red-500"} text-white text-[10px] font-black rounded-md`}>
-                              {allCompleted ? "FÆRDIG" : hasOnWay ? "PÅ VEJ" : "HÆNGER"}
-                            </span>
-                            {hasUrgent && !allCompleted && (
-                              <span className="px-2 py-0.5 bg-red-500 text-white text-[10px] font-black rounded-md animate-pulse" data-testid={`haenger-group-haster-${gid}`}>HASTER</span>
-                            )}
-                            <span className="text-slate-400 text-xs">{groupTours.length} cont.</span>
-                          </div>
-                          <div className="flex items-center gap-2 text-xs text-slate-400">
-                            <span>{totalKm} km</span>
-                            <span>~{totalMin}m</span>
-                          </div>
-                        </div>
-                        
-                        {/* Address */}
-                        <div className="px-3 py-1.5 text-xs text-slate-400 border-b border-slate-700">
-                          <MapPin className="w-3 h-3 inline mr-1" />{addr}
-                        </div>
-                        
-                        {/* Tours */}
-                        <div className="divide-y divide-slate-700">
-                          {groupTours.map((tour, idx) => {
-                            const ri = getRouteInfo(tour.id);
-                            const traekNr = ri?.traek_nr || (idx + 1);
-                            const h = extractOpenHours(tour);
-                            
-                            const getStatusStyle = () => {
-                              if (tour.completed) return { badge: "bg-emerald-500", badgeText: "FÆRDIG" };
-                              if (tour.on_way) return { badge: "bg-orange-500", badgeText: "PÅ VEJ" };
-                              return { badge: "bg-slate-500", badgeText: "VENTER" };
-                            };
-                            const statusStyle = getStatusStyle();
-                            
-                            return (
-                              <div key={tour.id} className="p-3" data-testid={`driver-haenger-tour-${tour.id}`}>
-                                <div className="flex items-start gap-3">
-                                  {/* Træk number */}
-                                  <div className={`flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-white text-xs font-bold ${
-                                    tour.completed ? "bg-emerald-500" : tour.on_way ? "bg-orange-500" : "bg-red-600"
-                                  }`}>
-                                    {traekNr}
-                                  </div>
-                                  
-                                  {/* Content */}
-                                  <div className="flex-1 min-w-0 cursor-pointer" onClick={() => setSelectedTourForPanel(tour)}>
-                                    <div className="flex items-center gap-2 flex-wrap">
-                                      <h3 className="font-bold text-white text-base truncate">{tour.fraction}</h3>
-                                      {/* Fase 15.4 (2026-06-19): Container-nr. som første grå
-                                          label ved siden af tur-navnet. */}
-                                      {(tour.container_id_override || tour.container_id_resolved || tour.custom_container_id || tour.container) && (
-                                        <span className="px-1.5 py-0.5 bg-slate-600 text-slate-200 text-[10px] font-bold rounded uppercase tracking-wide font-mono"
-                                          data-testid={`haenger-container-badge-${tour.id}`}>
-                                          {tour.container_id_override || tour.container_id_resolved || tour.custom_container_id || tour.container}
-                                        </span>
-                                      )}
-                                      {/* Fase 15.45 (2026-02-22): Store blå
-                                          customer_name-badge + "Bestilling"-
-                                          source-badge fjernet pr. bruger-
-                                          ønske. Kundenavnet vises stadig
-                                          som purple chip i info-rækken
-                                          længere nede (tour-customer-{id}),
-                                          og kilden er irrelevant for chaufføren. */}
-                                      {/* Fase 15.29 (2026-02-22): HASTER/HØJ/LAV-badge ved siden af
-                                          materiale/lokation/bestillingstype FJERNET pr. bruger-ønske.
-                                          HASTER vises nu KUN via prioritets-chippen i info-rækken
-                                          længere nede (med flag-ikon). */}
-                                      {tour.is_same_day && (
-                                        <span className="px-1.5 py-0.5 bg-orange-500 text-white text-[10px] font-bold rounded">SD</span>
-                                      )}
-                                    </div>
-                                    <p className="text-slate-400 text-sm">
-                                      <span className="text-red-400">HÆNGER</span>
-                                      <span className="text-slate-500"> • {tour.facility?.split(',')[0]}</span>
-                                    </p>
-
-                                    {/* Fase 13 (2026-06-18): Info-chips med ALLE relevante data for chaufføren -
-                                        opgavetype, kapacitetsmål, afhentningsdato, bestillingstidspunkt og bestilt af. */}
-                                    <div className="mt-1.5 flex flex-wrap gap-1" data-testid={`tour-info-chips-${tour.id}`}>
-                                      {tour.tour_type && (
-                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-purple-500/15 text-purple-300 text-[10px] font-bold">
-                                          <Wrench className="w-2.5 h-2.5" />{TOUR_TYPE_LABELS[tour.tour_type] || tour.tour_type}
-                                        </span>
-                                      )}
-                                      {(tour.capacity_label || tour.capacity_volume_m3 != null) && (
-                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-amber-500/15 text-amber-300 text-[10px] font-bold">
-                                          <Package2 className="w-2.5 h-2.5" />{formatCapacity(tour)}
-                                        </span>
-                                      )}
-                                      {/* Fase 15.13 (2026-02-XX): Generel prioritets-chip */}
-                                      {(() => {
-                                        const pc = getPriorityChip(tour);
-                                        return (
-                                          <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border ${pc.cls} text-[10px] font-bold`}
-                                            data-testid={`haenger-priority-info-${tour.id}`}>
-                                            <Flag className="w-2.5 h-2.5" />{pc.label}
-                                          </span>
-                                        );
-                                      })()}
-                                      {/* Fase 15.14 (2026-02-XX): Kundefirma-tag */}
-                                      {tour.customer_name && (
-                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-purple-500/15 text-purple-200 border border-purple-500/40 text-[10px] font-bold max-w-[200px]"
-                                          data-testid={`haenger-customer-${tour.id}`}
-                                          title={`Kunde: ${tour.customer_name}`}>
-                                          <Building2 className="w-2.5 h-2.5 flex-shrink-0" /><span className="truncate">{tour.customer_name}</span>
-                                        </span>
-                                      )}
-                                      {tour.order_date && (
-                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-emerald-500/15 text-emerald-300 text-[10px] font-bold">
-                                          <Truck className="w-2.5 h-2.5" />Bestillingsdato {_fmtDateDM(tour.order_date)}
-                                        </span>
-                                      )}
-                                      {tour.created_at && (
-                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-blue-500/15 text-blue-300 text-[10px] font-bold">
-                                          <Calendar className="w-2.5 h-2.5" />Oprettet den {_fmtDateDM(tour.created_at)} {_fmtTimeHM(tour.created_at)}
-                                        </span>
-                                      )}
-                                      {(tour.created_by_name || tour.created_by_email) && (
-                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-slate-700/60 text-slate-300 text-[10px] font-bold max-w-[200px]" title={tour.created_by_email || tour.created_by_name}>
-                                          <Users className="w-2.5 h-2.5 flex-shrink-0" /><span className="truncate">af {tour.created_by_name || tour.created_by_email}</span>
-                                        </span>
-                                      )}
-                                      {/* Fase 15.5/15.7/15.8 (2026-02-XX): "Tildelt af X" - solid baggrund for klar synlighed. */}
-                                      {tour.assigned_by_name && (
-                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-indigo-500 text-white border border-indigo-300 shadow-sm text-[10px] font-bold max-w-[260px]"
-                                          title={tour.assigned_at ? `Tildelt ${tour.assigned_at}` : ""}
-                                          data-testid={`haenger-tour-assigned-by-${tour.id}`}>
-                                          <UserCheck className="w-2.5 h-2.5 flex-shrink-0" />
-                                          <span className="truncate">Tildelt af {tour.assigned_by_name}</span>
-                                        </span>
-                                      )}
-                                    </div>
-
-                                    {/* Claimed by indicator */}
-                                    {tour.claimed_by && (
-                                      <div className="flex items-center gap-1.5 mt-1 text-xs" data-testid={`haenger-claimed-by-${tour.id}`}>
-                                        <Users className="w-3 h-3 text-blue-400" />
-                                        <span className="text-blue-400 font-medium">{tour.claimed_by}</span>
-                                        {tour.completed && <span className="text-slate-500">har afsluttet</span>}
-                                        {tour.on_way && !tour.completed && <span className="text-slate-500">kører</span>}
-                                      </div>
-                                    )}
-                                    
-                                    {(tour.on_way || tour.completed) && (
-                                      <div className="flex items-center gap-2 mt-1 text-xs">
-                                        {tour.on_way_time && <span className="text-slate-300">{tour.on_way_time} → {tour.completed && tour.time ? tour.time : "?"}</span>}
-                                        {tour.completed && tour.weight && <span className="text-emerald-400 font-bold">{tour.weight} kg</span>}
-                                      </div>
-                                    )}
-                                    
-                                    {h.cleanRemark && (
-                                      <div className="flex items-center gap-1.5 mt-1.5 text-xs">
-                                        <ChevronRight className="w-3 h-3 text-rose-400" />
-                                        <span className="text-rose-400">{h.cleanRemark}</span>
-                                      </div>
-                                    )}
-                                  </div>
-                                  
-                                  {/* Right: single status button (text only, no truck icon) */}
-                                  <div className="flex flex-col items-end gap-2 flex-shrink-0">
-                                    {tour.completed ? (
-                                      <span className="px-3 py-2 bg-emerald-500 text-white text-xs font-black rounded-lg min-w-[72px] text-center" data-testid={`haenger-status-${tour.id}`}>
-                                        FÆRDIG
-                                      </span>
-                                    ) : tour.on_way && inlineWeightTourId !== tour.id ? (
-                                      // Fase 14 (2026-06-19): "PÅ VEJ" er nu
-                                      // read-only badge - chaufføren bruger
-                                      // tur-detalje-panelet (Afslut-knappen)
-                                      // til at fuldføre turen.
-                                      <span
-                                        className="px-3 py-2 bg-orange-500 text-white text-xs font-black rounded-lg min-w-[72px] text-center select-none"
-                                        data-testid={`haenger-status-${tour.id}`}
-                                      >
-                                        PÅ VEJ
-                                      </span>
-                                    ) : !tour.on_way ? (
-                                      // Fase 14 (2026-06-19): "VENTER" er nu
-                                      // read-only - chaufføren claimer/starter
-                                      // turen fra detalje-panelet (På vej-knap).
-                                      <span
-                                        className="px-3 py-2 bg-slate-600 text-white text-xs font-black rounded-lg min-w-[72px] text-center select-none"
-                                        data-testid={`haenger-status-${tour.id}`}
-                                      >
-                                        VENTER
-                                      </span>
-                                    ) : (
-                                      <span className={`px-3 py-2 ${statusStyle.badge} text-white text-xs font-black rounded-lg min-w-[72px] text-center`} data-testid={`haenger-status-${tour.id}`}>
-                                        {statusStyle.badgeText}
-                                      </span>
-                                    )}
-                                  </div>
-                                </div>
-                                
-                                {tour.on_way && inlineWeightTourId === tour.id && !tour.completed && (tour.tour_type || "normal") === "normal" && (
-                                  <div className="mt-2 space-y-2">
-                                    <div className="flex items-center gap-2">
-                                      <input type="number" inputMode="numeric" value={inlineWeight} onChange={e => setInlineWeight(e.target.value)} onKeyDown={e => { if (e.key === "Enter") handleInlineComplete(tour.id); }} placeholder="Vægt (kg)" autoFocus className="w-28 px-2 py-2 text-base font-mono font-bold text-center bg-slate-700 border-2 border-emerald-400 rounded-xl text-white" data-testid={`inline-weight-${tour.id}`} />
-                                      {/* Fase 17 (2026-02-27): Fjernet inline OCR-kamera (ProReceiptScanner).
-                                          Brug i stedet "Scan kvittering" i MobileTourPanel - det
-                                          bruger jscanify uden OCR. */}
-                                      <button onClick={() => handleInlineComplete(tour.id)} className="px-4 py-2 bg-emerald-500 text-white font-bold rounded-xl" data-testid={`inline-done-${tour.id}`}>
-                                        <CheckCircle2 className="w-6 h-6" />
-                                      </button>
-                                      <button onClick={() => setInlineWeightTourId(null)} className="px-2 py-2 bg-slate-600 text-slate-300 rounded-xl">
-                                        <X className="w-5 h-5" />
-                                      </button>
-                                    </div>
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    );
-                  })}
-              </div>
-            )}
-
-            {/* === PAUSES (only shown to the driver who created them) === */}
-            {sortedTours.filter(t => t.is_pause && (t.driver_name === driverName || t.claimed_by === driverName)).map(tour => (
-              <div key={tour.id} className="bg-orange-50 dark:bg-orange-950/20 border border-orange-200 rounded-xl p-3 flex items-center justify-between" data-testid={`driver-pause-${tour.id}`}>
-                <div className="flex items-center gap-2">
-                  <Pause className="w-4 h-4 text-orange-500" />
-                  <span className="font-bold text-orange-600 text-sm">PAUSE {tour.time || "45 min"}</span>
-                </div>
-                <button onClick={() => handleDeleteTour(tour.id)} className="p-1 text-red-400 hover:bg-red-100 rounded">
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            ))}
-
-            {/* === SOLO TOURS === */}
-            {(() => {
-              const soloTours = visibleTours.filter(t => {
-                if (t.is_pause) return false;
-                const ri = getRouteInfo(t.id);
-                return !ri || ri.job_type !== "HAENGER";
-              });
-              if (soloTours.length === 0) return null;
-              // Fase 15.13 (2026-02-XX): Sektions-skel HASTER / Mine ture / Ledige ture
-              //   + ny "Ture hos andre chauffører"-sektion nederst (collapsed).
-              // VIGTIGT: "others"-tier OVERRULER "haster" så HASTER-sektionen
-              // bevarer sin oprindelige adfærd (kun urgent jeg kan agere på).
-              // Ture hos andre kommer ud i en separat read-only collapsibel.
-              const myIdSec   = selectedDriver?.id || authUser?.id || "";
-              const myNameSec = driverName || authUser?.name || authUser?.driver_name || "";
-              const isMineViewGlobal = selectedPlads === "__MINE__";
-              // Fase 15.25 (2026-02-21): Klassifikations-matrix:
-              //
-              //  Side / Tur-status        | Mine HASTER  | Ikke-mine HASTER  | Mine normal | Ledige normal | Andre chf.
-              //  -------------------------+--------------+-------------------+-------------+---------------+------------
-              //  Global "Mine ture"       | mine (øverst)| vises ikke (fri+filter strict)| mine        | (skjult)      | (skjult)
-              //  Lokationsside (Blishøj…) | mine (øverst)| haster            | mine        | fri           | others
-              //
-              // Mine HASTER bliver til "mine" (placeres øverst i sektionen
-              // takket være urgent-sorteringen i `sortedTours`). Sin HASTER-
-              // markering forbliver synlig via badge + pulserende ring.
-              const classifyTour = (t) => {
-                if (t._is_other_driver) return "others";
-                const ownerId   = (t.driver_id || "").trim() || (t.claimed_by_id || "").trim();
-                const ownerName = (t.claimed_by || "").trim();
-                const mine = (myIdSec && ownerId === myIdSec) || (myNameSec && ownerName === myNameSec);
-                const isUrgent = (() => {
-                  const p = (t.priority || "").toString().toLowerCase();
-                  return p === "urgent" || p === "haster" || (t.remark || "").toLowerCase().includes("haster");
-                })();
-                // 1) Mine ture (incl. mine HASTER) → "mine"
-                if (mine) return "mine";
-                // 2) Ikke-mine HASTER:
-                //    - Global "Mine ture": filtreres væk upstream → her klassificeres som "fri" (vises ikke)
-                //    - Lokationsside: vises i Hasteture-sektionen
-                if (isUrgent) {
-                  return isMineViewGlobal ? "fri" : "haster";
-                }
-                // 3) Ledige normale
-                return "fri";
-              };
-              // Fase 15.13 (2026-02-XX): "others"-ture vises i EGEN read-only sektion
-              // - derfor partitionerer vi soloTours i mainTours (haster/mine/fri)
-              // og otherDriverTours (others) der renderes separat med eget UI.
-              // Other-sektion vises kun for valgte dato + aktive (PÅ VEJ + VENTER).
-              const mainTours = [];
-              const otherDriverTours = [];
-              soloTours.forEach(t => {
-                const c = classifyTour(t);
-                if (c === "others") {
-                  // Andre chauffører: kun dagens dato + ikke færdig
-                  const td = (t.date || "").slice(0, 10);
-                  if (td === reportDate && !t.completed) {
-                    otherDriverTours.push(t);
-                  }
-                } else {
-                  mainTours.push(t);
-                }
-              });
-              const SECTION_HEADERS = {
-                haster: { label: "Haster",     icon: AlertTriangle, color: "text-red-200",     bg: "bg-red-500/15",     border: "border-red-500/40" },
-                mine:   { label: "Mine ture",  icon: UserCheck,     color: "text-indigo-200",  bg: "bg-indigo-500/15",  border: "border-indigo-500/40" },
-                fri:    { label: "Ledige ture", icon: Package2,    color: "text-emerald-200", bg: "bg-emerald-500/15", border: "border-emerald-500/40" },
-              };
-              return (
-                <div className="space-y-2">
-                  {routeOptimization?.optimized && routeOptimization.haenger_count > 0 && (
-                    <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2 px-1" data-testid="driver-solo-header">
-                      <Navigation className="w-3.5 h-3.5" /> Solo Ture
-                    </h3>
-                  )}
-                  {(() => {
-                    // Fase 15.26 (2026-02-21): GRUPPÉR ture pr. sektion FØRST,
-                    // dernæst render hver sektion ÉN GANG med dens egen liste
-                    // af ture. Tidligere render-loop iterérede flade `mainTours`
-                    // og re-emit'ede en header hver gang `classifyTour`-resultatet
-                    // skiftede - hvilket forårsagede gentagne "MINE TURE (n)"-
-                    // headers når sorteringen interleaver mine/fri/haster (fx
-                    // mine-haster → ledig-haster → mine-onway).
-                    //
-                    // Sektions-rækkefølge: HASTER (kun ikke-mine, lokationsside),
-                    // MINE TURE (mine ture inkl. mine HASTERS), LEDIGE TURE.
-                    // Intern sortering inden for hver sektion bevares fra
-                    // `sortedTours`-rækkefølgen (urgent øverst, så on_way, så
-                    // assigned, så kronologisk).
-                    const grouped = { haster: [], mine: [], fri: [] };
-                    mainTours.forEach(t => {
-                      const k = classifyTour(t);
-                      if (grouped[k]) grouped[k].push(t);
-                    });
-                    // Fase 15.27 (2026-02-21): Sektion-rækkefølge på lokationssider:
-                    // 1) Mine ture (øverst - chaufførens direkte ansvar)
-                    // 2) HASTER (kun ledige/ikke-mine - andenprioritet)
-                    // 3) Ledige ture (resterende ikke-haster ledige)
-                    // På global "Mine ture"-visning er kun "mine"-sektionen befolket.
-                    const sectionOrder = ["mine", "haster", "fri"];
-                    const elements = [];
-                    // Global indeks for tur-nummerering (1,2,3 på tværs af sektioner).
-                    let globalIdx = 0;
-                    sectionOrder.forEach(sec => {
-                      const list = grouped[sec] || [];
-                      if (list.length === 0) return;
-                      const cfg = SECTION_HEADERS[sec];
-                      if (!cfg) return;
-                      const Ico = cfg.icon;
-                      elements.push(
-                        <div
-                          key={`sec-${sec}`}
-                          className={`flex items-center gap-2 px-3 py-2 rounded-lg border ${cfg.border} ${cfg.bg} ${cfg.color} text-xs font-black uppercase tracking-wider mt-4 first:mt-0`}
-                          data-testid={`driver-section-${sec}`}
-                        >
-                          <Ico className="w-4 h-4" />
-                          <span className="flex-1">{cfg.label} ({list.length})</span>
-                        </div>
-                      );
-                      // Fase 15.27: Når sektionen er "mine" markeres turen med
-                      // `isMine`-flag så renderSoloTour ved at den skal vise den
-                      // forstærkede HASTER-puls (chip + venstre kant).
-                      const isMineSection = sec === "mine";
-                      list.forEach(tour => {
-                        elements.push(renderSoloTour(tour, globalIdx, isMineSection));
-                        globalIdx += 1;
-                      });
-                    });
-                    return elements;
-                  })()}
-                  {/* Fase 15.13 (2026-02-XX): NY 4. SEKTION - "Ture hos andre
-                      chauffører" (pre-collapsed, read-only). Vises KUN på
-                      lokationssider (ikke i Mine ture-fanen). Indeholder kun
-                      dagens ture hos andre. */}
-                  {selectedPlads !== "__MINE__" && otherDriverTours.length > 0 && (
-                    <div className="mt-4" data-testid="driver-section-other-drivers-wrapper">
-                      <button
-                        type="button"
-                        onClick={() => setOtherDriverSectionOpen(v => !v)}
-                        className="w-full flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-500/40 bg-slate-500/15 text-slate-200 text-xs font-black uppercase tracking-wider hover:bg-slate-500/25 transition-colors"
-                        data-testid="driver-section-others-toggle"
-                        aria-expanded={otherDriverSectionOpen}
-                      >
-                        <Users className="w-4 h-4" />
-                        <span className="flex-1 text-left">Ture hos andre chauffører ({otherDriverTours.length})</span>
-                        {otherDriverSectionOpen
-                          ? <ChevronsUp className="w-4 h-4" />
-                          : <ChevronsDown className="w-4 h-4" />}
-                      </button>
-                      {otherDriverSectionOpen && (
-                        <div className="mt-2 space-y-2" data-testid="driver-section-other-drivers-list">
-                          {otherDriverTours.map((tour, idx) => {
-                            const isOnWay = tour.on_way && !tour.completed;
-                            const ownerLabel = (tour.claimed_by || tour.driver_name || "").trim() || "anden chauffør";
-                            return (
-                              <div
-                                key={tour.id}
-                                className={`border-l-4 ${isOnWay ? "border-l-orange-500/60" : "border-l-slate-500/60"} bg-slate-800/60 rounded-xl overflow-hidden opacity-80`}
-                                data-testid={`driver-other-tour-${tour.id}`}
-                              >
-                                <div className="p-3">
-                                  <div className="flex items-start justify-between gap-2 mb-1.5">
-                                    <div className="flex-1 min-w-0">
-                                      <div className="flex items-center gap-1.5 flex-wrap">
-                                        <span className="font-black text-white">{tour.fraction || "-"}</span>
-                                        {tour.container_no && (
-                                          <span className="text-[10px] text-slate-400 font-mono">{tour.container_no}</span>
-                                        )}
-                                      </div>
-                                      <p className="text-xs text-slate-400 truncate">
-                                        {tour.address || tour.facility || tour.plads}
-                                      </p>
-                                    </div>
-                                    <span className={`text-[10px] font-black px-2 py-0.5 rounded ${isOnWay ? "bg-orange-500/20 text-orange-200" : "bg-slate-500/20 text-slate-200"}`}>
-                                      {isOnWay ? "PÅ VEJ" : "VENTER"}
-                                    </span>
-                                  </div>
-                                  <div className="flex flex-wrap gap-1.5">
-                                    {(() => {
-                                      const pc = getPriorityChip(tour);
-                                      return (
-                                        <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border ${pc.cls} text-[10px] font-bold`}>
-                                          <Flag className="w-2.5 h-2.5" />{pc.label}
-                                        </span>
-                                      );
-                                    })()}
-                                    {(tour.capacity_label || tour.capacity_volume_m3 != null) && (
-                                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-amber-500/15 text-amber-300 text-[10px] font-bold">
-                                        <Package2 className="w-2.5 h-2.5" />{formatCapacity(tour)}
-                                      </span>
-                                    )}
-                                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-slate-700/60 text-slate-300 text-[10px] font-bold">
-                                      <User className="w-2.5 h-2.5" />
-                                      Hos {ownerLabel}
-                                    </span>
-                                  </div>
-                                  <p className="text-[10px] text-slate-500 italic mt-2">
-                                    Read-only - bestil ikke ny tur til denne container.
-                                  </p>
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              );
-              // Hjælper: render én tur. Defineres efter return men hoisted via function decl.
-              // Fase 15.27 (2026-02-21): `isMineSection`-parameter styrer om en
-              // HASTER-tur skal vise forstærket puls (chip + venstre kant).
-              // Ikke-mine HASTERS beholder den eksisterende lette chip-puls.
-              function renderSoloTour(tour, idx, isMineSection = false) {
-                    const ri = getRouteInfo(tour.id);
-                    const h = extractOpenHours(tour);
-                    const isClaimedByOther = tour.claimed_by && tour.claimed_by !== driverName;
-
-                    // Status style
-                    const getStatusStyle = () => {
-                      if (tour.completed) return { border: "border-l-emerald-500", badge: "bg-emerald-500", badgeText: "FÆRDIG", btnBg: "bg-emerald-500" };
-                      if (tour.on_way) return { border: "border-l-orange-500", badge: "bg-orange-500", badgeText: "PÅ VEJ", btnBg: "bg-orange-500" };
-                      return { border: "border-l-slate-500", badge: "bg-slate-500", badgeText: "VENTER", btnBg: "bg-slate-600" };
-                    };
-                    const statusStyle = getStatusStyle();
-                    // Fase 15.29 (2026-02-22): Pulserende ramme/glow fjernet pr. bruger-
-                    // ønske. HASTER-markering sker nu KUN via prioritets-chippen i
-                    // info-rækken (med flag-ikon), som pulserer. Ingen badge øverst,
-                    // ingen pulserende ring om kortet.
-                    const borderCls = statusStyle.border;
-                    
-                    return (
-                      <div key={tour.id} className={`border-l-4 ${borderCls} bg-slate-800 rounded-xl overflow-hidden`} data-testid={`driver-solo-tour-${tour.id}`}>
-                        <div className="p-3 flex items-start gap-3">
-                          {/* Order number */}
-                          <div className={`flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-white text-sm font-bold ${
-                            tour.completed ? "bg-emerald-500" : tour.on_way ? "bg-orange-500" : "bg-slate-600"
-                          }`}>
-                            {ri?.route_order || (idx + 1)}
-                          </div>
-                          
-                          {/* Content */}
-                          <div className="flex-1 min-w-0 cursor-pointer" onClick={() => setSelectedTourForPanel(tour)}>
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <h3 className="font-bold text-white text-base truncate">{tour.fraction}</h3>
-                              {/* Fase 15.4 (2026-06-19): Container-nr. som første grå label
-                                  ved siden af tur-navnet - mere fremvisende end den lille
-                                  tekst-prik nedenunder. */}
-                              {(tour.container_id_override || tour.container_id_resolved || tour.custom_container_id || tour.container) && (
-                                <span className="px-1.5 py-0.5 bg-slate-600 text-slate-200 text-[10px] font-bold rounded uppercase tracking-wide font-mono"
-                                  data-testid={`solo-container-badge-${tour.id}`}>
-                                  {tour.container_id_override || tour.container_id_resolved || tour.custom_container_id || tour.container}
-                                </span>
-                              )}
-                              {/* Fase 15.45 (2026-02-22): Store blå customer_name-
-                                  badge + "Bestilling"-source-badge fjernet pr.
-                                  bruger-ønske. Kundenavn vises stadig som purple
-                                  chip i info-rækken nedenfor (tour-customer-{id}). */}
-                              {/* Fase 15.29 (2026-02-22): HASTER/HØJ/LAV-badge ved siden af
-                                  materiale/lokation/bestillingstype FJERNET pr. bruger-ønske.
-                                  HASTER vises nu KUN via prioritets-chippen i info-rækken
-                                  længere nede (med flag-ikon), som pulserer. */}
-                              {tour.is_same_day && (
-                                <span className="px-1.5 py-0.5 bg-orange-500 text-white text-[10px] font-bold rounded">SD</span>
-                              )}
-                              {tour.is_private && (
-                                <span className="px-1.5 py-0.5 bg-indigo-500 text-white text-[10px] font-black rounded" data-testid={`solo-firma-badge-${tour.id}`}>FIRMA</span>
-                              )}
-                            </div>
-                            {/* Fase 15.4 (2026-06-19): "SOLO"-tekst FJERNET fra hver tur -
-                                vises kun når rute-optimering er aktiv (via route-info badge
-                                ovenfor i MobileTourCard). Container-nr. er flyttet op som
-                                grå label ved tur-navnet. */}
-                            <p className="text-slate-400 text-sm">
-                              {tour.is_private && <span>FIRMA TUR · </span>}
-                              <span className="text-slate-500">{tour.is_private ? (tour.private_company || tour.fraction) : (tour.address?.split(',')[0] || tour.facility?.split(',')[0])}</span>
-                            </p>
-
-                            {/* Fase 13 (2026-06-18): Info-chips med ALLE relevante data for chaufføren */}
-                            <div className="mt-1.5 flex flex-wrap gap-1" data-testid={`tour-info-chips-${tour.id}`}>
-                              {tour.tour_type && (
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-purple-500/15 text-purple-300 text-[10px] font-bold">
-                                  <Wrench className="w-2.5 h-2.5" />{TOUR_TYPE_LABELS[tour.tour_type] || tour.tour_type}
-                                </span>
-                              )}
-                              {(tour.capacity_label || tour.capacity_volume_m3 != null) && (
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-amber-500/15 text-amber-300 text-[10px] font-bold">
-                                  <Package2 className="w-2.5 h-2.5" />{formatCapacity(tour)}
-                                </span>
-                              )}
-                              {/* Fase 15.13 (2026-02-XX): Generel prioritets-chip
-                                  Fase 15.27 (2026-02-21): Pulserende ring på Haster-chippet.
-                                  - Mine HASTERS (under "Mine ture"): FORSTÆRKET puls
-                                    (større ring + glow) via animate-haster-pulse-strong.
-                                  - Ikke-mine HASTERS (HASTER-sektionen): standard
-                                    animate-haster-pulse (mindre ring).
-                                  Fase 15.39 (2026-02-22): Pulsen STOPPER når turen er
-                                  "på vej" - pulsen skal trække opmærksomhed til
-                                  ledige HASTER-ture, ikke til dem chaufføren allerede
-                                  er på vej til. */}
-                              {(() => {
-                                const pc = getPriorityChip(tour);
-                                const isHasterChip = (pc.label || "").toLowerCase() === "haster";
-                                const shouldPulse = isHasterChip && !tour.completed && !tour.on_way;
-                                const pulseCls = !shouldPulse
-                                  ? ""
-                                  : (isMineSection ? "ring-2 ring-red-400 animate-haster-pulse-strong" : "ring-2 ring-red-400 animate-haster-pulse");
-                                return (
-                                  <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border ${pc.cls} text-[10px] font-bold ${pulseCls}`}
-                                    data-testid={`solo-priority-info-${tour.id}`}>
-                                    <Flag className="w-2.5 h-2.5" />{pc.label}
-                                  </span>
-                                );
-                              })()}
-                              {/* Fase 15.14 (2026-02-XX): Kundefirma-tag */}
-                              {tour.customer_name && (
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-purple-500/15 text-purple-200 border border-purple-500/40 text-[10px] font-bold max-w-[200px]"
-                                  data-testid={`solo-customer-${tour.id}`}
-                                  title={`Kunde: ${tour.customer_name}`}>
-                                  <Building2 className="w-2.5 h-2.5 flex-shrink-0" /><span className="truncate">{tour.customer_name}</span>
-                                </span>
-                              )}
-                              {tour.order_date && (
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-emerald-500/15 text-emerald-300 text-[10px] font-bold">
-                                  <Truck className="w-2.5 h-2.5" />Bestillingsdato {_fmtDateDM(tour.order_date)}
-                                </span>
-                              )}
-                              {tour.created_at && (
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-blue-500/15 text-blue-300 text-[10px] font-bold">
-                                  <Calendar className="w-2.5 h-2.5" />Oprettet den {_fmtDateDM(tour.created_at)} {_fmtTimeHM(tour.created_at)}
-                                </span>
-                              )}
-                              {(tour.created_by_name || tour.created_by_email) && (
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-slate-700/60 text-slate-300 text-[10px] font-bold max-w-[200px]" title={tour.created_by_email || tour.created_by_name}>
-                                  <Users className="w-2.5 h-2.5 flex-shrink-0" /><span className="truncate">af {tour.created_by_name || tour.created_by_email}</span>
-                                </span>
-                              )}
-                              {/* Fase 15.5/15.7/15.8 (2026-02-XX): "Tildelt af X" - solid farve for klar synlighed. */}
-                              {tour.assigned_by_name && (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-indigo-500 text-white border border-indigo-300 shadow-sm text-[10px] font-bold max-w-[260px]"
-                                  title={tour.assigned_at ? `Tildelt ${tour.assigned_at}` : ""}
-                                  data-testid={`solo-tour-assigned-by-${tour.id}`}>
-                                  <UserCheck className="w-2.5 h-2.5 flex-shrink-0" />
-                                  <span className="truncate">Tildelt af {tour.assigned_by_name}</span>
-                                </span>
-                              )}
-                            </div>
-
-                            {/* Claimed by indicator */}
-                            {tour.claimed_by && (
-                              <div className="flex items-center gap-1.5 mt-1 text-xs">
-                                <Users className="w-3 h-3 text-blue-400" />
-                                <span className="text-blue-400 font-medium">{tour.claimed_by}</span>
-                                {tour.completed && <span className="text-slate-500">har afsluttet</span>}
-                                {tour.on_way && !tour.completed && <span className="text-slate-500">kører</span>}
-                              </div>
-                            )}
-                            
-                            {/* Time + distance for på vej or completed */}
-                            {(tour.on_way || tour.completed) && (
-                              <div className="flex items-center gap-2 mt-1 text-xs">
-                                {tour.on_way_time && <span className="text-slate-300">{tour.on_way_time} → {tour.completed && tour.time ? tour.time : "?"}</span>}
-                                {ri?.distance_km > 0 && <span className="text-slate-400">{ri.distance_km} km</span>}
-                                {tour.completed && tour.weight && <span className="text-emerald-400 font-bold">{tour.weight} kg</span>}
-                              </div>
-                            )}
-                            
-                            {/* Distance + time for waiting */}
-                            {!tour.on_way && !tour.completed && ri?.distance_km > 0 && (
-                              <div className="flex items-center gap-2 mt-1 text-xs text-slate-400">
-                                <span>{ri.distance_km} km</span>
-                                {ri.estimated_minutes && <span>~{ri.estimated_minutes}m</span>}
-                              </div>
-                            )}
-                            
-                            {/* BEMÆRKNING */}
-                            {h.cleanRemark && (
-                              <div className="flex items-center gap-1.5 mt-1.5 text-xs">
-                                <ChevronRight className="w-3 h-3 text-rose-400" />
-                                <span className="text-rose-400">{h.cleanRemark}</span>
-                              </div>
-                            )}
-                          </div>
-                          
-                          {/* Right: single status button (text only, no truck icon) */}
-                          <div className="flex flex-col items-end gap-2 flex-shrink-0">
-                            {tour.completed ? (
-                              <span className={`px-3 py-2 ${statusStyle.badge} text-white text-xs font-black rounded-lg min-w-[72px] text-center`} data-testid={`solo-status-${tour.id}`}>
-                                FÆRDIG
-                              </span>
-                            ) : tour.on_way && inlineWeightTourId !== tour.id ? (
-                              // Fase 14 (2026-06-19): read-only badge.
-                              <span
-                                className={`px-3 py-2 ${statusStyle.badge} text-white text-xs font-black rounded-lg min-w-[72px] text-center select-none`}
-                                data-testid={`solo-status-${tour.id}`}
-                              >
-                                PÅ VEJ
-                              </span>
-                            ) : !tour.on_way && !isClaimedByOther ? (
-                              // Fase 14 (2026-06-19): read-only badge.
-                              <span
-                                className="px-3 py-2 bg-slate-600 text-white text-xs font-black rounded-lg min-w-[72px] text-center select-none"
-                                data-testid={`solo-status-${tour.id}`}
-                              >
-                                VENTER
-                              </span>
-                            ) : (
-                              <span className={`px-3 py-2 ${statusStyle.badge} text-white text-xs font-black rounded-lg min-w-[72px] text-center`} data-testid={`solo-status-${tour.id}`}>
-                                {statusStyle.badgeText}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        
-                        {/* Inline weight input - kun for opgavetype "normal" (afhent container) */}
-                        {tour.on_way && inlineWeightTourId === tour.id && !tour.completed && (tour.tour_type || "normal") === "normal" && (
-                          <div className="px-3 pb-3 flex items-center gap-2">
-                            <input type="number" inputMode="numeric" value={inlineWeight} onChange={e => setInlineWeight(e.target.value)} onKeyDown={e => { if (e.key === "Enter") handleInlineComplete(tour.id); }} placeholder="Vægt (kg)" autoFocus className="w-28 px-2 py-2 text-base font-mono font-bold text-center bg-slate-700 border-2 border-emerald-400 rounded-xl text-white" data-testid={`inline-weight-${tour.id}`} />
-                            <button onClick={() => handleInlineComplete(tour.id)} className="px-4 py-2 bg-emerald-500 text-white font-bold rounded-xl" data-testid={`inline-done-${tour.id}`}>
-                              <CheckCircle2 className="w-6 h-6" />
-                            </button>
-                            <button onClick={() => setInlineWeightTourId(null)} className="px-2 py-2 bg-slate-600 text-slate-300 rounded-xl">
-                              <X className="w-5 h-5" />
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  }
-            })()}
-          </div>
-          )}
-        </section>
+            {/* 2026-10-16: Den gamle mørke turliste (hero, progress, HÆNGER/SOLO-
+                sektioner) var altid skjult bag TID/TURE/PROFIL-fanerne men blev
+                stadig renderet ved hver 5-sek. opdatering. Fjernet - TURE-fanen
+                bruger nu DriverTourCard. */}
         
         {/* Mobile Tour Detail Panel */}
         {selectedTourForPanel && (
@@ -20126,9 +18365,11 @@ function App() {
             onToggleOnWay={handleToggleOnWay}
             onToggleComplete={handleToggleComplete}
             currentDriverName={driverName}
-            onChat={() => { setSelectedTourForPanel(null); setShowChat(true); }}
+            onChat={() => { const t = selectedTourForPanel; setSelectedTourForPanel(null); setChatTour(t); }}
           />
         )}
+
+        <DriverChatSheet tour={chatTour} onClose={() => setChatTour(null)} onChanged={fetchDriverTourUnread} />
 
         {/* Fase 14 (2026-06-19): "Bemærkninger"-sektionen er fjernet pr.
             brugerens ønske - den blev ikke brugt. */}

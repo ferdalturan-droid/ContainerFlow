@@ -19,6 +19,27 @@ Data must be strictly isolated per company.
   and `/api/health` bypass tenant filtering so the QR-code customer flow continues to work.
 
 ## What's been implemented (2026-02-15)
+## What's new in 2026-10-16 (Ture-arbejdsflade, tur-beskeder, live Rapportering)
+
+Se `TURE_REDESIGN.md` og `LOGISTICS_ROADMAP.md`.
+- **Ture** (ny startfane for logistik admin, `pages/ToursWorkspace.jsx`) erstatter
+  Manuelle ture + Arkiv › Ture: dagsplan på tværs af kilder, opmærksomhedslinje,
+  tildeling i rækken/massehandlinger, tur-panel med tidslinje og beskeder,
+  ny tur med flere stop + gentagelse, kopiér/flyt dato, Historik og Excel-import.
+- **Tur-beskeder** (`tour_messages`, `/api/tour-messages/*`) mellem planlægger og
+  chauffør med ulæst-tællere, "Læst"-kvittering, hurtigsvar og web push.
+- **Push ved tildeling** (PUT /tours og /tours/bulk-assign).
+- **Navigation**: Ture · Planlægning · Chauffører · Rapportering · Økonomi + "Mere"
+  (Lokationer, Arkiv, Indstillinger); mobil-skuffe (`components/AdminTabNav.jsx`).
+- **Rapportering** viste 0 for logistikfirmaer (læste tom `drivers`-kollektion og kun
+  firmaets egne ture) - rettet; ny "I dag"-blok, auto-opdatering hvert 30. sek.
+- **Chauffør TURE**: lyse `DriverTourCard` med Start → Afslut, Kort, Besked; den
+  altid-skjulte mørke liste (~1.100 linjer) fjernet.
+- **Sikkerhed**: gamle `/messages*` og `DELETE /tours/{id}` kræver login;
+  bulk-assign kun på firmaets egne/tildelte ture.
+- GET /tours: `date_from`, `date_to`, `pending`. TourUpdate: date, fraction, address,
+  facility, plads, capacity_label (ikke for chauffører).
+
 ## What's new in 2026-10-16 (Logistik: Premium vs. Partner + oprydning)
 
 Se `LOGISTICS_TIERS.md`.

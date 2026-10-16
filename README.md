@@ -27,6 +27,8 @@ tenant-scoped collections. Logistics companies see the customers listed in their
 | `HIERARCHY_SPEC.md` | Account hierarchy, scoping rules |
 | `LOGISTICS_TIERS.md` | Premium vs. partner logistics firms - what applies where |
 | `PRICING_SPEC.md` | Økonomi: price rules, time, holidays, approvals |
+| `TURE_REDESIGN.md` | Ture workspace, per-tour messages, driver cards, live Rapportering |
+| `LOGISTICS_ROADMAP.md` | Researched next improvements + open questions |
 | `WORKFLOW.md` | Daily commands: local test, deploy, GitHub |
 | `DEPLOY_SCALEWAY.md` | Migration from Emergent to Scaleway |
 | `deploy/README.md` | Self-hosted VPS + nginx setup |

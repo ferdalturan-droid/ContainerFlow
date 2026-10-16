@@ -435,6 +435,7 @@ class TourCreate(BaseModel):
     order_date: str = ""
     created_by_name: str = ""
     created_by_email: str = ""
+    loose_estimated_count: int = 0
 
 class TourUpdate(BaseModel):
     weight: Optional[float] = None
@@ -469,6 +470,15 @@ class TourUpdate(BaseModel):
     open_from: Optional[str] = None
     open_to: Optional[str] = None
     remark: Optional[str] = None
+    # 2026-10-16: Planlæggeren kan rette grunddata fra Ture-arbejdsfladen
+    # (flytte dato, rette adresse/fraktion). Fjernes for chauffører i
+    # update_tour.
+    date: Optional[str] = None
+    fraction: Optional[str] = None
+    address: Optional[str] = None
+    facility: Optional[str] = None
+    plads: Optional[str] = None
+    capacity_label: Optional[str] = None
 
 class Report(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -1186,8 +1196,23 @@ async def get_tours(report_id: Optional[str] = None, plads: Optional[str] = None
                     source: Optional[str] = None,
                     tour_type: Optional[str] = None,
                     limit: int = 200,
+                    date_from: Optional[str] = None,
+                    date_to: Optional[str] = None,
+                    pending: bool = False,
                     payload: Optional[dict] = Depends(get_optional_user_payload)):
     query = {}
+    # 2026-10-16: Periode + "kun uafsluttede" - bruges af Ture-arbejdsfladen til
+    # at finde ture fra tidligere dage der aldrig blev kørt.
+    if date_from or date_to:
+        rng = {}
+        if date_from:
+            rng["$gte"] = normalize_date(date_from)
+        if date_to:
+            rng["$lte"] = normalize_date(date_to)
+        query["date"] = rng
+    if pending:
+        query["completed"] = {"$ne": True}
+        query["is_pause"] = {"$ne": True}
     if report_id:
         query["report_id"] = report_id
     if plads:
@@ -1528,6 +1553,18 @@ async def bulk_assign_tours(
         assigner_name = payload.get("email") or ""
     now_iso = datetime.now(DK_TZ).isoformat()
 
+    # 2026-10-16: En logistik-admin må kun tildele ture firmaet faktisk har
+    # adgang til (egne eller tildelt firmaet) - før kunne et vilkårligt tur-id
+    # sendes med.
+    if role == "logistics_admin":
+        la = payload.get("company_id") or ""
+        allowed = await _raw_db.tours.find(
+            {"id": {"$in": body.tour_ids},
+             "$or": [{"company_id": la}, {"assigned_logistics_company_ids": la}]},
+            {"_id": 0, "id": 1}).to_list(len(body.tour_ids) + 1)
+        body.tour_ids = [t["id"] for t in allowed]
+        if not body.tour_ids:
+            return {"updated": 0}
     from pymongo import UpdateOne
     update_set = {
         "driver_id": body.driver_id,
@@ -1560,7 +1597,171 @@ async def bulk_assign_tours(
         except Exception as e:
             logger.error(f"Bulk-assign audit failed for {tid}: {e}")
 
+    if body.driver_id and res.modified_count:
+        n = len(body.tour_ids)
+        await _push_driver(
+            payload.get("company_id") or "", body.driver_id, driver_name,
+            "Ny tur tildelt" if n == 1 else f"{n} nye ture tildelt",
+            f"{assigner_name or 'Planlæggeren'} har givet dig {('en tur' if n == 1 else f'{n} ture')}.")
     return {"updated": res.modified_count, "assigned_to": driver_name}
+
+
+# ============= TUR-BESKEDER (planlægger <-> chauffør pr. tur) =============
+# 2026-10-16: Den gamle `messages`-kollektion er navnebaseret og ikke knyttet
+# til en tur. Her får hver tur sin egen tråd, så "containeren står bag porten"
+# eller "ring til kunden først" står præcis ved den tur det handler om.
+# Felter: id, tour_id, logistics_company_id, driver_id (modtager/afsender),
+# sender_role ("planner" | "driver"), sender_id, sender_name, text,
+# created_at, read_by_driver, read_by_planner.
+
+class TourMessageIn(BaseModel):
+    text: str
+
+
+async def _push_driver(company_id: str, driver_id: str, driver_name: str, title: str, body: str):
+    """Web push til én chauffør (best effort, blokerer ikke requesten)."""
+    try:
+        from pywebpush import webpush
+        import json as _json
+        name = driver_name
+        if not name and driver_id:
+            u = await _raw_db.users.find_one({"id": driver_id}, {"_id": 0, "name": 1})
+            name = (u or {}).get("name", "")
+        if not name or not VAPID_PRIVATE_KEY:
+            return
+        q = {"driver_name": name}
+        if company_id:
+            q["$or"] = [{"company_id": company_id}, {"company_id": {"$exists": False}}]
+        subs = await _raw_db.push_subscriptions.find(q, {"_id": 0}).to_list(10)
+        data = _json.dumps({"title": title, "body": body[:180], "url": "/"})
+
+        def _send(sub):
+            try:
+                webpush(subscription_info={"endpoint": sub["endpoint"], "keys": sub["keys"]},
+                        data=data, vapid_private_key=VAPID_PRIVATE_KEY,
+                        vapid_claims={"sub": VAPID_CLAIMS_EMAIL})
+            except Exception:
+                pass
+        for sub in subs:
+            await async_lib.to_thread(_send, sub)
+    except Exception as e:
+        logger.warning(f"push to driver failed: {e}")
+
+
+def _tour_logistics_company(tour: dict, payload: dict) -> str:
+    cid = payload.get("company_id") or ""
+    if payload.get("role") == "super_admin":
+        ids = tour.get("assigned_logistics_company_ids") or []
+        return ids[0] if ids else (tour.get("company_id") or "")
+    return cid
+
+
+async def _tour_for_messages(tour_id: str, payload: dict) -> dict:
+    tour = await _raw_db.tours.find_one({"id": tour_id}, {"_id": 0, "receipt_image": 0})
+    if not tour:
+        raise HTTPException(status_code=404, detail="Tur ikke fundet")
+    role = payload.get("role")
+    if role == "super_admin":
+        return tour
+    cid = payload.get("company_id") or ""
+    if role not in ("logistics_admin", "driver") or not cid:
+        raise HTTPException(status_code=403, detail="Adgang nægtet")
+    if tour.get("company_id") != cid and cid not in (tour.get("assigned_logistics_company_ids") or []):
+        raise HTTPException(status_code=403, detail="Adgang nægtet")
+    if role == "driver":
+        uid = payload.get("sub") or ""
+        if (tour.get("driver_id") or "") not in ("", uid) or (tour.get("claimed_by_id") or "") not in ("", uid):
+            raise HTTPException(status_code=403, detail="Turen er tildelt en anden chauffør")
+    return tour
+
+
+def _tour_driver_id(tour: dict) -> str:
+    return tour.get("driver_id") or tour.get("claimed_by_id") or ""
+
+
+@api_router.get("/tour-messages/unread")
+async def tour_messages_unread(payload: dict = Depends(get_current_user_payload)):
+    """Ulæste tur-beskeder for den der spørger: {unread: {tour_id: n}, total, latest[]}."""
+    role = payload.get("role")
+    cid = payload.get("company_id") or ""
+    if role == "driver":
+        uid = payload.get("sub") or ""
+        q = {"logistics_company_id": cid, "sender_role": "planner", "read_by_driver": False,
+             "driver_id": {"$in": [uid, ""]}}
+    elif role == "logistics_admin":
+        q = {"logistics_company_id": cid, "sender_role": "driver", "read_by_planner": False}
+    elif role == "super_admin":
+        q = {"sender_role": "driver", "read_by_planner": False}
+    else:
+        return {"unread": {}, "total": 0, "latest": []}
+    msgs = await _raw_db.tour_messages.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+    if role == "driver" and msgs:
+        # Beskeder på ikke-tildelte ture tæller kun hvis turen stadig er fri
+        # eller min - ikke hvis en kollega har taget den i mellemtiden.
+        uid = payload.get("sub") or ""
+        tids = list({m["tour_id"] for m in msgs})
+        ok = {t["id"] for t in await _raw_db.tours.find(
+            {"id": {"$in": tids}, "completed": {"$ne": True},
+             "driver_id": {"$in": ["", None, uid]}, "claimed_by_id": {"$in": ["", None, uid]}},
+            {"_id": 0, "id": 1}).to_list(len(tids) + 1)}
+        msgs = [m for m in msgs if m["tour_id"] in ok]
+    unread = {}
+    for m in msgs:
+        unread[m["tour_id"]] = unread.get(m["tour_id"], 0) + 1
+    return {"unread": unread, "total": len(msgs), "latest": msgs[:10]}
+
+
+@api_router.get("/tour-messages/{tour_id}")
+async def get_tour_messages(tour_id: str, payload: dict = Depends(get_current_user_payload)):
+    tour = await _tour_for_messages(tour_id, payload)
+    msgs = await _raw_db.tour_messages.find({"tour_id": tour_id}, {"_id": 0}).sort("created_at", 1).to_list(500)
+    now = datetime.now(timezone.utc).isoformat()
+    if payload.get("role") == "driver":
+        await _raw_db.tour_messages.update_many(
+            {"tour_id": tour_id, "sender_role": "planner", "read_by_driver": False},
+            {"$set": {"read_by_driver": True, "read_by_driver_at": now}})
+    elif payload.get("role") in ("logistics_admin", "super_admin"):
+        await _raw_db.tour_messages.update_many(
+            {"tour_id": tour_id, "sender_role": "driver", "read_by_planner": False},
+            {"$set": {"read_by_planner": True, "read_by_planner_at": now}})
+    return {"tour": {k: tour.get(k) for k in ("id", "tour_number", "fraction", "address", "plads",
+                                                  "driver_id", "driver_name", "claimed_by", "date")},
+            "messages": msgs}
+
+
+@api_router.post("/tour-messages/{tour_id}")
+async def post_tour_message(tour_id: str, body: TourMessageIn, payload: dict = Depends(get_current_user_payload)):
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Beskeden er tom")
+    if len(text) > 1000:
+        raise HTTPException(status_code=400, detail="Beskeden er for lang (max 1000 tegn)")
+    tour = await _tour_for_messages(tour_id, payload)
+    role = payload.get("role")
+    uid = payload.get("sub") or ""
+    me = await _raw_db.users.find_one({"id": uid}, {"_id": 0, "name": 1, "display_name": 1, "email": 1}) or {}
+    sender_name = (me.get("display_name") or me.get("name") or me.get("email") or payload.get("email") or "").strip()
+    is_driver = role == "driver"
+    msg = {
+        "id": str(uuid.uuid4()),
+        "tour_id": tour_id,
+        "logistics_company_id": _tour_logistics_company(tour, payload),
+        "driver_id": uid if is_driver else _tour_driver_id(tour),
+        "sender_role": "driver" if is_driver else "planner",
+        "sender_id": uid,
+        "sender_name": sender_name,
+        "text": text,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "read_by_driver": is_driver,
+        "read_by_planner": not is_driver,
+    }
+    await _raw_db.tour_messages.insert_one(dict(msg))
+    if not is_driver and msg["driver_id"]:
+        label = tour.get("tour_number") or tour.get("fraction") or "din tur"
+        await _push_driver(msg["logistics_company_id"], msg["driver_id"],
+                           tour.get("driver_name") or tour.get("claimed_by") or "",
+                           f"Besked om {label}", f"{sender_name}: {text}")
+    return msg
 
 
 # ============= FASE 5: DRIVER ACTIVE-CUSTOMER (multi-kunde isolation) =============
@@ -2006,6 +2207,8 @@ async def update_tour(tour_id: str, update: TourUpdate, payload: dict = Depends(
     update_data = {k: v for k, v in update.model_dump().items() if v is not None}
     if not update_data:
         raise HTTPException(status_code=400, detail="No update data provided")
+    if "date" in update_data:
+        update_data["date"] = normalize_date(update_data["date"])
 
     role = payload.get("role")
     caller_id = payload.get("sub") or payload.get("user_id") or ""
@@ -2034,6 +2237,10 @@ async def update_tour(tour_id: str, update: TourUpdate, payload: dict = Depends(
         # Strip pre-assignment attempts from drivers
         update_data.pop("driver_id", None)
         update_data.pop("driver_name", None)
+        for _k in ("date", "fraction", "address", "facility", "plads", "capacity_label"):
+            update_data.pop(_k, None)
+        if not update_data:
+            raise HTTPException(status_code=400, detail="No update data provided")
         # Validate claim attempts
         if "claimed_by_id" in update_data and update_data["claimed_by_id"]:
             if update_data["claimed_by_id"] != caller_id:
@@ -2309,6 +2516,11 @@ async def update_tour(tour_id: str, update: TourUpdate, payload: dict = Depends(
             )
         except Exception as e:
             logger.error(f"Tour audit failed for {tour_id}: {e}")
+        if new_driver_id and payload.get("role") in ("logistics_admin", "super_admin"):
+            await _push_driver(
+                payload.get("company_id") or "", new_driver_id, tour.get("driver_name", ""),
+                "Ny tur tildelt",
+                f"{tour.get('fraction') or 'Tur'} · {tour.get('address') or tour.get('plads') or ''}".strip(" ·"))
 
     # Mirror driver/status back to the linked customer order so the
     # "Bestil Afhentning / Mine bestillinger" view shows who took the tour,
@@ -2392,7 +2604,8 @@ async def get_tour_audit_log(tour_id: str, payload: dict = Depends(get_current_u
     return entries
 
 @api_router.delete("/tours/{tour_id}")
-async def delete_tour(tour_id: str):
+async def delete_tour(tour_id: str, _auth: dict = Depends(get_current_user_payload)):
+    # 2026-10-16: Kræver login (før kunne alle slette en tur med et id).
     result = await db.tours.delete_one({"id": tour_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Tour not found")
@@ -3195,7 +3408,7 @@ async def create_pause(report_id: str = "", plads: str = "", driver_id: str = ""
 # ============= MESSAGE ENDPOINTS =============
 
 @api_router.get("/messages", response_model=List[Message])
-async def get_messages(driver_id: Optional[str] = None):
+async def get_messages(driver_id: Optional[str] = None, _auth: dict = Depends(get_current_user_payload)):
     query = {}
     if driver_id:
         query["to_driver_id"] = driver_id
@@ -3203,7 +3416,7 @@ async def get_messages(driver_id: Optional[str] = None):
     return [Message(**m) for m in messages]
 
 @api_router.post("/messages", response_model=Message)
-async def create_message(message: MessageCreate):
+async def create_message(message: MessageCreate, _auth: dict = Depends(get_current_user_payload)):
     # Handle admin to driver message
     if message.to_driver_id:
         driver = await db.drivers.find_one({"id": message.to_driver_id}, {"_id": 0})
@@ -3241,7 +3454,7 @@ async def create_message(message: MessageCreate):
     return msg_obj
 
 @api_router.put("/messages/{message_id}/read")
-async def mark_message_read(message_id: str):
+async def mark_message_read(message_id: str, _auth: dict = Depends(get_current_user_payload)):
     result = await db.messages.update_one(
         {"id": message_id},
         {"$set": {"read": True}}
@@ -3251,7 +3464,7 @@ async def mark_message_read(message_id: str):
     return {"message": "Message marked as read"}
 
 @api_router.delete("/messages/{message_id}")
-async def delete_message(message_id: str):
+async def delete_message(message_id: str, _auth: dict = Depends(get_current_user_payload)):
     result = await db.messages.delete_one({"id": message_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Message not found")
@@ -3396,26 +3609,50 @@ async def admin_cleanup(credentials: dict):
 # ============= ADMIN STATISTICS ENDPOINT =============
 
 @api_router.get("/admin/statistics")
-async def get_admin_statistics(months: int = 6):
-    """Comprehensive admin statistics: driver performance, material usage, daily jobs, work hours."""
+async def get_admin_statistics(months: int = 6, payload: Optional[dict] = Depends(get_optional_user_payload)):
+    """Comprehensive admin statistics: driver performance, material usage, daily jobs, work hours.
+
+    2026-10-16: Rettet så tallene faktisk viser noget for et logistikfirma:
+    chauffører ligger i `users` (role=driver) - den gamle `drivers`-kollektion
+    er tom - og ture hentes på samme måde som GET /tours (egne ture + ture
+    fra kunder der har tildelt firmaet), ikke kun dem firmaet selv ejer.
+    """
     try:
         today = datetime.now(DK_TZ).date()
         # Date ranges
-        days_30_ago = (today - timedelta(days=30)).strftime("%Y-%m-%d")
         months_ago = (today - timedelta(days=months * 30)).strftime("%Y-%m-%d")
         today_str = today.strftime("%Y-%m-%d")
 
-        # Fetch all data in parallel-ish (batch queries)
-        drivers = await db.drivers.find({}, {"_id": 0, "id": 1, "name": 1, "plate": 1}).to_list(100)
-        driver_ids = [d["id"] for d in drivers]
+        role = (payload or {}).get("role")
+        la_company = (payload or {}).get("company_id") if role == "logistics_admin" else None
+        scope = ({"$or": [{"company_id": la_company}, {"assigned_logistics_company_ids": la_company}]}
+                 if la_company else {})
+
+        drv_q = {"role": "driver"}
+        if la_company:
+            drv_q["company_id"] = la_company
+        users = await _raw_db.users.find(drv_q, {"_id": 0, "id": 1, "name": 1, "plate": 1, "vehicle_reg": 1}).to_list(500)
+        drivers = [{"id": u.get("id", ""), "name": u.get("name", ""),
+                    "plate": u.get("plate") or u.get("vehicle_reg") or ""} for u in users if u.get("name")]
+        legacy = await db.drivers.find({}, {"_id": 0, "id": 1, "name": 1, "plate": 1}).to_list(200)
+        known = {d["name"] for d in drivers}
+        drivers += [{"id": d.get("id", ""), "name": d["name"], "plate": d.get("plate", "")}
+                    for d in legacy if d.get("name") and d["name"] not in known]
+        driver_ids = [d["id"] for d in drivers if d["id"]]
         driver_names = {d["id"]: d["name"] for d in drivers}
 
-        # All tours in last N months (excluding pauses)
-        all_tours = await db.tours.find(
-            {"date": {"$gte": months_ago, "$lte": today_str}, "is_pause": False},
-            {"_id": 0, "date": 1, "completed": 1, "weight": 1, "fraction": 1,
-             "driver_name": 1, "claimed_by": 1, "facility": 1, "plads": 1, "time": 1}
-        ).to_list(10000)
+        # All tours in last N months (excluding pauses, estimates and "kan ikke gennemføres")
+        tour_q = {"date": {"$gte": months_ago, "$lte": today_str}, "is_pause": {"$ne": True},
+                  "tour_type": {"$ne": "estimat"}, "not_completed": {"$ne": True}}
+        if scope:
+            tour_q = {"$and": [tour_q, scope]}
+        tour_src = _raw_db.tours if scope else db.tours
+        all_tours = await tour_src.find(
+            tour_q,
+            {"_id": 0, "date": 1, "completed": 1, "weight": 1, "fraction": 1, "on_way": 1,
+             "driver_name": 1, "driver_id": 1, "claimed_by": 1, "facility": 1, "plads": 1, "time": 1,
+             "on_way_time": 1, "priority": 1, "remark": 1}
+        ).to_list(20000)
 
         # All reports/sessions in last N months
         all_reports = await db.reports.find(
@@ -3450,8 +3687,11 @@ async def get_admin_statistics(months: int = 6):
             entries_by_driver_date.setdefault((dname, d), []).append(e)
 
         # Container orders
-        all_orders = await db.container_orders.find(
-            {"created_at": {"$gte": months_ago}},
+        order_q = {"created_at": {"$gte": months_ago}}
+        if scope:
+            order_q = {"$and": [order_q, scope]}
+        all_orders = await (_raw_db.container_orders if scope else db.container_orders).find(
+            order_q,
             {"_id": 0, "location_name": 1, "material": 1, "status": 1, "created_at": 1, "order_date": 1}
         ).to_list(5000)
 
@@ -3633,7 +3873,27 @@ async def get_admin_statistics(months: int = 6):
             elif o.get("status") == "completed":
                 order_stats["completed"] += 1
 
+        # ---- 6) I DAG (live) ----
+        def _is_haster(t):
+            return (str(t.get("priority") or "").lower() in ("urgent", "haster")
+                    or "haster" in (t.get("remark") or "").lower())
+        todays = [t for t in all_tours if t.get("date") == today_str]
+        today_block = {
+            "date": today_str,
+            "total": len(todays),
+            "completed": sum(1 for t in todays if t.get("completed")),
+            "on_way": sum(1 for t in todays if t.get("on_way") and not t.get("completed")),
+            "unassigned": sum(1 for t in todays if not t.get("completed") and not t.get("on_way")
+                              and not t.get("driver_id") and not t.get("claimed_by")),
+            "haster_open": sum(1 for t in todays if _is_haster(t) and not t.get("completed")),
+            "weight": round(sum((t.get("weight") or 0) for t in todays if t.get("completed")), 1),
+            "overdue": sum(1 for t in all_tours if (t.get("date") or "") < today_str and not t.get("completed")
+                           and (t.get("date") or "") >= (today - timedelta(days=14)).strftime("%Y-%m-%d")),
+        }
+
         return {
+            "generated_at": datetime.now(DK_TZ).isoformat(),
+            "today": today_block,
             "period_months": months,
             "jobs_per_day": jobs_per_day_list,
             "driver_performance": driver_stats_list,
@@ -6621,7 +6881,7 @@ async def delete_pdf_archive(archive_id: str):
 # ============= ENHANCED MESSAGE ENDPOINTS =============
 
 @api_router.get("/messages/driver/{driver_name}")
-async def get_driver_messages(driver_name: str):
+async def get_driver_messages(driver_name: str, _auth: dict = Depends(get_current_user_payload)):
     """Get all messages for a specific driver (both to and from)"""
     messages = await db.messages.find({
         "$or": [
@@ -6632,7 +6892,7 @@ async def get_driver_messages(driver_name: str):
     return messages
 
 @api_router.get("/messages/admin")
-async def get_admin_messages():
+async def get_admin_messages(_auth: dict = Depends(get_current_user_payload)):
     """Get all messages sent to admin"""
     messages = await db.messages.find({"to_admin": True}, {"_id": 0}).sort("created_at", -1).to_list(100)
     return messages
@@ -6640,7 +6900,8 @@ async def get_admin_messages():
 @api_router.post("/messages/driver")
 async def send_message_from_driver(
     from_driver_name: str,
-    content: str
+    content: str,
+    _auth: dict = Depends(get_current_user_payload),
 ):
     """Driver sends message to admin"""
     message = Message(
@@ -16894,6 +17155,8 @@ async def startup_db_client():
         await db.receipts.create_index("driver_name")
         await db.messages.create_index("to_driver_id")
         await db.push_subscriptions.create_index("driver_name")
+        await _raw_db.tour_messages.create_index("tour_id")
+        await _raw_db.tour_messages.create_index([("logistics_company_id", 1), ("sender_role", 1)])
         logger.info("Database indexes created/verified")
         # Multi-tenant: seed default company, super admin, and migrate existing docs.
         await seed_multitenant_auth()
