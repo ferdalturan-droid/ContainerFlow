@@ -25,8 +25,18 @@ case "${1:-}" in
     docker stop "$APP_CT" "$DB_CT" >/dev/null 2>&1 || true
     echo "Stopped."; exit 0 ;;
   --mails)
-    docker logs "$APP_CT" 2>&1 | grep -E "would-have-sent|EMAIL_OVERRIDE|Email sent" | tail -10 \
-      | sed -E 's/.*would-have-sent to=([^ ]+) subject=(.*) body=.*(http[^"]*(set-password|reset-password)[^"]*).*/\1 | \2\n    \3/'
+    # The app logs only the first 500 chars of a mail (no link), so build the
+    # links from the open invitation/reset tokens in the local database.
+    docker exec "$DB_CT" mongosh --quiet containerflow --eval '
+      const rows = db.invitation_tokens.find({used: false}).sort({expires_at: -1}).limit(10).toArray();
+      if (!rows.length) print("No open invitation or password-reset links.");
+      rows.reverse().forEach(t => {
+        const u = db.users.findOne({id: t.user_id}) || {};
+        const page = t.token_type === "reset" ? "reset-password" : "set-password";
+        const kind = t.token_type === "reset" ? "Nulstil adgangskode" : "Invitation";
+        print(kind + " -> " + (u.email || "?") + "  (valid until " + String(t.expires_at).slice(0, 16) + ")");
+        print("   http://localhost:8080/" + page + "?token=" + t.token);
+      });'
     exit 0 ;;
 esac
 
