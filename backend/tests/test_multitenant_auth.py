@@ -15,7 +15,7 @@ import time
 import pytest
 import requests
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://role-analysis-flow.preview.emergentagent.com").rstrip("/")
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "http://localhost:8080").rstrip("/")
 
 SUPER_EMAIL = "superadmin@platform.com"
 SUPER_PASS = "SuperAdmin2026!"

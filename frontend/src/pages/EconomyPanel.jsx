@@ -158,7 +158,7 @@ export default function EconomyPanel() {
           {view === "report" && <ReportView options={options} onChanged={loadPending} goRules={() => setView("rules")} goApprovals={() => setView("approvals")} />}
           {view === "rules" && <RulesView options={options} reloadOptions={loadOptions} />}
           {view === "approvals" && <ApprovalsView onChanged={loadPending} />}
-          {view === "holidays" && <HolidaysView />}
+          {view === "holidays" && <HolidaysView profile={options.profile} />}
           {view === "settings" && <SettingsView />}
         </>
       )}
@@ -228,13 +228,19 @@ function ReportView({ options, onChanged, goRules, goApprovals }) {
   const taskLabel = (k) => options.task_types[k] || k;
 
   const toggleAll = () => setSelected(s => s.size === rows.length ? new Set() : new Set(rows.map(r => r.tour_id)));
+  // "Faktureret" fryser prisen. Markeringen kan kun fjernes fra ture der ER
+  // faktureret - og kun ture med en pris kan markeres.
+  const selectedRows = rows.filter(r => selected.has(r.tour_id));
+  const toInvoice = selectedRows.filter(r => !r.price.locked && r.price.total != null);
+  const toUninvoice = selectedRows.filter(r => r.price.locked);
   const markInvoiced = async (invoiced) => {
-    const ids = Array.from(selected);
+    const ids = (invoiced ? toInvoice : toUninvoice).map(r => r.tour_id);
+    if (!ids.length) return;
     try {
       const { data: res } = await axios.post(`${API}/pricing/invoice`, { tour_ids: ids, invoiced });
       toast.success(invoiced
         ? `${res.updated} ture markeret som faktureret${res.skipped_without_price ? ` · ${res.skipped_without_price} sprunget over (mangler pris)` : ""}`
-        : `${res.updated} ture åbnet igen`);
+        : `Faktureret-markering fjernet fra ${res.updated} ture`);
       load();
     } catch (e) { toast.error(formatApiError(e)); }
   };
@@ -275,7 +281,16 @@ function ReportView({ options, onChanged, goRules, goApprovals }) {
           <div><span className={label}>Kunde</span>
             <select className={input} value={customer} onChange={e => { setCustomer(e.target.value); setLocation(""); }}>
               <option value="">Alle kunder</option>
-              {options.customers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              {options.customers.some(c => c.own) && (
+                <optgroup label="Egne kunder">
+                  {options.customers.filter(c => c.own).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </optgroup>
+              )}
+              {options.customers.some(c => !c.own) && (
+                <optgroup label="Genbrugsplads-kunder">
+                  {options.customers.filter(c => !c.own).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </optgroup>
+              )}
             </select></div>
           <div><span className={label}>Lokation</span>
             <select className={input} value={location} onChange={e => setLocation(e.target.value)}>
@@ -338,11 +353,15 @@ function ReportView({ options, onChanged, goRules, goApprovals }) {
             ))}
           </div>
           <div className="flex flex-wrap gap-2">
-            {selected.size > 0 && (
-              <>
-                <button className={btnGhost} onClick={() => markInvoiced(true)}><Lock className="w-4 h-4" /> Markér faktureret ({selected.size})</button>
-                <button className={btnGhost} onClick={() => markInvoiced(false)}><Unlock className="w-4 h-4" /> Åbn igen</button>
-              </>
+            {toInvoice.length > 0 && (
+              <button className={btnGhost} onClick={() => markInvoiced(true)} title="Prisen fryses, så senere regelændringer ikke ændrer den">
+                <Lock className="w-4 h-4" /> Markér som faktureret ({toInvoice.length})
+              </button>
+            )}
+            {toUninvoice.length > 0 && (
+              <button className={btnGhost} onClick={() => markInvoiced(false)} title="Prisen beregnes igen ud fra de nuværende regler">
+                <Unlock className="w-4 h-4" /> Fjern faktureret-markering ({toUninvoice.length})
+              </button>
             )}
             <button className={btnPrimary} onClick={exportCsv}><FileSpreadsheet className="w-4 h-4" /> {selected.size ? `Eksportér valgte (${selected.size})` : "Eksportér fakturagrundlag"}</button>
           </div>
@@ -491,7 +510,7 @@ function TourPriceDrawer({ tourId, options, onClose, onChanged }) {
             {d.price.locked && (
               <div className="flex items-center justify-between gap-2 p-3 rounded-xl bg-slate-200/70 dark:bg-slate-700 text-sm">
                 <span className="flex items-center gap-2"><Lock className="w-4 h-4" /> Faktureret - prisen er låst</span>
-                <button className="underline font-semibold" onClick={unlock}>Åbn igen</button>
+                <button className="underline font-semibold" onClick={unlock} title="Prisen beregnes igen ud fra de nuværende regler">Fjern faktureret-markering</button>
               </div>
             )}
             <div className={`${card} p-4`}>
@@ -678,6 +697,10 @@ function RulesView({ options, reloadOptions }) {
   const visible = rules.filter(r => {
     if (filter === "all") return true;
     if (filter === "general") return !(r.conditions?.customer_ids || []).length;
+    if (filter === "own") {
+      const ownIds = new Set(options.customers.filter(c => c.own).map(c => c.id));
+      return (r.conditions?.customer_ids || []).some(id => ownIds.has(id));
+    }
     return (r.conditions?.customer_ids || []).includes(filter);
   });
   const base = visible.filter(r => r.kind === "base");
@@ -719,9 +742,10 @@ function RulesView({ options, reloadOptions }) {
         <div className="flex flex-wrap gap-1.5">
           <button className={`${chipBase} ${filter === "all" ? chipOn : chipOff}`} onClick={() => setFilter("all")}>Alle regler</button>
           <button className={`${chipBase} ${filter === "general" ? chipOn : chipOff}`} onClick={() => setFilter("general")}>Generelle</button>
-          {options.customers.map(c => <button key={c.id} className={`${chipBase} ${filter === c.id ? chipOn : chipOff}`} onClick={() => setFilter(c.id)}>{c.name}</button>)}
+          {options.customers.some(c => c.own) && <button className={`${chipBase} ${filter === "own" ? chipOn : chipOff}`} onClick={() => setFilter("own")}>Egne kunder</button>}
+          {options.customers.filter(c => !c.own).map(c => <button key={c.id} className={`${chipBase} ${filter === c.id ? chipOn : chipOff}`} onClick={() => setFilter(c.id)}>{c.name}</button>)}
         </div>
-        <button className={btnPrimary} onClick={() => setEditing({ kind: "base", name: "", conditions: { ...EMPTY_COND, customer_ids: filter !== "all" && filter !== "general" ? [filter] : [] }, pricing: { model: "fixed", amount: "" }, active: true })}>
+        <button className={btnPrimary} onClick={() => setEditing({ kind: "base", name: "", conditions: { ...EMPTY_COND, customer_ids: !["all", "general", "own"].includes(filter) ? [filter] : [] }, pricing: { model: "fixed", amount: "" }, active: true })}>
           <Plus className="w-4 h-4" /> Ny regel
         </button>
       </div>
@@ -817,7 +841,7 @@ function RuleEditor({ rule, options, onClose, onSaved }) {
           <div className="space-y-3">
             <h4 className="text-sm font-bold">Gælder for <span className="font-normal text-slate-500">(tomt = alle)</span></h4>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <MultiPick title="Kunder" items={options.customers.map(x => ({ value: x.id, label: x.name }))} value={c.customer_ids} onChange={v => setC("customer_ids", v)} allLabel="Alle kunder" />
+              <MultiPick title="Kunder" items={options.customers.map(x => ({ value: x.id, label: x.own ? `${x.name} · egen kunde` : x.name }))} value={c.customer_ids} onChange={v => setC("customer_ids", v)} allLabel="Alle kunder" />
               <MultiPick title="Lokationer" items={locs.map(x => ({ value: x.code, label: x.name }))} value={c.location_codes} onChange={v => setC("location_codes", v)} allLabel="Alle lokationer" />
               <MultiPick title="Opgavetype" items={Object.entries(options.task_types).map(([k, v]) => ({ value: k, label: v }))} value={c.task_types} onChange={v => setC("task_types", v)} />
               <MultiPick title="Materiale" items={options.materials.map(m => ({ value: m, label: m }))} value={c.materials} onChange={v => setC("materials", v)} allLabel="Alle materialer" />
@@ -988,7 +1012,7 @@ function ApprovalsView({ onChanged }) {
 /* ======================================================================
    Helligdage
    ====================================================================== */
-function HolidaysView() {
+function HolidaysView({ profile }) {
   const [year, setYear] = useState(new Date().getFullYear());
   const [data, setData] = useState(null);
   const [newDay, setNewDay] = useState({ date: "", name: "" });
@@ -1029,6 +1053,12 @@ function HolidaysView() {
 
   return (
     <div className="space-y-4">
+      {!profile?.has_connections ? (
+        <div className={`${card} p-4 text-sm text-slate-600 dark:text-slate-300`}>
+          <b>Din helligdagskalender herunder bruges til alle ture.</b> Bliver I tilknyttet en genbrugsplads-kunde,
+          kan I her vælge at bruge kundens egen kalender for netop den kundes ture.
+        </div>
+      ) : (
       <div className={`${card} p-4 space-y-3`}>
         <h3 className="font-bold">Hvilken kalender bestemmer om en dag er helligdag?</h3>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
@@ -1039,8 +1069,9 @@ function HolidaysView() {
             </button>
           ))}
         </div>
-        <p className="text-xs text-slate-500">Om et tillæg gælder på helligdage styres i prisreglerne (dagtype "Helligdag") - så et helligdagstillæg kan gælde for ét materiale eller én kunde og ikke for andre.</p>
+        <p className="text-xs text-slate-500">Kundens kalender gælder kun for den kundes ture - dine egne ture bruger altid din egen kalender. Om et tillæg gælder på helligdage styres i prisreglerne (dagtype "Helligdag"), så et helligdagstillæg kan gælde for ét materiale eller én kunde og ikke for andre.</p>
       </div>
+      )}
 
       <div className={`${card} overflow-hidden`}>
         <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100 dark:border-slate-700">

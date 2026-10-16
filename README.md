@@ -25,6 +25,9 @@ tenant-scoped collections. Logistics companies see the customers listed in their
 | `memory/PRD.md` | Full changelog of every phase/iteration (newest at the top) |
 | `memory/LOGISTIK_MODERNISERING_PLAN.md` | Logistics rework plan (phases 1–8) |
 | `HIERARCHY_SPEC.md` | Account hierarchy, scoping rules |
+| `LOGISTICS_TIERS.md` | Premium vs. partner logistics firms - what applies where |
+| `PRICING_SPEC.md` | Økonomi: price rules, time, holidays, approvals |
+| `WORKFLOW.md` | Daily commands: local test, deploy, GitHub |
 | `DEPLOY_SCALEWAY.md` | Migration from Emergent to Scaleway |
 | `deploy/README.md` | Self-hosted VPS + nginx setup |
 | `scripts/README.md` | MongoDB backups to Google Drive |

@@ -11,7 +11,7 @@ import uuid
 import requests
 import pytest
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://role-analysis-flow.preview.emergentagent.com").rstrip("/")
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "http://localhost:8080").rstrip("/")
 CA_EMAIL = "argokundeadmin@gmail.com"
 CA_PASSWORD = "ArgoCust2026!"
 

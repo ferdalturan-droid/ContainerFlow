@@ -24,6 +24,7 @@ import SuperAdminPage from "@/pages/SuperAdminPage";
 import CustomerAdminPage from "@/pages/CustomerAdminPage";
 import LocationAdminPage, { ArchiveTab as TourArchive } from "@/pages/LocationAdminPage";
 import EconomyPanel from "@/pages/EconomyPanel";
+import LogisticsLocations from "@/pages/LogisticsLocations";
 import { buildDayReportPdf, dayReportFileName } from "@/lib/dayReportPdf";
 import { saveAs } from "file-saver";
 import GenbrugPladsPage from "@/pages/GenbrugPladsPage";
@@ -6668,6 +6669,17 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
   }, [authUser]);
   const effectiveCompanyId = actingCompanyId || authUser?.company_id || "";
   const activeCompany = managedCompanies.find(c => c.id === effectiveCompanyId);
+  // 2026-10-16: Premium (selvstændigt logistikfirma) vs. partner (adgang via
+  // genbrugsplads-kunder) + om firmaet har tilknyttede kunder. Styrer hvilke
+  // genbrugsplads-funktioner der vises. Se LOGISTICS_TIERS.md.
+  const [logisticsProfile, setLogisticsProfile] = useState(null);
+  useEffect(() => {
+    if (authUser?.role !== "logistics_admin") return;
+    axios.get(`${API}/logistics/profile`).then(r => setLogisticsProfile(r.data)).catch(() => setLogisticsProfile(null));
+  }, [authUser?.role, authUser?.company_id]);
+  const isPremiumLogistics = !!logisticsProfile?.is_premium;
+  // Premium-firmaer arbejder med "lokationer"; partnere med genbrugspladser.
+  const siteWord = isPremiumLogistics ? "lokation" : "genbrugsplads";
 
   const [drivers, setDrivers] = useState([]);
   const [stats, setStats] = useState([]);
@@ -7166,7 +7178,7 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
   // Admin mail parse handler
   const handleAdminParseMail = async () => {
     if (!mailText.trim()) { toast.error("Indsæt mail tekst først"); return; }
-    if (!adminSelectedPlads) { toast.error("Vælg en genbrugsplads først"); return; }
+    if (!adminSelectedPlads) { toast.error(`Vælg en ${siteWord} først`); return; }
     
     setParsing(true);
     try {
@@ -7217,7 +7229,7 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
       return;
     }
     if (!adminSelectedPlads) {
-      toast.error("Vælg en genbrugsplads først");
+      toast.error(`Vælg en ${siteWord} først`);
       e.target.value = "";
       return;
     }
@@ -7287,7 +7299,7 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
   const handleArgoImport = async () => {
     if (argoParsed.length === 0) return;
     if (!adminSelectedPlads) {
-      toast.error("Vælg en genbrugsplads først");
+      toast.error(`Vælg en ${siteWord} først`);
       return;
     }
     setArgoLoading(true);
@@ -7360,7 +7372,7 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
 
   // Firma tur (private company tour) - create multiple tours from form
   const handleFirmaSubmit = async () => {
-    if (!adminSelectedPlads) { toast.error("Vælg en genbrugsplads først"); return; }
+    if (!adminSelectedPlads) { toast.error(`Vælg en ${siteWord} først`); return; }
     if (!firmaForm.firma.trim()) { toast.error("Firma navn er påkrævet"); return; }
     const pickups = firmaForm.pickups.map(p => p.trim()).filter(Boolean);
     const deliveries = firmaForm.deliveries.filter(d => (d.company || "").trim() || (d.address || "").trim());
@@ -7801,7 +7813,9 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
             { id: "tours",      label: "Manuelle ture",    icon: FileText },
             { id: "schedule",   label: "Planlægning",       icon: Calendar },
             { id: "drivers",    label: "Chauffører",        icon: Users },
-            { id: "plads",      label: "Genbrugsplads",     icon: Building2 },
+            isPremiumLogistics
+              ? { id: "plads",  label: "Lokationer",        icon: MapPin }
+              : { id: "plads",  label: "Genbrugsplads",     icon: Building2 },
             { id: "archives",   label: "Arkiv",             icon: Archive,   testid: "admin-archives-tab" },
             { id: "priser",     label: "Økonomi",           icon: DollarSign },
             { id: "settings",   label: "Indstillinger",     icon: Settings,  testid: "admin-settings-tab" },
@@ -9154,7 +9168,7 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
           {/* Plads selection for tours - grouped by kunde for clear visual separation */}
           <div className="bg-white dark:bg-slate-800 rounded-xl shadow-lg p-4">
             <h2 className="font-heading font-bold text-lg flex items-center gap-2 mb-4">
-              <MapPin className="w-5 h-5 text-red-600" /> Vælg Genbrugsplads
+              <MapPin className="w-5 h-5 text-red-600" /> {isPremiumLogistics ? "Vælg lokation" : "Vælg Genbrugsplads"}
               {adminCustomerFilter && (
                 <span className="ml-2 text-sm font-normal text-muted-foreground">- filtreret: <strong>{adminCustomerFilter}</strong></span>
               )}
@@ -9802,7 +9816,7 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
           {!adminSelectedPlads && (
             <div className="bg-white dark:bg-slate-800 rounded-xl shadow-lg p-12 text-center">
               <MapPin className="w-12 h-12 mx-auto mb-3 text-slate-300" />
-              <p className="text-muted-foreground text-lg">Vælg en genbrugsplads for at tilføje ture</p>
+              <p className="text-muted-foreground text-lg">Vælg en {siteWord} for at tilføje ture</p>
             </div>
           )}
         </section>
@@ -10986,86 +11000,7 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
 
         {/* Plads Management Tab */}
         {activeTab === "plads" && (
-        <section className="bg-white dark:bg-slate-800 rounded-xl shadow-lg">
-          <div className="p-4 border-b border-border flex items-center justify-between gap-3">
-            <h2 className="font-heading font-bold text-lg flex items-center gap-2">
-              <Building2 className="w-5 h-5 text-red-600" /> Genbrugspladser
-            </h2>
-            <span className="text-xs text-slate-500 inline-flex items-center gap-1.5">
-              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
-              Auto-synkroniseret fra kunder
-            </span>
-          </div>
-          <div className="p-4">
-            {/* Fase 3 (2026-06-16): Read-only. Pladser strømmer automatisk fra
-                kunde-admin når de tildeler dette logistik-firma som partner.
-                Fase 15.21 (2026-02-21): Indledende sætning fjernet pr.
-                brugerkrav. */}
-            <div className="bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 rounded-lg p-3 mb-4 text-xs text-emerald-800 dark:text-emerald-300 leading-relaxed">
-              <p>
-                Når en kunde-admin tildeler dit logistik-firma som partner på
-                en lokation, vises pladsen automatisk i listen herunder. Du kan
-                ikke selv tilføje, redigere eller slette pladser - kontakt
-                kunde-admin hvis noget skal opdateres.
-              </p>
-            </div>
-
-            {/* Plads list (read-only) */}
-            <div className="space-y-2">
-              {pladsList.map(plads => {
-                const isAdHoc = !plads.assigned_logistics_company_ids || plads.assigned_logistics_company_ids.length === 0;
-                const ownerCompany = managedCompanies.find(c => c.id === plads.company_id);
-                const ownerName = ownerCompany?.name || (plads.company_id ? "Anden kunde" : "");
-                return (
-                  <div key={plads.id} className="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-700 rounded-lg border border-slate-200 dark:border-slate-600" data-testid={`plads-row-${plads.id}`}>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <MapPin className="w-4 h-4 text-red-500 flex-shrink-0" />
-                        <span className="font-semibold text-sm">{plads.name}</span>
-                        {plads.location_code && (
-                          <span className="px-1.5 py-0.5 bg-slate-200 dark:bg-slate-600 text-slate-700 dark:text-slate-300 text-[10px] font-mono rounded">
-                            {plads.location_code}
-                          </span>
-                        )}
-                        {plads.city && <span className="text-xs text-slate-500">({plads.city})</span>}
-                        {plads.lat && plads.lng ? (
-                          <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-700 text-[10px] font-bold rounded-full">GPS</span>
-                        ) : (
-                          <span className="px-1.5 py-0.5 bg-yellow-100 text-yellow-700 text-[10px] font-bold rounded-full">Ingen GPS</span>
-                        )}
-                        {isAdHoc ? (
-                          <span className="px-1.5 py-0.5 bg-amber-100 dark:bg-amber-950/40 text-amber-700 dark:text-amber-400 text-[10px] font-bold rounded-full" title="Ad-hoc plads - ikke knyttet til en kunde">
-                            Ad-hoc
-                          </span>
-                        ) : ownerName ? (
-                          <span className="px-1.5 py-0.5 bg-blue-100 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 text-[10px] font-bold rounded-full" title={`Tilhører kunde: ${ownerName}`}>
-                            Kunde: {ownerName}
-                          </span>
-                        ) : null}
-                      </div>
-                      {plads.address && (
-                        <p className="text-xs text-slate-500 mt-0.5 ml-6 truncate">{plads.address}</p>
-                      )}
-                      {plads.lat && plads.lng && (
-                        <p className="text-[10px] text-slate-400 mt-0.5 ml-6 font-mono">{plads.lat}, {plads.lng}</p>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-              {pladsList.length === 0 && (
-                <div className="text-center py-12 text-slate-400">
-                  <Building2 className="w-10 h-10 mx-auto mb-2 opacity-40" />
-                  <p className="text-sm font-medium">Ingen pladser endnu</p>
-                  <p className="text-xs mt-1">
-                    Pladser vises her, når en kunde-admin tildeler dit logistik-firma
-                    som partner på en af deres lokationer.
-                  </p>
-                </div>
-              )}
-            </div>
-          </div>
-        </section>
+          <LogisticsLocations profile={logisticsProfile} pladsList={pladsList} onChanged={fetchData} />
         )}
 
         {/* History Tab */}
@@ -15116,6 +15051,15 @@ function App() {
         // No active customer yet (Fase 11 - 2026-06-17: ALDRIG auto-vælg
         // kunde, selv hvis der kun er én. Brugeren ønsker aktivt valg fra
         // chaufføren - han skal bekræfte hvem han kører for i dag.)
+        // 2026-10-16: Undtagelse - et premium-logistikfirma uden kunder har
+        // kun "Egne ture"; der er ingen kunde at bekræfte, så valget springes over.
+        if (custs.length === 1 && custs[0].own) {
+          await axios.post(`${API}/driver/active-customer`, { customer_id: custs[0].id });
+          if (cancelled) return;
+          setActiveCustomer(custs[0]);
+          if (veh) setDriverSetupDone(true); else setSetupStep(4);
+          return;
+        }
         setSetupStep(3);  // show customer picker (works for 1, 2, or 0 customers)
       } catch (e) {
         // Fallback: skip to plate step

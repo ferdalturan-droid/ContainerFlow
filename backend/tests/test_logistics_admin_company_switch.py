@@ -17,7 +17,7 @@ import requests
 
 BASE_URL = os.environ.get(
     "REACT_APP_BACKEND_URL",
-    "https://role-analysis-flow.preview.emergentagent.com",
+    "http://localhost:8080",
 ).rstrip("/")
 
 SUPER_EMAIL = "superadmin@platform.com"

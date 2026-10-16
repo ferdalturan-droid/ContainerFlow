@@ -12,7 +12,7 @@ import pytest
 import requests
 import uuid
 
-BASE_URL = "https://role-analysis-flow.preview.emergentagent.com"
+BASE_URL = "http://localhost:8080"
 
 
 class TestTourClaimingWorkflow:

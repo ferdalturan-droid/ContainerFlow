@@ -1273,6 +1273,20 @@ async def get_tours(report_id: Optional[str] = None, plads: Optional[str] = None
                         ]},
                     ]
                 }
+                # 2026-10-16: Logistikfirmaets EGNE ture (oprettet af deres
+                # admin/chauffører - company_id = firmaet selv). Før blev de
+                # aldrig vist for chauffører.
+                #   - "Egne ture" valgt (premium): alle egne ture.
+                #   - En kunde valgt: egne ture på den kundes pladser (fx en
+                #     ekstra/privat tur oprettet på pladsen).
+                if active_cid == la_company:
+                    partnership_clause["$or"].append({"company_id": la_company})
+                else:
+                    cust_plads = [p["name"] for p in await _raw_db.plads.find(
+                        {"company_id": active_cid}, {"_id": 0, "name": 1}).to_list(2000) if p.get("name")]
+                    if cust_plads:
+                        partnership_clause["$or"].append(
+                            {"company_id": la_company, "plads": {"$in": cust_plads}})
             else:
                 # Logistics admin: union of own + served customers
                 partnership_clause = {
@@ -1392,6 +1406,21 @@ async def _auto_push_haster(tour_data: dict):
     except Exception:
         pass
 
+def _stamp_logistics_creator(doc: dict, payload: Optional[dict]) -> dict:
+    """2026-10-16: Ture som et logistikfirmas admin eller chauffør opretter
+    manuelt knyttes til firmaet (assigned_logistics_company_ids), så deres
+    chauffører kan se dem. Før manglede feltet, og manuelle ture dukkede
+    aldrig op i chauffør-appen."""
+    if payload and payload.get("role") in ("logistics_admin", "driver"):
+        la = payload.get("company_id") or ""
+        if la and la != SUPER_ADMIN_BYPASS:
+            ids = list(doc.get("assigned_logistics_company_ids") or [])
+            if la not in ids:
+                ids.append(la)
+            doc["assigned_logistics_company_ids"] = ids
+    return doc
+
+
 @api_router.post("/tours", response_model=Tour)
 async def create_tour(tour: TourCreate, payload: dict = Depends(get_current_user_payload)):
     tour_data = tour.model_dump()
@@ -1403,12 +1432,12 @@ async def create_tour(tour: TourCreate, payload: dict = Depends(get_current_user
             tour_data.get("customer_name") or "",
         )
     tour_obj = Tour(**tour_data)
-    doc = tour_obj.model_dump()
+    doc = _stamp_logistics_creator(tour_obj.model_dump(), payload)
     await db.tours.insert_one(doc)
     return tour_obj
 
 @api_router.post("/tours/bulk", response_model=List[Tour])
-async def create_tours_bulk(tours: List[TourCreate]):
+async def create_tours_bulk(tours: List[TourCreate], payload: Optional[dict] = Depends(get_optional_user_payload)):
     """Optimized bulk insert using insert_many"""
     if not tours:
         return []
@@ -1424,7 +1453,7 @@ async def create_tours_bulk(tours: List[TourCreate]):
                     td.get("customer_name") or "",
                 )
             tour_objs.append(Tour(**td))
-        docs = [t.model_dump() for t in tour_objs]
+        docs = [_stamp_logistics_creator(t.model_dump(), payload) for t in tour_objs]
         await db.tours.insert_many(docs)
         return tour_objs
     except Exception as e:
@@ -1571,9 +1600,51 @@ async def _driver_active_customer_id(payload: dict) -> Optional[str]:
     return (u or {}).get("active_customer_id") or None
 
 
+# 2026-10-16: To slags logistikfirmaer (se LOGISTICS_TIERS.md).
+#   premium = oprettet som kunde med kundetype "logistik" (Kunder & Logistik)
+#             - bruger systemet selvstændigt: egne lokationer, egne ture.
+#   partner = oprettet i logistik-partner-biblioteket (from_library) - får
+#             adgang gennem de genbrugsplads-kunder der tilknytter dem.
+# Genbrugsplads-funktioner vises kun når firmaet har mindst én tilknyttet
+# kunde, og gælder kun for den kunde.
+def _logistics_tier(company: Optional[dict]) -> str:
+    if not company or company.get("company_type") != COMPANY_TYPE_LOGISTICS:
+        return ""
+    return "partner" if company.get("from_library") else "premium"
+
+
+async def _logistics_profile(cid: str) -> dict:
+    comp = await _raw_db.companies.find_one(
+        {"id": cid}, {"_id": 0, "id": 1, "name": 1, "company_type": 1, "from_library": 1,
+                      "serves_company_ids": 1})
+    tier = _logistics_tier(comp)
+    if not tier:
+        return {"is_logistics": False}
+    customers = await _raw_db.companies.find(
+        {"id": {"$in": [c for c in (comp.get("serves_company_ids") or []) if c]},
+         "company_type": COMPANY_TYPE_CUSTOMER, "active": {"$ne": False}},
+        {"_id": 0, "id": 1, "name": 1},
+    ).sort("name", 1).to_list(500)
+    return {
+        "is_logistics": True,
+        "company_id": cid,
+        "company_name": comp.get("name") or "",
+        "tier": tier,
+        "is_premium": tier == "premium",
+        "connected_customers": customers,
+        "has_connections": bool(customers),
+    }
+
+
+@api_router.get("/logistics/profile")
+async def logistics_profile(payload: dict = Depends(require_role("logistics_admin", "driver"))):
+    return await _logistics_profile(payload.get("company_id") or "")
+
+
 @api_router.get("/driver/customers")
 async def driver_list_customers(payload: dict = Depends(get_current_user_payload)):
-    """List customers this driver's logistics company serves."""
+    """List customers this driver's logistics company serves. Premium
+    logistikfirmaer har desuden deres egne ture som første valg."""
     if payload.get("role") != "driver":
         raise HTTPException(status_code=403, detail="Kun chauffører")
     drv_company_id = payload.get("company_id")
@@ -1581,18 +1652,22 @@ async def driver_list_customers(payload: dict = Depends(get_current_user_payload
         return []
     drv_co = await _raw_db.companies.find_one(
         {"id": drv_company_id},
-        {"_id": 0, "serves_company_ids": 1},
+        {"_id": 0, "id": 1, "name": 1, "serves_company_ids": 1, "company_type": 1, "from_library": 1},
     )
+    own = []
+    if _logistics_tier(drv_co) == "premium":
+        own = [{"id": drv_company_id, "name": f"Egne ture · {drv_co.get('name', '')}",
+                "customer_id": "", "city": "", "own": True}]
     customer_ids = list((drv_co or {}).get("serves_company_ids") or [])
     if not customer_ids:
-        return []
+        return own
     customers = await _raw_db.companies.find(
         {"id": {"$in": customer_ids}, "active": True},
         {"_id": 0, "id": 1, "name": 1, "customer_id": 1, "city": 1},
     ).to_list(100)
     # Sort alphabetically by name
     customers.sort(key=lambda c: (c.get("name") or "").lower())
-    return customers
+    return own + customers
 
 
 @api_router.get("/driver/active-customer")
@@ -1615,6 +1690,8 @@ async def driver_get_active_customer(payload: dict = Depends(get_current_user_pa
         {"id": cid, "active": True},
         {"_id": 0, "id": 1, "name": 1, "customer_id": 1, "city": 1},
     )
+    if c and cid == payload.get("company_id"):
+        c = {**c, "name": f"Egne ture · {c.get('name', '')}", "own": True}
     return {"customer_id": cid, "customer": c}
 
 
@@ -3687,6 +3764,61 @@ async def get_plads(payload: Optional[dict] = Depends(get_optional_user_payload)
         p["address_count"] = await db.plads_addresses.count_documents({"plads_id": p["id"]})
     return plads_list
 
+# ----- Egne lokationer for premium logistikfirmaer (2026-10-16) -------------
+async def _location_name_taken(name: str, exclude_id: str = "") -> bool:
+    # Ture peger på pladser via NAVN, så navne skal være entydige på tværs af
+    # kunder og logistikfirmaer - ellers kan en tur havne på forkert plads.
+    q: Dict[str, Any] = {"name": {"$regex": f"^{re.escape(name.strip())}$", "$options": "i"}}
+    if exclude_id:
+        q["id"] = {"$ne": exclude_id}
+    return bool(await _raw_db.plads.find_one(q, {"_id": 0, "id": 1}))
+
+
+async def _create_own_location(la: str, plads: "PladsCreate") -> "Plads":
+    name = (plads.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Navn er påkrævet")
+    if await _location_name_taken(name):
+        raise HTTPException(status_code=409, detail="Navnet bruges allerede af en anden lokation - tilføj fx by eller vejnavn")
+    code = ""
+    for _ in range(50):
+        cand = _gen_location_code_sync()
+        if not await _raw_db.plads.find_one({"location_code": cand}, {"_id": 0, "id": 1}):
+            code = cand
+            break
+    obj = Plads(name=name, city=(plads.city or "").strip(), address=(plads.address or "").strip(),
+                lat=plads.lat, lng=plads.lng, location_code=code)
+    doc = obj.model_dump()
+    doc.update({"code": code, "company_id": la, "assigned_logistics_company_ids": [la],
+                "own_location": True})
+    await _raw_db.plads.insert_one(doc)
+    return obj
+
+
+async def _update_own_location(la: str, plads_id: str, update: "PladsUpdate") -> "Plads":
+    cur = await _raw_db.plads.find_one({"id": plads_id, "company_id": la or "__none__"}, {"_id": 0})
+    if not cur:
+        raise HTTPException(
+            status_code=405,
+            detail="Plads-felter administreres af kunde-admin via deres lokations-side.",
+        )
+    data = {k: v for k, v in update.model_dump().items() if v is not None and k != "location_code"}
+    if "name" in data:
+        data["name"] = data["name"].strip()
+        if not data["name"]:
+            raise HTTPException(status_code=400, detail="Navn er påkrævet")
+        if await _location_name_taken(data["name"], exclude_id=plads_id):
+            raise HTTPException(status_code=409, detail="Navnet bruges allerede af en anden lokation")
+    if not data:
+        raise HTTPException(status_code=400, detail="Intet at opdatere")
+    await _raw_db.plads.update_one({"id": plads_id}, {"$set": data})
+    if data.get("name") and data["name"] != cur.get("name"):
+        # Egne ture peger på lokationen via navn - flyt dem med.
+        await _raw_db.tours.update_many({"company_id": la, "plads": cur.get("name")},
+                                        {"$set": {"plads": data["name"]}})
+    return Plads(**(await _raw_db.plads.find_one({"id": plads_id}, {"_id": 0})))
+
+
 @api_router.post("/plads", response_model=Plads)
 async def create_plads(plads: PladsCreate, payload: dict = Depends(get_current_user_payload)):
     # Fase 3 (2026-06-16): Logistik-admins må IKKE oprette plads manuelt.
@@ -3694,11 +3826,17 @@ async def create_plads(plads: PladsCreate, payload: dict = Depends(get_current_u
     # Super_admin er undtaget for migrations-/library-scenarier.
     role = payload.get("role")
     if role == "logistics_admin":
-        raise HTTPException(
-            status_code=405,
-            detail="Pladser oprettes af kunde-admin via deres lokationer. "
-                   "Når kunden tildeler dit logistik-firma som partner, vises pladserne automatisk her.",
-        )
+        # 2026-10-16: Premium logistikfirmaer har deres egne lokationer
+        # (depoter, faste kunder, byggepladser ...). Partnere får stadig
+        # pladserne fra deres genbrugsplads-kunder.
+        la = payload.get("company_id") or ""
+        if (await _logistics_profile(la)).get("tier") != "premium":
+            raise HTTPException(
+                status_code=405,
+                detail="Pladser oprettes af kunde-admin via deres lokationer. "
+                       "Når kunden tildeler dit logistik-firma som partner, vises pladserne automatisk her.",
+            )
+        return await _create_own_location(la, plads)
     if role not in ("super_admin", "customer_admin"):
         raise HTTPException(status_code=403, detail="Adgang nægtet")
 
@@ -3718,12 +3856,18 @@ async def create_plads(plads: PladsCreate, payload: dict = Depends(get_current_u
 
 @api_router.delete("/plads/{plads_id}")
 async def delete_plads(plads_id: str, payload: dict = Depends(get_current_user_payload)):
-    # Fase 3 (2026-06-16): logistics_admin må ikke slette plads.
+    # Fase 3 (2026-06-16): logistics_admin må ikke slette kunders plads.
+    # 2026-10-16: Egne lokationer (premium) må gerne deaktiveres.
     if payload.get("role") == "logistics_admin":
-        raise HTTPException(
-            status_code=405,
-            detail="Kun kunde-admin må deaktivere pladser (via deres lokations-side).",
-        )
+        own = await _raw_db.plads.find_one(
+            {"id": plads_id, "company_id": payload.get("company_id") or "__none__"}, {"_id": 0, "id": 1})
+        if not own:
+            raise HTTPException(
+                status_code=405,
+                detail="Kun kunde-admin må deaktivere pladser (via deres lokations-side).",
+            )
+        await _raw_db.plads.update_one({"id": plads_id}, {"$set": {"active": False}})
+        return {"message": "Lokation deaktiveret"}
     result = await db.plads.update_one(
         {"id": plads_id},
         {"$set": {"active": False}}
@@ -3734,12 +3878,10 @@ async def delete_plads(plads_id: str, payload: dict = Depends(get_current_user_p
 
 @api_router.put("/plads/{plads_id}", response_model=Plads)
 async def update_plads(plads_id: str, update: PladsUpdate, payload: dict = Depends(get_current_user_payload)):
-    # Fase 3 (2026-06-16): logistics_admin må ikke ændre plads-felter.
+    # Fase 3 (2026-06-16): logistics_admin må ikke ændre kunders plads-felter.
+    # 2026-10-16: ... men gerne deres egne lokationer (premium).
     if payload.get("role") == "logistics_admin":
-        raise HTTPException(
-            status_code=405,
-            detail="Plads-felter administreres af kunde-admin via deres lokations-side.",
-        )
+        return await _update_own_location(payload.get("company_id") or "", plads_id, update)
     update_data = {k: v for k, v in update.model_dump().items() if v is not None}
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
@@ -15781,6 +15923,23 @@ class _PricingContext:
                 self.groups[g["id"]] = {h.get("date"): h.get("name") for h in (g.get("holidays") or [])}
         await self._load_times(tours)
 
+    def customer_key(self, t: dict) -> str:
+        """Kunden i økonomi-forstand. Logistikfirmaets EGNE ture (premium,
+        manuelle) har ingen genbrugsplads-kunde - der er kunden det firma der
+        står på turen ("firma tur"), så priser og fakturagrundlag kan laves
+        pr. slutkunde."""
+        cid_t = t.get("company_id") or ""
+        if cid_t and cid_t == self.cid:
+            nm = (t.get("private_company") or t.get("customer_name") or "").strip()
+            return f"firma:{_pricing.norm_label(nm)}" if nm else self.cid
+        return cid_t
+
+    def customer_name(self, t: dict) -> str:
+        cid_t = t.get("company_id") or ""
+        if cid_t and cid_t == self.cid:
+            return (t.get("private_company") or t.get("customer_name") or "").strip() or "Egne ture"
+        return (self.customers.get(cid_t) or {}).get("name") or t.get("customer_name") or ""
+
     def location_code(self, t: dict) -> str:
         order = self.orders.get(t.get("order_id") or "")
         if order and order.get("location_code"):
@@ -15888,7 +16047,7 @@ class _PricingContext:
         trailer = _fact(t, "used_trailer", t.get("used_trailer"))
         containers = len(t.get("container_weights") or []) or int(t.get("loose_estimated_count") or 0) or 1
         return {
-            "customer_id": t.get("company_id") or "",
+            "customer_id": self.customer_key(t),
             "location_code": self.location_code(t),
             "material": t.get("fraction") or "",
             "task_type": (t.get("tour_type") or "normal").replace("værksted", "vaerksted"),
@@ -15928,7 +16087,7 @@ def _report_row(ctx: _PricingContext, t: dict, pending: Dict[str, int]) -> dict:
         "tour_number": t.get("tour_number") or "",
         "service_date": a["service_date"],
         "customer_id": a["customer_id"],
-        "customer_name": (ctx.customers.get(a["customer_id"]) or {}).get("name") or t.get("customer_name") or "",
+        "customer_name": ctx.customer_name(t),
         "location_code": a["location_code"],
         "location_name": t.get("plads") or "",
         "material": a["material"],
@@ -16034,8 +16193,21 @@ async def pricing_options(payload: dict = Depends(get_current_user_payload)):
         pm = (p.get("partner_materials") or {}).get(cid)
         materials.update(pm if pm else (p.get("materials") or []))
     legacy = await _raw_db.tour_prices.count_documents({"company_id": cid})
+    profile = await _logistics_profile(cid)
+    customers = sorted(customers, key=lambda c: c["name"])
+    # Egne ture (premium / manuelle): kunden er firmaet på turen.
+    own_names: Dict[str, str] = {}
+    for field in ("private_company", "customer_name"):
+        for nm in await _raw_db.tours.distinct(field, {"company_id": cid}):
+            if isinstance(nm, str) and nm.strip():
+                own_names.setdefault(_pricing.norm_label(nm), nm.strip())
+    if own_names or profile.get("is_premium"):
+        customers.append({"id": cid, "name": "Egne ture uden kunde", "own": True})
+        customers += [{"id": f"firma:{k}", "name": v, "own": True}
+                      for k, v in sorted(own_names.items(), key=lambda kv: kv[1].lower())]
     return {
-        "customers": sorted(customers, key=lambda c: c["name"]),
+        "profile": profile,
+        "customers": customers,
         "locations": sorted([{"code": p["location_code"], "name": p["name"], "customer_id": p.get("company_id")}
                              for p in plads if p.get("location_code")], key=lambda x: x["name"]),
         "delivery_labels": labels,
@@ -16231,11 +16403,12 @@ async def pricing_report(date_from: str, date_to: str, customer_id: str = "", lo
         _date.fromisoformat(date_from); _date.fromisoformat(date_to)
     except ValueError:
         raise HTTPException(status_code=400, detail="Ugyldig periode")
-    extra = {"company_id": customer_id} if customer_id else None
-    tours = await _billable_tours(cid, date_from, date_to, extra)
+    tours = await _billable_tours(cid, date_from, date_to)
     settings = await _price_settings(cid)
     ctx = _PricingContext(cid, settings, await _active_rules(cid))
     await ctx.load(tours)
+    if customer_id:
+        tours = [t for t in tours if ctx.customer_key(t) == customer_id]
     if location_code:
         tours = [t for t in tours if ctx.location_code(t) == location_code]
     pending = await _pending_counts([t["id"] for t in tours])

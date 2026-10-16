@@ -19,6 +19,24 @@ Data must be strictly isolated per company.
   and `/api/health` bypass tenant filtering so the QR-code customer flow continues to work.
 
 ## What's been implemented (2026-02-15)
+## What's new in 2026-10-16 (Logistik: Premium vs. Partner + oprydning)
+
+Se `LOGISTICS_TIERS.md`.
+- **Premium (option 1)** = logistikfirma oprettet som kunde med kundetype
+  logistik; **Partner (option 2)** = logistik-partner fra biblioteket.
+  `GET /api/logistics/profile` fortæller frontend hvilken type + om firmaet har
+  tilknyttede genbrugsplads-kunder.
+- Premium: egne lokationer (fanen hedder nu "Lokationer"), chauffører får
+  "Egne ture" som valg (uden kunder springes kundevalget over), Økonomi
+  prissætter egne ture pr. slutkunde (firma). Genbrugsplads-funktioner vises
+  kun når der er tilknyttede kunder.
+- **Fejlrettelse (alle logistikfirmaer):** manuelt oprettede ture blev aldrig
+  knyttet til logistikfirmaet og var derfor usynlige for chaufførerne.
+- Økonomi: "Åbn igen" hedder nu "Fjern faktureret-markering" og vises kun for
+  ture der faktisk er faktureret.
+- Emergent fjernet: emergent-main.js, "Made with Emergent"-badge, PostHog
+  session recording, @emergentbase/visual-edits, .emergent/ og bot-.gitconfig.
+
 ## What's new in 2026-10-16 (Økonomi: prisregler, rapport, godkendelser)
 
 "Priser & Rapport" (fast pris pr. plads + fraktion) er erstattet af **Økonomi**

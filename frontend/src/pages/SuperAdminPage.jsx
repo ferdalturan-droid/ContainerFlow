@@ -825,7 +825,7 @@ function CompaniesPanel() {
                       ? "bg-blue-100 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300"
                       : "bg-emerald-100 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300"
                   }`}>
-                    {c.company_type === "logistics" ? "Logistik" : "Kunde"}
+                    {c.company_type === "logistics" ? (c.from_library ? "Logistik-partner" : "Logistik · Premium") : "Kunde"}
                   </span>
                 </h3>
                 <div className="mt-2 space-y-1 text-xs text-slate-500">
@@ -907,7 +907,7 @@ function CompaniesPanel() {
                   <div className="grid grid-cols-2 gap-2">
                     {[
                       { id: "customer", icon: Building, label: "Kunde", desc: "har lokationer" },
-                      { id: "logistics", icon: Truck, label: "Logistik", desc: "har chauffører" },
+                      { id: "logistics", icon: Truck, label: "Logistik (premium)", desc: "eget system: lokationer, ture, chauffører" },
                     ].map(t => (
                       <button key={t.id} type="button" onClick={() => setTop("company_type", t.id)}
                         data-testid={`type-${t.id}`}

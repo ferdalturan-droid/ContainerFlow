@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 load_dotenv("/app/backend/.env")
 load_dotenv("/app/frontend/.env")
 
-API = os.environ.get("REACT_APP_BACKEND_URL", "https://role-analysis-flow.preview.emergentagent.com").rstrip("/")
+API = os.environ.get("REACT_APP_BACKEND_URL", "http://localhost:8080").rstrip("/")
 MONGO_URL = os.environ.get("MONGO_URL")
 DB_NAME = os.environ.get("DB_NAME")
 

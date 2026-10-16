@@ -112,19 +112,29 @@ SIZE_HOURS = {
 }
 
 LOGISTICS = [
-    {"key": "ilk", "name": "ILK Logistics", "customer_id": "ILK-9001",
+    {"key": "ilk", "name": "ILK Logistics", "customer_id": "ILK-9001", "tier": "premium",
      "admin": ("ILK Distribution Admin", "ilk.admin"),
      "vehicles": ["CF 21 401", "CF 21 402", "CF 21 403"],
      "trailers": [("ILK-H1", 1), ("ILK-H2", 2)],
      "drivers": [("Lars Jensen", "ilk.chauffoer1", "40 11 20 01", "Nordsjælland"),
                  ("Mads Nielsen", "ilk.chauffoer2", "40 11 20 02", "Roskilde/Køge"),
                  ("Peter Hansen", "ilk.chauffoer3", "40 11 20 03", "Storkøbenhavn")]},
-    {"key": "city", "name": "City Container", "customer_id": "CC-9002",
+    {"key": "city", "name": "City Container", "customer_id": "CC-9002", "tier": "partner",
      "admin": ("City Container Admin", "city.admin"),
      "vehicles": ["CC 33 101", "CC 33 102"],
      "trailers": [("CC-H1", 1)],
      "drivers": [("Jonas Pedersen", "city.chauffoer1", "40 22 30 01", "Helsingør"),
                  ("Kasper Andersen", "city.chauffoer2", "40 22 30 02", "Storkøbenhavn")]},
+    # Premium uden genbrugsplads-kunder: bruger systemet helt selvstændigt.
+    {"key": "hansen", "name": "Hansen Transport", "customer_id": "HT-9003", "tier": "premium",
+     "admin": ("Hansen Transport Admin", "hansen.admin"),
+     "vehicles": ["HT 44 201", "HT 44 202"],
+     "trailers": [("HT-H1", 1)],
+     "drivers": [("Nikolaj Holm", "hansen.chauffoer1", "40 33 40 01", "Sjælland"),
+                 ("Sara Kjeldsen", "hansen.chauffoer2", "40 33 40 02", "Storkøbenhavn")],
+     "own_locations": [("Hansen Depot Køge", "Industrivej 22", "Køge", 55.4565, 12.1820),
+                       ("Byggeplads Ørestad Syd", "Arne Jacobsens Allé 20", "København S", 55.6260, 12.5770),
+                       ("Nordhavn Etape 2", "Kattegatvej 8", "København Ø", 55.7140, 12.5980)]},
 ]
 
 CUSTOMERS = [
@@ -204,12 +214,23 @@ print("Helligdagsgruppe oprettet")
 partner_ids = {}
 for lg in LOGISTICS:
     admin_name, admin_slug = lg["admin"]
-    res = call("POST", "/superadmin/companies/quick-setup", {
-        "company_name": lg["name"], "company_type": "logistics", "customer_id": lg["customer_id"],
-        "admin": {"name": admin_name, "email": email(admin_slug), "password": PASSWORD}}, sa)
+    if lg["tier"] == "partner":
+        # Option 2: logistik-partner fra biblioteket (Super Admin > Tilføj
+        # logistik partner) - får adgang gennem genbrugsplads-kunderne.
+        res = call("POST", "/superadmin/companies", {
+            "name": lg["name"], "company_type": "logistics", "customer_id": lg["customer_id"],
+            "admin_name": admin_name, "admin_email": email(admin_slug), "from_library": True}, sa)
+        activate(res["created_admin"]["id"])
+    else:
+        # Option 1: premium - oprettet som kunde med kundetype logistik.
+        res = call("POST", "/superadmin/companies/quick-setup", {
+            "company_name": lg["name"], "company_type": "logistics", "customer_id": lg["customer_id"],
+            "admin": {"name": admin_name, "email": email(admin_slug), "password": PASSWORD}}, sa)
     partner_ids[lg["key"]] = res["company"]["id"]
-    LOGINS.append(("Logistik admin", admin_name, email(admin_slug), lg["name"]))
+    LOGINS.append(("Logistik admin", admin_name, email(admin_slug), f"{lg['name']} ({lg['tier']})"))
     tok = login(email(admin_slug))
+    for name, street, city, lat, lng in lg.get("own_locations", []):
+        call("POST", "/plads", {"name": name, "address": street, "city": city, "lat": lat, "lng": lng}, tok)
     for number in lg["vehicles"]:
         call("POST", "/vehicles", {"number": number}, tok)
     for number, cap in lg["trailers"]:
@@ -347,11 +368,19 @@ CITY_RULES = [
     rule("surcharge", "Weekendtillæg", {"day_types": ["saturday", "sunday"]}, category="weekend",
          surcharge={"unit": "percent", "value": 25}),
 ]
-for admin_slug, rules in (("ilk.admin", ILK_RULES), ("city.admin", CITY_RULES)):
+HANSEN_RULES = [
+    rule("base", "Timepris", pricing={"model": "hourly", "hourly_rate": 625, "start_fee": 150,
+                                      "rounding_mode": "up", "rounding_minutes": 15, "deduct_pause": True}),
+    rule("base", "Containerbyt fast pris", {"task_types": ["flyt"]}, pricing={"model": "fixed", "amount": 1050}),
+    rule("surcharge", "Weekendtillæg", {"day_types": ["saturday", "sunday"]}, category="weekend",
+         surcharge={"unit": "percent", "value": 30}),
+    rule("surcharge", "Ventetid", category="waiting", surcharge={"unit": "per_hour", "value": 625}),
+]
+for admin_slug, rules in (("ilk.admin", ILK_RULES), ("city.admin", CITY_RULES), ("hansen.admin", HANSEN_RULES)):
     tok = login(email(admin_slug))
     for r in rules:
         call("POST", "/pricing/rules", r, tok)
-print(f"Prisregler: {len(ILK_RULES)} for ILK, {len(CITY_RULES)} for City Container")
+print(f"Prisregler: {len(ILK_RULES)} for ILK, {len(CITY_RULES)} for City Container, {len(HANSEN_RULES)} for Hansen Transport")
 
 # Summary for the person testing
 lines = ["# Lokale test-logins (kun din lokale ContainerFlow)",
