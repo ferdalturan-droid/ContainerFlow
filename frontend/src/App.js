@@ -22,7 +22,7 @@ import SetPasswordPage from "@/pages/SetPasswordPage";
 import PrijsPage from "@/pages/PrijsPage";
 import SuperAdminPage from "@/pages/SuperAdminPage";
 import CustomerAdminPage from "@/pages/CustomerAdminPage";
-import LocationAdminPage from "@/pages/LocationAdminPage";
+import LocationAdminPage, { ArchiveTab as TourArchive } from "@/pages/LocationAdminPage";
 import GenbrugPladsPage from "@/pages/GenbrugPladsPage";
 import PladsPickerPage from "@/pages/PladsPickerPage";
 import AdminPladsAddressesModal from "@/components/AdminPladsAddressesModal";
@@ -128,6 +128,222 @@ const getDriverColor = (name) => {
 const getCurrentTime = () => {
   const now = new Date();
   return now.toTimeString().slice(0, 5);
+};
+
+// 2026-10-16: Fælles PDF for chaufførens dagrapport (manuel download OG
+// "Afslut dag"). Bygger på /driver/day-report: alle arbejds- og pause-
+// perioder (ikke kun sidste IND/UD) + alle ture chaufføren afsluttede på
+// dagen, med start/slut/varighed pr. tur.
+const fmtMinutes = (m) => {
+  if (m == null || Number.isNaN(m)) return "-";
+  return `${Math.floor(m / 60)}t ${String(m % 60).padStart(2, "0")}m`;
+};
+
+const buildDayReportPdf = ({ title, report, driverName, vehicleReg, date, notes, footerLabel }) => {
+  const doc = new jsPDF();
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const red = [220, 38, 38];
+  const ts = report?.time_summary || {};
+  const tours = report?.tours || [];
+  const slices = [...(ts.work_slices || []), ...(ts.pause_slices || [])]
+    .sort((a, b) => (a.start_time || "").localeCompare(b.start_time || ""));
+  const totalWeight = tours.reduce((sum, t) => sum + (Number(t.weight) || 0), 0);
+  const pladsNames = [...new Set(tours.map(t => t.plads).filter(Boolean))].join(", ") || "-";
+  const formattedDate = (date || "").split("-").reverse().join(".");
+  const pageBreak = (y, need = 25) => {
+    if (y > pageHeight - need) { doc.addPage(); return 15; }
+    return y;
+  };
+  const label = (txt, x, y) => {
+    doc.setFont("helvetica", "bold"); doc.setFontSize(9); doc.setTextColor(...red); doc.text(txt, x, y);
+  };
+  const value = (txt, x, y) => {
+    doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(0, 0, 0); doc.text(String(txt), x, y);
+  };
+
+  // Header
+  doc.setFillColor(...red);
+  doc.rect(0, 0, pageWidth, 35, "F");
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(24);
+  doc.setFont("helvetica", "bold");
+  doc.text("ContainerFlow", 14, 20);
+  doc.setFontSize(16);
+  doc.text(title, pageWidth - 14, 18, { align: "right" });
+  doc.setFontSize(10);
+  doc.setFont("helvetica", "normal");
+  doc.text(`Dato: ${formattedDate}`, pageWidth - 14, 26, { align: "right" });
+
+  // Info box
+  doc.setDrawColor(...red);
+  doc.setLineWidth(0.5);
+  doc.rect(14, 42, pageWidth - 28, 40);
+  const rows = [50, 58, 66, 74];
+  const rx = pageWidth / 2 + 10;
+  const vx = pageWidth / 2 + 42;
+  label("CHAUFFØR NAVN:", 18, rows[0]); value(driverName || "Ikke valgt", 55, rows[0]);
+  label("VOGN NR.:", 18, rows[1]);      value(vehicleReg || "-", 55, rows[1]);
+  label("PLADS:", 18, rows[2]);         value(doc.splitTextToSize(pladsNames, pageWidth / 2 - 50)[0], 55, rows[2]);
+  label("TURE / VÆGT:", 18, rows[3]);   value(`${tours.length} / ${totalWeight} kg`, 55, rows[3]);
+  label("FØRSTE START:", rx, rows[0]);  value(ts.start || "-", vx, rows[0]);
+  label("SIDSTE SLUT:", rx, rows[1]);   value(ts.end ? `${ts.end}${ts.open ? " (i gang)" : ""}` : (ts.open ? "i gang" : "-"), vx, rows[1]);
+  label("ARBEJDSTID:", rx, rows[2]);    value(ts.any ? fmtMinutes(ts.work_min) : "-", vx, rows[2]);
+  label("PAUSE:", rx, rows[3]);         value(ts.any ? fmtMinutes(ts.pause_min) : "-", vx, rows[3]);
+
+  // Arbejdstid - every work/pause period
+  let y = 92;
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(10);
+  doc.setTextColor(...red);
+  doc.text("ARBEJDSTID - PERIODER", 14, y);
+  y += 4;
+  if (slices.length === 0) {
+    value("Ingen stemplinger registreret denne dag.", 16, y + 5);
+    y += 14;
+  } else {
+    doc.setFillColor(...red);
+    doc.rect(14, y, pageWidth - 28, 7, "F");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(7);
+    doc.setTextColor(255, 255, 255);
+    doc.text("TYPE", 18, y + 5);
+    doc.text("FRA", 60, y + 5);
+    doc.text("TIL", 85, y + 5);
+    doc.text("VARIGHED", 110, y + 5);
+    doc.text("BEMÆRKNING", 140, y + 5);
+    y += 12;
+    slices.forEach((s) => {
+      y = pageBreak(y);
+      const isPause = s.slice_type === "pause";
+      if (isPause) {
+        doc.setFillColor(255, 237, 213);
+        doc.rect(14, y - 5, pageWidth - 28, 8, "F");
+      }
+      doc.setFontSize(8);
+      doc.setFont("helvetica", "bold");
+      doc.setTextColor(...(isPause ? [194, 65, 12] : [22, 101, 52]));
+      doc.text(isPause ? "Pause" : "Arbejde", 18, y);
+      doc.setFont("helvetica", "normal");
+      doc.setTextColor(0, 0, 0);
+      doc.text(s.start_time || "-", 60, y);
+      doc.text(s.end_time || "i gang", 85, y);
+      doc.text(fmtMinutes(s.duration_minutes), 110, y);
+      const note = [s.manual ? "Manuel" : "", s.reason || ""].filter(Boolean).join(": ");
+      if (note) doc.text(doc.splitTextToSize(note, pageWidth - 14 - 140)[0], 140, y);
+      doc.setDrawColor(230, 230, 230);
+      doc.setLineWidth(0.2);
+      doc.line(14, y + 3, pageWidth - 14, y + 3);
+      y += 8;
+    });
+    y = pageBreak(y);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(8);
+    doc.setTextColor(0, 0, 0);
+    const gap = ts.gap_min ? `     Ikke stemplet: ${fmtMinutes(ts.gap_min)}` : "";
+    doc.text(`Arbejde i alt: ${fmtMinutes(ts.work_min)}     Pause i alt: ${fmtMinutes(ts.pause_min)}${gap}`, 18, y + 1);
+    y += 12;
+  }
+
+  // Ture - grouped by plads, with start/slut/varighed per tour
+  y = pageBreak(y, 40);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(10);
+  doc.setTextColor(...red);
+  doc.text(`TURE: ${tours.length} | TOTAL: ${totalWeight} kg`, 14, y);
+  y += 4;
+  if (tours.length === 0) {
+    value("Ingen afsluttede ture denne dag.", 16, y + 5);
+    y += 14;
+  } else {
+    doc.setFillColor(...red);
+    doc.rect(14, y, pageWidth - 28, 8, "F");
+    doc.setFontSize(5.5);
+    doc.setTextColor(255, 255, 255);
+    doc.text("NR", 16, y + 5.5);
+    doc.text("FRAKTION", 24, y + 5.5);
+    doc.text("MODTAGER", 52, y + 5.5);
+    doc.text("CONT.", 86, y + 5.5);
+    doc.text("ADRESSE", 100, y + 5.5);
+    doc.text("START", 140, y + 5.5);
+    doc.text("SLUT", 153, y + 5.5);
+    doc.text("TID", 166, y + 5.5);
+    doc.text("VÆGT", 182, y + 5.5);
+    y += 11;
+    let lastPlads = "";
+    let tourNum = 0;
+    tours.forEach((item) => {
+      y = pageBreak(y);
+      const plads = item.plads || "-";
+      if (plads !== lastPlads) {
+        if (lastPlads !== "") y += 2;
+        y = pageBreak(y, 30);
+        doc.setFillColor(...red);
+        doc.rect(14, y - 3, pageWidth - 28, 10, "F");
+        doc.setTextColor(255, 255, 255);
+        doc.setFontSize(8);
+        doc.setFont("helvetica", "bold");
+        doc.text(plads.toUpperCase(), 18, y + 4);
+        lastPlads = plads;
+        y += 11;
+        tourNum = 0;
+      }
+      tourNum++;
+      if (tourNum % 2 === 0) {
+        doc.setFillColor(248, 250, 252);
+        doc.rect(14, y - 5, pageWidth - 28, 9, "F");
+      }
+      doc.setDrawColor(230, 230, 230);
+      doc.setLineWidth(0.2);
+      doc.line(14, y + 4, pageWidth - 14, y + 4);
+      doc.setFontSize(6);
+      doc.setFont("helvetica", "normal");
+      doc.setTextColor(0, 0, 0);
+      doc.text(`${tourNum}`, 16, y + 1);
+      doc.text((item.fraction || "").substring(0, 14), 24, y + 1);
+      if (item.is_same_day) {
+        doc.setTextColor(234, 88, 12);
+        doc.setFont("helvetica", "bold");
+        doc.text("SD", 19, y + 1);
+        doc.setFont("helvetica", "normal");
+        doc.setTextColor(0, 0, 0);
+      }
+      doc.text((item.facility || "-").substring(0, 18), 52, y + 1);
+      doc.text((item.container || "-").substring(0, 8), 86, y + 1);
+      doc.text((item.address || "").substring(0, 22), 100, y + 1);
+      doc.setTextColor(22, 163, 74);
+      doc.text(item.start_time || "-", 140, y + 1);
+      doc.text(item.end_time || "-", 153, y + 1);
+      doc.setTextColor(0, 0, 0);
+      doc.setFont("helvetica", "bold");
+      doc.text(item.duration_min != null ? fmtMinutes(item.duration_min) : "-", 166, y + 1);
+      doc.text(item.weight ? `${item.weight} kg` : "-", 182, y + 1);
+      doc.setFont("helvetica", "normal");
+      y += 9;
+    });
+  }
+
+  if (notes) {
+    y = pageBreak(y + 5, 30);
+    doc.setFont("helvetica", "bold");
+    doc.setTextColor(...red);
+    doc.setFontSize(9);
+    doc.text("BEMÆRKNINGER:", 18, y);
+    doc.setFont("helvetica", "normal");
+    doc.setTextColor(0, 0, 0);
+    doc.setFontSize(8);
+    doc.text(doc.splitTextToSize(notes, pageWidth - 40), 18, y + 6);
+  }
+
+  const totalPages = doc.internal.getNumberOfPages();
+  for (let i = 1; i <= totalPages; i++) {
+    doc.setPage(i);
+    doc.setFontSize(7);
+    doc.setTextColor(128, 128, 128);
+    doc.text(`${footerLabel} - ${new Date().toLocaleString("da-DK")} | ContainerFlow | Side ${i}/${totalPages}`,
+      pageWidth / 2, pageHeight - 8, { align: "center" });
+  }
+  return doc;
 };
 
 // Open address in maps
@@ -6707,7 +6923,7 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
   const [editingPlads, setEditingPlads] = useState(null);
   const [reportHistory, setReportHistory] = useState([]);
   const [activeTab, setActiveTab] = useState("statistics"); // statistics (default), tours, schedule, drivers, plads, archives (merged with receipts), priser
-  const [archivesSubTab, setArchivesSubTab] = useState("pdf"); // pdf | receipts - within "Arkiv" tab
+  const [archivesSubTab, setArchivesSubTab] = useState("pdf"); // pdf | receipts | tours - within "Arkiv" tab
   const [receiptsArchiveView, setReceiptsArchiveView] = useState("table"); // table | drivers - Fase 17 merged archive view mode
   
   // Daily Overview state
@@ -8392,7 +8608,29 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
               >
                 <Camera className="w-4 h-4 inline mr-2" /> Kvittering-arkiv
               </button>
+              <button
+                onClick={() => setArchivesSubTab("tours")}
+                data-testid="archives-subtab-tours"
+                className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
+                  archivesSubTab === "tours"
+                    ? "bg-blue-600 text-white"
+                    : "text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700"
+                }`}
+              >
+                <Truck className="w-4 h-4 inline mr-2" /> Ture
+              </button>
             </div>
+
+            {/* 2026-10-16: Tur-overblik for logistik admin - samme visning som
+                Location Admins Arkiv, men kun dette firmas egne ture på de
+                pladser det betjener. */}
+            {archivesSubTab === "tours" && (
+              <TourArchive
+                locations={(pladsList || [])
+                  .filter(p => p.location_code || p.code)
+                  .map(p => ({ code: p.location_code || p.code, name: p.name }))}
+              />
+            )}
 
             {archivesSubTab === "receipts" && (
               <section className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm p-6 border border-border" data-testid="merged-receipts-archive-section">
@@ -15681,7 +15919,9 @@ function App() {
       setTimeEntries(r.data || []);
     } catch (_) { /* swallow */ }
   }, [reportDate]);
-  useEffect(() => { fetchTimeEntries(); }, [fetchTimeEntries]);
+  // 2026-10-16: Hent også igen når brugeren logger ind - komponenten er
+  // monteret før login, så første kald fik 401 og "Timer i dag" stod på 0.
+  useEffect(() => { fetchTimeEntries(); }, [fetchTimeEntries, authUser?.id]);
 
   // Fase 15.28 (2026-02-22): Hent punch-reason-indstilling så manuel
   // stempel-modal'en ved om Årsag-feltet er obligatorisk.
@@ -16848,250 +17088,19 @@ function App() {
     return routeOptimization.tours.find(t => t.tour_id === tourId) || null;
   };
 
-  const handleGeneratePDF = () => {
+  const handleGeneratePDF = async () => {
     try {
-      const doc = new jsPDF();
-      const pageWidth = doc.internal.pageSize.getWidth();
-      const pageHeight = doc.internal.pageSize.getHeight();
-      
-      const pdfTours = tours.filter(t => !t.is_pause && t.completed && (t.claimed_by === driverName || t.driver_name === driverName));
-      const pdfPauses = tours.filter(t => t.is_pause && (t.driver_name === driverName || t.claimed_by === driverName));
-      const pdfCompletedTours = pdfTours;
-      const pdfTotalWeight = pdfTours.reduce((sum, t) => sum + (t.weight || 0), 0);
-      const pdfPladsNames = [...new Set(pdfTours.map(t => t.plads).filter(Boolean))].join(", ") || selectedPlads || customPlads || "-";
-      doc.setFillColor(220, 38, 38);
-      doc.rect(0, 0, pageWidth, 35, 'F');
-      
-      doc.setTextColor(255, 255, 255);
-      doc.setFontSize(24);
-      doc.setFont("helvetica", "bold");
-      doc.text("ContainerFlow", 14, 18);
-      
-      doc.setFontSize(10);
-      doc.setFont("helvetica", "normal");
-      doc.text("ContainerFlow", 14, 26);
-      
-      doc.setFontSize(16);
-      doc.setFont("helvetica", "bold");
-      doc.text("KØRSELSRAPPORT", pageWidth - 14, 18, { align: "right" });
-      
-      doc.setFontSize(10);
-      doc.setFont("helvetica", "normal");
+      const { data: report } = await axios.get(`${API}/driver/day-report`, { params: { date: reportDate } });
+      const doc = buildDayReportPdf({
+        title: "KØRSELSRAPPORT", report, driverName, vehicleReg, date: reportDate,
+        notes, footerLabel: "Genereret",
+      });
       const formattedDate = reportDate.split("-").reverse().join(".");
-      doc.text(`Dato: ${formattedDate}`, pageWidth - 14, 26, { align: "right" });
-      
-      // DRIVER INFO BOX
-      doc.setTextColor(0, 0, 0);
-      doc.setDrawColor(220, 38, 38);
-      doc.setLineWidth(0.5);
-      doc.rect(14, 42, pageWidth - 28, 32);
-      
-      doc.setFontSize(9);
-      doc.setFont("helvetica", "bold");
-      doc.setTextColor(220, 38, 38);
-      doc.text("CHAUFFØR NAVN:", 18, 50);
-      doc.text("VOGN NR.:", 18, 58);
-      doc.text("PLADS:", 18, 66);
-      
-      doc.setTextColor(0, 0, 0);
-      doc.setFont("helvetica", "normal");
-      doc.text(driverName || "Ikke valgt", 55, 50);
-      doc.text(vehicleReg || "-", 55, 58);
-      doc.text(pdfPladsNames, 55, 66);
-      
-      doc.setFont("helvetica", "bold");
-      doc.setTextColor(220, 38, 38);
-      doc.text("START TID:", pageWidth / 2 + 10, 50);
-      doc.text("SLUT TID:", pageWidth / 2 + 10, 58);
-      doc.text("TID I ALT:", pageWidth / 2 + 10, 66);
-      
-      doc.setTextColor(0, 0, 0);
-      doc.setFont("helvetica", "normal");
-      doc.text(startTime || "-", pageWidth / 2 + 40, 50);
-      doc.text(endTime || "-", pageWidth / 2 + 40, 58);
-      
-      let totalTimeStr = "-";
-      if (startTime && endTime) {
-        const [startH, startM] = startTime.split(":").map(Number);
-        const [endH, endM] = endTime.split(":").map(Number);
-        let totalMinutes = (endH * 60 + endM) - (startH * 60 + startM);
-        if (totalMinutes < 0) totalMinutes += 24 * 60;
-        totalTimeStr = `${Math.floor(totalMinutes / 60)}t ${totalMinutes % 60}m`;
-      }
-      doc.text(totalTimeStr, pageWidth / 2 + 40, 66);
-      
-      // COMPLETED TOURS LIST - grouped by genbrugsplads, sorted by time within each group
-      let currentY = 82;
-      
-      // Sort tours: first by plads, then by time within each plads
-      const sortedCompleted = [...pdfCompletedTours].sort((a, b) => {
-        const pladsA = a.plads || "";
-        const pladsB = b.plads || "";
-        if (pladsA !== pladsB) return pladsA.localeCompare(pladsB);
-        return (a.time || "99:99").localeCompare(b.time || "99:99");
-      });
-      
-      // Group pauses by their plads too
-      const allItems = [];
-      sortedCompleted.forEach(t => allItems.push({ ...t, _type: "tour" }));
-      pdfPauses.forEach(p => allItems.push({ ...p, _type: "pause" }));
-      // Sort: plads first, then time
-      allItems.sort((a, b) => {
-        const pladsA = a.plads || "";
-        const pladsB = b.plads || "";
-        if (pladsA !== pladsB) return pladsA.localeCompare(pladsB);
-        const timeA = a.time ? a.time.split("-")[0] : "99:99";
-        const timeB = b.time ? b.time.split("-")[0] : "99:99";
-        return timeA.localeCompare(timeB);
-      });
-      
-      if (allItems.length > 0) {
-        doc.setFontSize(10);
-        doc.setFont("helvetica", "bold");
-        doc.setTextColor(220, 38, 38);
-        doc.text(`TURE: ${pdfCompletedTours.length} | TOTAL: ${pdfTotalWeight} kg | PAUSE: ${pdfPauses.length}`, 14, currentY);
-        currentY += 8;
-        
-        // Table header
-        doc.setFillColor(220, 38, 38);
-        doc.rect(14, currentY, pageWidth - 28, 8, 'F');
-        doc.setFontSize(5.5);
-        doc.setTextColor(255, 255, 255);
-        doc.setFont("helvetica", "bold");
-        doc.text("NR", 16, currentY + 5.5);
-        doc.text("FRAKTION", 24, currentY + 5.5);
-        doc.text("MODTAGER", 52, currentY + 5.5);
-        doc.text("CONT.", 88, currentY + 5.5);
-        doc.text("ADRESSE", 102, currentY + 5.5);
-        doc.text("START", 142, currentY + 5.5);
-        doc.text("SLUT", 156, currentY + 5.5);
-        doc.text("STATUS", 168, currentY + 5.5);
-        doc.text("VÆGT", 185, currentY + 5.5);
-        currentY += 11;
-        
-        doc.setFontSize(7);
-        doc.setFont("helvetica", "normal");
-        doc.setTextColor(0, 0, 0);
-        
-        let lastPlads = "";
-        let tourNum = 0;
-        
-        allItems.forEach((item) => {
-          // Check if we need a new page
-          if (currentY > pageHeight - 25) {
-            doc.addPage();
-            currentY = 15;
-          }
-          
-          // PAUSE row
-          if (item._type === "pause") {
-            doc.setFillColor(255, 237, 213);
-            doc.rect(14, currentY - 5, pageWidth - 28, 9, 'F');
-            doc.setDrawColor(251, 146, 60);
-            doc.setLineWidth(0.3);
-            doc.line(14, currentY + 4, pageWidth - 14, currentY + 4);
-            doc.setTextColor(194, 65, 12);
-            doc.setFont("helvetica", "bold");
-            doc.text("PAUSE", 16, currentY + 1);
-            doc.text(item.time || "-", 40, currentY + 1);
-            doc.setFont("helvetica", "normal");
-            doc.setTextColor(0, 0, 0);
-            currentY += 9;
-            return;
-          }
-          
-          // RED PLADS DIVIDER - when plads changes, draw red separator with plads name
-          const currentPlads = item.plads || "-";
-          if (currentPlads !== lastPlads) {
-            if (lastPlads !== "") { currentY += 2; }
-            if (currentY > pageHeight - 30) { doc.addPage(); currentY = 15; }
-            doc.setFillColor(220, 38, 38);
-            doc.rect(14, currentY - 3, pageWidth - 28, 10, 'F');
-            doc.setTextColor(255, 255, 255);
-            doc.setFontSize(8);
-            doc.setFont("helvetica", "bold");
-            doc.text(currentPlads.toUpperCase(), 18, currentY + 4);
-            doc.setFontSize(7);
-            doc.setFont("helvetica", "normal");
-            doc.setTextColor(0, 0, 0);
-            lastPlads = currentPlads;
-            currentY += 11;
-            tourNum = 0;
-          }
-          
-          tourNum++;
-          
-          // Alternating row background
-          if (tourNum % 2 === 0) {
-            doc.setFillColor(248, 250, 252);
-            doc.rect(14, currentY - 5, pageWidth - 28, 9, 'F');
-          }
-          
-          // Row separator line
-          doc.setDrawColor(230, 230, 230);
-          doc.setLineWidth(0.2);
-          doc.line(14, currentY + 4, pageWidth - 14, currentY + 4);
-          
-          doc.setTextColor(0, 0, 0);
-          doc.setFontSize(6);
-          doc.text(`${tourNum}`, 16, currentY + 1);
-          doc.setFont("helvetica", "normal");
-          doc.text((item.fraction || "").substring(0, 14), 24, currentY + 1);
-          if (item.is_same_day) {
-            doc.setTextColor(234, 88, 12);
-            doc.setFont("helvetica", "bold");
-            doc.text("SD", 19, currentY + 1);
-            doc.setFont("helvetica", "normal");
-            doc.setTextColor(0, 0, 0);
-          }
-          doc.text((item.facility || "-").substring(0, 18), 52, currentY + 1);
-          doc.text((item.container || "-").substring(0, 8), 88, currentY + 1);
-          doc.text((item.address || "").substring(0, 22), 102, currentY + 1);
-          doc.setTextColor(22, 163, 74);
-          doc.text(item.on_way_time || "-", 142, currentY + 1);
-          doc.text(item.time || "-", 156, currentY + 1);
-          const status = item.completed ? "Udført" : "Afventer";
-          doc.setFont("helvetica", "bold");
-          doc.setTextColor(item.completed ? 34 : 180, item.completed ? 197 : 83, item.completed ? 94 : 9);
-          doc.text(status, 168, currentY + 1);
-          doc.setTextColor(0, 0, 0);
-          doc.text(item.weight ? `${item.weight} kg` : "-", 185, currentY + 1);
-          doc.setFont("helvetica", "normal");
-          currentY += 9;
-        });
-      }
-      
-      // NOTES
-      if (notes) {
-        currentY += 5;
-        if (currentY > pageHeight - 30) {
-          doc.addPage();
-          currentY = 15;
-        }
-        doc.setFont("helvetica", "bold");
-        doc.setTextColor(220, 38, 38);
-        doc.setFontSize(9);
-        doc.text("BEMÆRKNINGER:", 18, currentY);
-        doc.setFont("helvetica", "normal");
-        doc.setTextColor(0, 0, 0);
-        doc.setFontSize(8);
-        doc.text(doc.splitTextToSize(notes, pageWidth - 40), 18, currentY + 6);
-      }
-      
-      // FOOTER on last page
-      const totalPages = doc.internal.getNumberOfPages();
-      for (let i = 1; i <= totalPages; i++) {
-        doc.setPage(i);
-        doc.setFontSize(7);
-        doc.setTextColor(128, 128, 128);
-        doc.text(`Genereret: ${new Date().toLocaleString("da-DK")} | ContainerFlow | Side ${i}/${totalPages}`, pageWidth / 2, pageHeight - 8, { align: "center" });
-      }
-      
       doc.save(`korselsrapport_${formattedDate}_${driverName || "rapport"}.pdf`);
       toast.success("PDF genereret!");
     } catch (error) {
       console.error("PDF error:", error);
-      toast.error("Fejl: " + error.message);
+      toast.error("Fejl: " + (error?.response?.data?.detail || error.message));
     }
   };
 
@@ -17172,24 +17181,15 @@ function App() {
 
   // Fase 18.2: Den oprindelige "Afslut dag"-logik (slut-tid validering +
   // performEndOfShift) er flyttet hertil, så scenarie 1+2 kan gen-bruge den.
+  // 2026-10-16: Spørger ikke længere om "Slut tid" - dagrapporten tager
+  // start/slut fra stemplingerne. Den gamle slut-tid-state var ofte tom
+  // (fx efter genindlæsning), så chaufføren fik foreslået "nu" selvom han
+  // stemplede ud for timer siden. Klokken nu bruges kun som fallback hvis
+  // der slet ingen stemplinger er.
   const proceedToEndOfShift = (forcedEndTime) => {
     const effectiveEnd = forcedEndTime || endTime;
     const isValidTime = effectiveEnd && /^\d{2}:\d{2}$/.test(effectiveEnd);
-    if (!isValidTime) {
-      const currentT = getCurrentTime();
-      showConfirm(
-        "Slut tid mangler",
-        `Du har ikke indtastet en slut-tid. Vil du bruge den nuværende tid (${currentT}) som slut-tid? Tryk Annuller hvis du vil indtaste den manuelt.`,
-        () => {
-          hideConfirm();
-          setEndTime(currentT);
-          performEndOfShift(currentT);
-        },
-        "warning"
-      );
-      return;
-    }
-    performEndOfShift(effectiveEnd);
+    performEndOfShift(isValidTime ? effectiveEnd : getCurrentTime());
   };
 
   const performEndOfShift = async (effectiveEndTime) => {
@@ -17198,190 +17198,34 @@ function App() {
     
     setIsEndingShift(true);
     try {
-      // Generate PDF as base64
-      const doc = new jsPDF();
-      const pageWidth = doc.internal.pageSize.getWidth();
-      const pageHeight = doc.internal.pageSize.getHeight();
-      
-      const pdfTours = tours.filter(t => !t.is_pause && t.completed && (t.claimed_by === driverName || t.driver_name === driverName));
-      const pdfPauses = tours.filter(t => t.is_pause && (t.driver_name === driverName || t.claimed_by === driverName));
-      const pdfCompletedTours = pdfTours;
-      const pdfTotalWeight = pdfTours.reduce((sum, t) => sum + (t.weight || 0), 0);
-      const pdfPladsNames = [...new Set(pdfTours.map(t => t.plads).filter(Boolean))].join(", ") || selectedPlads || customPlads || "-";
-      
-      // Build the same PDF as handleGeneratePDF
-      doc.setFillColor(220, 38, 38);
-      doc.rect(0, 0, pageWidth, 35, 'F');
-      doc.setTextColor(255, 255, 255);
-      doc.setFontSize(24);
-      doc.setFont("helvetica", "bold");
-      doc.text("ContainerFlow", 14, 18);
-      doc.setFontSize(10);
-      doc.setFont("helvetica", "normal");
-      doc.text("ContainerFlow", 14, 26);
-      doc.setFontSize(16);
-      doc.setFont("helvetica", "bold");
-      doc.text("DAGRAPPORT", pageWidth - 14, 18, { align: "right" });
-      doc.setFontSize(10);
-      doc.setFont("helvetica", "normal");
+      // 2026-10-16: Samme PDF som manuel download, bygget på alle dagens
+      // stemplinger + alle ture afsluttet i dag (hentes friskt, så en
+      // automatisk UD-stempling lige før også kommer med).
+      const { data: report } = await axios.get(`${API}/driver/day-report`, { params: { date: reportDate } });
+      const ts = report.time_summary || {};
       const formattedDate = reportDate.split("-").reverse().join(".");
-      doc.text(`Dato: ${formattedDate}`, pageWidth - 14, 26, { align: "right" });
-      
-      // Driver info box
-      doc.setTextColor(0, 0, 0);
-      doc.setDrawColor(220, 38, 38);
-      doc.setLineWidth(0.5);
-      doc.rect(14, 42, pageWidth - 28, 32);
-      doc.setFontSize(9);
-      doc.setFont("helvetica", "bold");
-      doc.setTextColor(220, 38, 38);
-      doc.text("CHAUFFØR NAVN:", 18, 50);
-      doc.text("VOGN NR.:", 18, 58);
-      doc.text("PLADS:", 18, 66);
-      doc.setTextColor(0, 0, 0);
-      doc.setFont("helvetica", "normal");
-      doc.text(driverName || "Ikke valgt", 55, 50);
-      doc.text(vehicleReg || "-", 55, 58);
-      doc.text(pdfPladsNames, 55, 66);
-      doc.setFont("helvetica", "bold");
-      doc.setTextColor(220, 38, 38);
-      doc.text("START TID:", pageWidth / 2 + 10, 50);
-      doc.text("SLUT TID:", pageWidth / 2 + 10, 58);
-      doc.text("TID I ALT:", pageWidth / 2 + 10, 66);
-      doc.setTextColor(0, 0, 0);
-      doc.setFont("helvetica", "normal");
-      doc.text(startTime || "-", pageWidth / 2 + 40, 50);
-      doc.text(nowTime || "-", pageWidth / 2 + 40, 58);
-      
-      let totalTimeStr = "-";
-      if (startTime && nowTime) {
-        const [startH, startM] = startTime.split(":").map(Number);
-        const [endH, endM] = nowTime.split(":").map(Number);
-        let totalMinutes = (endH * 60 + endM) - (startH * 60 + startM);
-        if (totalMinutes < 0) totalMinutes += 24 * 60;
-        totalTimeStr = `${Math.floor(totalMinutes / 60)}t ${totalMinutes % 60}m`;
-      }
-      doc.text(totalTimeStr, pageWidth / 2 + 40, 66);
-      
-      // Summary box
-      let currentY = 82;
-      doc.setFillColor(254, 242, 242);
-      doc.rect(14, currentY, pageWidth - 28, 16, 'F');
-      doc.setFontSize(11);
-      doc.setFont("helvetica", "bold");
-      doc.setTextColor(220, 38, 38);
-      doc.text(`TURE: ${pdfCompletedTours.length} | TOTAL: ${pdfTotalWeight} kg | PAUSE: ${pdfPauses.length} | TID: ${totalTimeStr}`, 18, currentY + 10);
-      currentY += 22;
-      
-      // Table header
-      if (pdfCompletedTours.length > 0) {
-        doc.setFillColor(220, 38, 38);
-        doc.rect(14, currentY, pageWidth - 28, 8, 'F');
-        doc.setFontSize(5.5);
-        doc.setTextColor(255, 255, 255);
-        doc.text("NR", 16, currentY + 5.5);
-        doc.text("FRAKTION", 24, currentY + 5.5);
-        doc.text("MODTAGER", 52, currentY + 5.5);
-        doc.text("CONT.", 88, currentY + 5.5);
-        doc.text("ADRESSE", 102, currentY + 5.5);
-        doc.text("START", 142, currentY + 5.5);
-        doc.text("SLUT", 156, currentY + 5.5);
-        doc.text("STATUS", 168, currentY + 5.5);
-        doc.text("VÆGT", 185, currentY + 5.5);
-        currentY += 11;
-        
-        const sortedCompleted = [...pdfCompletedTours].sort((a, b) => {
-          const pladsA = a.plads || "";
-          const pladsB = b.plads || "";
-          if (pladsA !== pladsB) return pladsA.localeCompare(pladsB);
-          return (a.time || "99:99").localeCompare(b.time || "99:99");
-        });
-        
-        doc.setFontSize(7);
-        doc.setFont("helvetica", "normal");
-        doc.setTextColor(0, 0, 0);
-        let tourNum = 0;
-        let lastPlads2 = "";
-        
-        sortedCompleted.forEach((item) => {
-          if (currentY > pageHeight - 25) { doc.addPage(); currentY = 15; }
-          
-          // RED PLADS DIVIDER
-          const currentPlads = item.plads || "-";
-          if (currentPlads !== lastPlads2) {
-            if (lastPlads2 !== "") { currentY += 2; }
-            if (currentY > pageHeight - 30) { doc.addPage(); currentY = 15; }
-            doc.setFillColor(220, 38, 38);
-            doc.rect(14, currentY - 3, pageWidth - 28, 10, 'F');
-            doc.setTextColor(255, 255, 255);
-            doc.setFontSize(8);
-            doc.setFont("helvetica", "bold");
-            doc.text(currentPlads.toUpperCase(), 18, currentY + 4);
-            doc.setFontSize(7);
-            doc.setFont("helvetica", "normal");
-            doc.setTextColor(0, 0, 0);
-            lastPlads2 = currentPlads;
-            currentY += 11;
-            tourNum = 0;
-          }
-          
-          tourNum++;
-          if (tourNum % 2 === 0) { doc.setFillColor(248, 250, 252); doc.rect(14, currentY - 5, pageWidth - 28, 9, 'F'); }
-          doc.setFontSize(6);
-          doc.setTextColor(0, 0, 0);
-          doc.text(`${tourNum}`, 16, currentY + 1);
-          doc.setFont("helvetica", "normal");
-          doc.text((item.fraction || "").substring(0, 14), 24, currentY + 1);
-          if (item.is_same_day) {
-            doc.setTextColor(234, 88, 12);
-            doc.setFont("helvetica", "bold");
-            doc.text("SD", 19, currentY + 1);
-            doc.setFont("helvetica", "normal");
-            doc.setTextColor(0, 0, 0);
-          }
-          doc.text((item.facility || "-").substring(0, 18), 52, currentY + 1);
-          doc.text((item.container || "-").substring(0, 8), 88, currentY + 1);
-          doc.text((item.address || "").substring(0, 22), 102, currentY + 1);
-          doc.setTextColor(22, 163, 74);
-          doc.text(item.on_way_time || "-", 142, currentY + 1);
-          doc.text(item.time || "-", 156, currentY + 1);
-          doc.setFont("helvetica", "bold");
-          doc.setTextColor(34, 197, 94);
-          doc.text("Udført", 168, currentY + 1);
-          doc.setTextColor(0, 0, 0);
-          doc.text(item.weight ? `${item.weight} kg` : "-", 185, currentY + 1);
-          doc.setFont("helvetica", "normal");
-          currentY += 9;
-        });
-      }
-      
-      // Footer
-      const totalPages = doc.internal.getNumberOfPages();
-      for (let i = 1; i <= totalPages; i++) {
-        doc.setPage(i);
-        doc.setFontSize(7);
-        doc.setTextColor(128, 128, 128);
-        doc.text(`Dagrapport - ${new Date().toLocaleString("da-DK")} | ContainerFlow | Side ${i}/${totalPages}`, pageWidth / 2, pageHeight - 8, { align: "center" });
-      }
-      
-      // Get base64 data
+      const doc = buildDayReportPdf({
+        title: "DAGRAPPORT", report, driverName, vehicleReg, date: reportDate,
+        notes, footerLabel: "Dagrapport",
+      });
       const pdfBase64 = doc.output('datauristring').split(',')[1];
-      
-      // Save to backend
+      const reportPlads = [...new Set((report.tours || []).map(t => t.plads).filter(Boolean))].join(", ")
+        || (selectedPlads && selectedPlads !== "__MINE__" ? selectedPlads : "") || customPlads || "";
+
       await axios.post(`${API}/driver/end-shift`, {
         driver_name: driverName,
         vehicle_reg: vehicleReg,
-        plads: selectedPlads || customPlads || "",
+        plads: reportPlads,
         report_date: reportDate,
         file_name: `dagrapport_${formattedDate}_${driverName || "rapport"}.pdf`,
         file_data: pdfBase64,
-        total_tours: pdfTours.length,
-        completed_tours: pdfCompletedTours.length,
-        total_weight: pdfTotalWeight,
-        start_time: startTime,
-        end_time: nowTime
+        total_tours: (report.tours || []).length,
+        completed_tours: (report.tours || []).length,
+        total_weight: (report.tours || []).reduce((sum, t) => sum + (Number(t.weight) || 0), 0),
+        start_time: ts.start || startTime,
+        end_time: ts.end || nowTime
       });
-      
+
       // Also download the PDF locally
       doc.save(`dagrapport_${formattedDate}_${driverName || "rapport"}.pdf`);
       

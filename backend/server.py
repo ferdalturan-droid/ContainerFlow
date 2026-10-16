@@ -5898,6 +5898,82 @@ async def list_my_time_entries(
     return [doc async for doc in cursor]
 
 
+def _tour_duration_min(start_hhmm: str, end_hhmm: str) -> Optional[int]:
+    s, e = _time_to_min(start_hhmm or ""), _time_to_min(end_hhmm or "")
+    if s < 0 or e < 0:
+        return None
+    return e - s if e >= s else e - s + 24 * 60  # tur over midnat
+
+
+# 2026-10-16: Datagrundlag for chaufførens dagrapport-PDF. Før byggede
+# PDF'en tiden ud fra ét start/slut-par (sidste IND → UD), så arbejde/pause-
+# perioder forsvandt og "Tid i alt" kun dækkede den sidste periode. Ture
+# blev desuden kun taget med hvis turens `date` var rapportdagen — en tur
+# bestilt til i morgen men kørt i dag manglede. Nu: alle stemplinger
+# (samme summering som PDF-arkivet) + alle ture chaufføren AFSLUTTEDE på dagen.
+@api_router.get("/driver/day-report")
+async def driver_day_report(
+    date: str,
+    token_payload: dict = Depends(require_role("driver")),
+):
+    driver_id = token_payload.get("sub") or token_payload.get("user_id") or ""
+    user = await _raw_db.users.find_one({"id": driver_id}, {"_id": 0, "name": 1}) or {}
+    driver_name = user.get("name") or ""
+
+    entries = await _raw_db.driver_time_entries.find(
+        {"driver_id": driver_id, "date": date, **_not_deleted_filter()}, {"_id": 0},
+    ).to_list(500)
+    now = datetime.now(DK_TZ)
+    is_today = date == now.strftime("%Y-%m-%d")
+    summary = _summarize_day_entries(
+        entries,
+        today_str=date if is_today else "",
+        now_hhmm=now.strftime("%H:%M") if is_today else "",
+    )
+
+    mine = [{"claimed_by_id": driver_id}]
+    if driver_name:
+        mine.append({"claimed_by": driver_name})
+    tours = await _raw_db.tours.find(
+        {"$and": [
+            {"completed": True},
+            {"$or": mine},
+            {"$or": [
+                {"completed_at": {"$regex": f"^{re.escape(date)}"}},
+                {"completed_at": {"$in": ["", None]}, "date": date},
+                {"completed_at": {"$exists": False}, "date": date},
+            ]},
+            {"$or": [{"is_pause": {"$exists": False}}, {"is_pause": False}]},
+            {"$or": [{"deleted": {"$exists": False}}, {"deleted": False}]},
+            {"tour_type": {"$ne": "estimat"}},
+        ]},
+        {"_id": 0, "receipt_image": 0},
+    ).to_list(1000)
+    out_tours = []
+    for t in tours:
+        start = t.get("on_way_time") or ""
+        end = t.get("time") or ""
+        out_tours.append({
+            "id": t.get("id", ""),
+            "date": t.get("date", ""),
+            "plads": t.get("plads", ""),
+            "fraction": t.get("fraction", ""),
+            "facility": t.get("facility", ""),
+            "container": t.get("container", ""),
+            "address": t.get("address", ""),
+            "weight": t.get("weight"),
+            "is_same_day": bool(t.get("is_same_day")),
+            "tour_type": t.get("tour_type") or "normal",
+            "tour_number": t.get("tour_number", ""),
+            "start_time": start,
+            "end_time": end,
+            "duration_min": _tour_duration_min(start, end),
+            "completed_at": t.get("completed_at", ""),
+        })
+    out_tours.sort(key=lambda x: (x["plads"], x["end_time"] or "99:99"))
+    return {"date": date, "driver_name": driver_name, "time_summary": summary, "tours": out_tours}
+
+
 # Fase 15.3 (2026-06-19): Logistik Admin overblik over alle chaufførers
 # tidsregistreringer (Ind/Ud + Manuel) for en given dato. Returneres
 # grupperet pr. chauffør med pairs (start_time → end_time, duration).
@@ -14789,13 +14865,26 @@ async def org_tour_archive(
     date_from: Optional[str] = None,         # YYYY-MM-DD
     date_to: Optional[str] = None,           # YYYY-MM-DD
     limit: int = 1000,
-    payload: dict = Depends(require_role("location_admin", "customer_admin", "super_admin")),
+    payload: dict = Depends(require_role("location_admin", "customer_admin", "logistics_admin", "super_admin")),
 ):
     caller = await _org_caller(payload)
     role = caller.get("role")
 
     # Resolve hvilke location_codes brugeren MÅ se.
-    if role == "super_admin":
+    if role == "logistics_admin":
+        # 2026-10-16: Logistik admin ser ture på de pladser firmaet betjener
+        # (på tværs af kunder). Kun egne ture — se partner-filter nederst.
+        plads_list = await _raw_db.plads.find(
+            {"assigned_logistics_company_ids": caller.get("company_id")},
+            {"_id": 0, "location_code": 1},
+        ).to_list(2000)
+        allowed = {p["location_code"] for p in plads_list if p.get("location_code")}
+        if location_codes:
+            req_codes = [c.strip() for c in location_codes.split(",") if c.strip()]
+            wanted = [c for c in req_codes if c in allowed]
+        else:
+            wanted = sorted(allowed)
+    elif role == "super_admin":
         # Super_admin må se alt — men skal angive specifikke codes.
         wanted = [c.strip() for c in (location_codes or "").split(",") if c.strip()]
         if not wanted:
@@ -14968,6 +15057,18 @@ async def org_tour_archive(
             "partner_id": partner_id,
             "partner_name": partner_name,
         })
+
+    if role == "logistics_admin":
+        # Strict partner-isolation: på pladser med flere partnere må ILK ikke
+        # se City Containers ture. Ture uden partner (legacy) vises kun hvis
+        # pladsen udelukkende betjenes af dette firma.
+        my_cid = caller.get("company_id")
+        sole = {p["location_code"] for p in await _raw_db.plads.find(
+            {"location_code": {"$in": wanted}, "assigned_logistics_company_ids": [my_cid]},
+            {"_id": 0, "location_code": 1},
+        ).to_list(2000)}
+        out = [t for t in out
+               if t["partner_id"] == my_cid or (not t["partner_id"] and t["location_code"] in sole)]
 
     return {
         "tours": out,
@@ -15455,12 +15556,20 @@ if os.path.isdir(_FRONTEND_BUILD):
         name="spa-static",
     )
 
+    # 2026-10-16: index.html, service-worker.js og manifest skal altid
+    # revalideres, ellers kører browsere (chaufførernes telefoner) videre på
+    # den gamle version efter et deploy. /static/* har hash i filnavnet og
+    # må gerne caches.
+    _NO_CACHE = {"Cache-Control": "no-cache, must-revalidate"}
+
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa_fallback(full_path: str):
         candidate = os.path.join(_FRONTEND_BUILD, full_path)
         if full_path and os.path.isfile(candidate):
+            if full_path.endswith((".html", "service-worker.js", "manifest.json")):
+                return FileResponse(candidate, headers=_NO_CACHE)
             return FileResponse(candidate)
-        return FileResponse(os.path.join(_FRONTEND_BUILD, "index.html"))
+        return FileResponse(os.path.join(_FRONTEND_BUILD, "index.html"), headers=_NO_CACHE)
 
 
 # Configure logging

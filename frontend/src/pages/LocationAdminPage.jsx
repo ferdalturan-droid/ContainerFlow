@@ -4033,7 +4033,7 @@ function dateRangeFor(period) {
   return { from: "", to: "" };
 }
 
-function ArchiveTab({ locations = [] }) {
+export function ArchiveTab({ locations = [] }) {
   const allCodes = locations.map(l => l.code || l.location_code).filter(Boolean);
   // Default: ALLE tildelte lokationer (brugerønske).
   const [selectedCodes, setSelectedCodes] = useState(() => new Set(allCodes));
