@@ -23,6 +23,7 @@ import PrijsPage from "@/pages/PrijsPage";
 import SuperAdminPage from "@/pages/SuperAdminPage";
 import CustomerAdminPage from "@/pages/CustomerAdminPage";
 import LocationAdminPage, { ArchiveTab as TourArchive } from "@/pages/LocationAdminPage";
+import EconomyPanel from "@/pages/EconomyPanel";
 import GenbrugPladsPage from "@/pages/GenbrugPladsPage";
 import PladsPickerPage from "@/pages/PladsPickerPage";
 import AdminPladsAddressesModal from "@/components/AdminPladsAddressesModal";
@@ -265,10 +266,11 @@ const buildDayReportPdf = ({ title, report, driverName, vehicleReg, date, notes,
     doc.text("MODTAGER", 52, y + 5.5);
     doc.text("CONT.", 86, y + 5.5);
     doc.text("ADRESSE", 100, y + 5.5);
-    doc.text("START", 140, y + 5.5);
-    doc.text("SLUT", 153, y + 5.5);
-    doc.text("TID", 166, y + 5.5);
-    doc.text("VÆGT", 182, y + 5.5);
+    doc.text("START", 136, y + 5.5);
+    doc.text("SLUT", 148, y + 5.5);
+    doc.text("PAUSE", 160, y + 5.5);
+    doc.text("TID", 172, y + 5.5);
+    doc.text("VÆGT", 186, y + 5.5);
     y += 11;
     let lastPlads = "";
     let tourNum = 0;
@@ -312,12 +314,15 @@ const buildDayReportPdf = ({ title, report, driverName, vehicleReg, date, notes,
       doc.text((item.container || "-").substring(0, 8), 86, y + 1);
       doc.text((item.address || "").substring(0, 22), 100, y + 1);
       doc.setTextColor(22, 163, 74);
-      doc.text(item.start_time || "-", 140, y + 1);
-      doc.text(item.end_time || "-", 153, y + 1);
+      doc.text(item.start_time || "-", 136, y + 1);
+      doc.text(item.end_time || "-", 148, y + 1);
+      doc.setTextColor(194, 65, 12);
+      doc.text(item.pause_min ? fmtMinutes(item.pause_min) : "-", 160, y + 1);
       doc.setTextColor(0, 0, 0);
       doc.setFont("helvetica", "bold");
-      doc.text(item.duration_min != null ? fmtMinutes(item.duration_min) : "-", 166, y + 1);
-      doc.text(item.weight ? `${item.weight} kg` : "-", 182, y + 1);
+      // TID = turens tid uden pauser registreret under "Tid"
+      doc.text(item.duration_min != null ? fmtMinutes(Math.max(0, item.duration_min - (item.pause_min || 0))) : "-", 172, y + 1);
+      doc.text(item.weight ? `${item.weight} kg` : "-", 186, y + 1);
       doc.setFont("helvetica", "normal");
       y += 9;
     });
@@ -8016,7 +8021,7 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
             { id: "drivers",    label: "Chauffører",        icon: Users },
             { id: "plads",      label: "Genbrugsplads",     icon: Building2 },
             { id: "archives",   label: "Arkiv",             icon: Archive,   testid: "admin-archives-tab" },
-            { id: "priser",     label: "Priser & Rapport",  icon: DollarSign },
+            { id: "priser",     label: "Økonomi",           icon: DollarSign },
             { id: "settings",   label: "Indstillinger",     icon: Settings,  testid: "admin-settings-tab" },
           ].map(t => {
             const Icon = t.icon;
@@ -11580,7 +11585,7 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
         )}
 
         {activeTab === "priser" && (
-          <AdminPrijsPanel plads={pladsList} />
+          <EconomyPanel />
         )}
 
         {activeTab === "settings" && (
@@ -13587,414 +13592,6 @@ const AdminSettingsPanel = ({ onSettingsChanged }) => {
 };
 
 
-// ============= ADMIN PRIJS PANEL (Priser & Rapport) =============
-const AdminPrijsPanel = ({ plads }) => {
-  const [subTab, setSubTab]       = useState("rapport"); // rapport | priser
-  const [prices, setPrices]       = useState([]);
-  const [hasterFee, setHasterFee] = useState(200);
-  const [loadingPrices, setLoadingPrices] = useState(true);
-  const [showForm, setShowForm]   = useState(false);
-  const [editing, setEditing]     = useState(null);
-  const [deletingId, setDeletingId] = useState(null);
-  const [editingHaster, setEditingHaster] = useState(false);
-  const [form, setForm]           = useState({ plads: "", fraction: "", price: "", kind: "material" });
-  const KIND_LABELS = { material: "Materiale", flyt: "Flyt container", vaerksted: "Til værksted" };
-
-  // Rapport states
-  const [selectedPlads, setSelectedPlads] = useState("");
-  // Fase 15.5 (2026-06-19): Sekundær plads-filter der KUN er aktiv når
-  // selectedPlads === "__MINE__". Tom streng = "alle mine pladser".
-  // Chaufføren kan via en separat dropdown filtrere deres egne ture på en
-  // specifik plads UDEN at skifte hovedvalg.
-  const [mineSelectedPlads, setMineSelectedPlads] = useState("");
-  const [period, setPeriod]       = useState("week");
-  const [dateFrom, setDateFrom]   = useState("");
-  const [dateTo, setDateTo]       = useState("");
-  const [rapport, setRapport]     = useState(null);
-  const [rapportLoading, setRapportLoading] = useState(false);
-
-  const fetchPrices = useCallback(async () => {
-    setLoadingPrices(true);
-    try {
-      const { data } = await axios.get(`${API}/tour-prices`);
-      setPrices(data.prices || []);
-      setHasterFee(data.haster_fee ?? 200);
-    } catch (e) { toast.error(formatApiError(e)); }
-    finally { setLoadingPrices(false); }
-  }, []);
-
-  const fetchRapport = useCallback(async () => {
-    setRapportLoading(true);
-    try {
-      const params = new URLSearchParams({ period });
-      if (selectedPlads) params.append("plads", selectedPlads);
-      if (dateFrom) params.append("date_from", dateFrom);
-      if (dateTo)   params.append("date_to", dateTo);
-      const { data } = await axios.get(`${API}/tour-prices/rapport?${params}`);
-      setRapport(data);
-    } catch (e) { toast.error(formatApiError(e)); }
-    finally { setRapportLoading(false); }
-  }, [period, selectedPlads, dateFrom, dateTo]);
-
-  useEffect(() => { fetchPrices(); }, [fetchPrices]);
-  useEffect(() => { fetchRapport(); }, [fetchRapport]);
-
-  // Plads names from existing plads list
-  const pladsNames = useMemo(() =>
-    [...new Set([
-      ...(plads || []).map(p => p.name || p.plads_name || "").filter(Boolean),
-      ...(prices || []).map(p => p.plads).filter(Boolean)
-    ])].sort()
-  , [plads, prices]);
-
-  const filteredPrices = selectedPlads
-    ? prices.filter(p => p.plads === selectedPlads)
-    : prices;
-
-  const savePrice = async () => {
-    const isSpecial = form.kind && form.kind !== "material";
-    if (!form.plads || !form.price || (!isSpecial && !form.fraction)) { toast.error("Udfyld alle felter"); return; }
-    const body = {
-      plads: form.plads,
-      fraction: isSpecial ? "" : form.fraction,
-      price: parseFloat(form.price),
-      kind: form.kind || "material",
-    };
-    try {
-      if (editing) { await axios.put(`${API}/tour-prices/${editing.id}`, body); toast.success("Opdateret"); }
-      else         { await axios.post(`${API}/tour-prices`, body); toast.success("Tilføjet"); }
-      setShowForm(false); setEditing(null); setForm({ plads: "", fraction: "", price: "", kind: "material" });
-      fetchPrices();
-    } catch (e) { toast.error(formatApiError(e)); }
-  };
-
-  const removePrice = async (id) => {
-    try { await axios.delete(`${API}/tour-prices/${id}`); toast.success("Slettet"); fetchPrices(); }
-    catch (e) { toast.error(formatApiError(e)); }
-    finally { setDeletingId(null); }
-  };
-
-  const saveHasterFee = async () => {
-    try { await axios.post(`${API}/tour-prices/haster-fee`, { fee: hasterFee }); toast.success("Gemt"); setEditingHaster(false); }
-    catch (e) { toast.error(formatApiError(e)); }
-  };
-
-  const exportCSV = () => {
-    if (!rapport?.rows?.length) { toast.error("Ingen data"); return; }
-    const headers = ["Dato", "Chauffør", "Plads", "Fraction", "Haster", "Pris (kr)"];
-    const rows = rapport.rows.map(r => [r.date, r.driver, r.plads, r.fraction, r.is_haster ? "Ja" : "Nej", r.price]);
-    const csv = [headers, ...rows].map(r => r.map(v => `"${v}"`).join(",")).join("\n");
-    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `priser_rapport_${selectedPlads || "alle"}_${new Date().toISOString().slice(0,10)}.csv`;
-    a.click();
-    toast.success("CSV downloadet!");
-  };
-
-  return (
-    <section className="space-y-5">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-xl font-bold flex items-center gap-2">
-            <DollarSign className="w-5 h-5 text-red-600" /> Priser & Rapport
-          </h2>
-          <p className="text-sm text-slate-500 mt-0.5">Vælg plads og periode for at se omsætning</p>
-        </div>
-        <div className="flex gap-2">
-          <button onClick={() => setSubTab("rapport")}
-            className={`px-4 py-2 rounded-lg text-sm font-semibold ${subTab === "rapport" ? "bg-red-600 text-white" : "bg-slate-100 text-slate-600"}`}>
-            Rapport
-          </button>
-          <button onClick={() => setSubTab("priser")}
-            className={`px-4 py-2 rounded-lg text-sm font-semibold ${subTab === "priser" ? "bg-red-600 text-white" : "bg-slate-100 text-slate-600"}`}>
-            Priser
-          </button>
-        </div>
-      </div>
-
-      {/* RAPPORT */}
-      {subTab === "rapport" && (
-        <div className="space-y-4">
-          {/* Filters */}
-          <div className="bg-white border border-border rounded-xl p-4 flex flex-wrap items-end gap-3">
-            <div>
-              <label className="block text-xs font-semibold text-slate-500 mb-1">Genbrugsplads</label>
-              <select value={selectedPlads} onChange={e => setSelectedPlads(e.target.value)}
-                className="px-3 py-2 border border-slate-200 rounded-lg text-sm outline-none focus:border-red-500 min-w-48">
-                <option value="">Alle pladser</option>
-                {pladsNames.map(p => <option key={p} value={p}>{p}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-500 mb-1">Periode</label>
-              <select value={period} onChange={e => { setPeriod(e.target.value); setDateFrom(""); setDateTo(""); }}
-                className="px-3 py-2 border border-slate-200 rounded-lg text-sm outline-none focus:border-red-500">
-                <option value="today">I dag</option>
-                <option value="week">Denne uge</option>
-                <option value="month">Denne måned</option>
-                <option value="custom">Vælg datoer</option>
-              </select>
-            </div>
-            {period === "custom" && (<>
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 mb-1">Fra dato</label>
-                <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
-                  className="px-3 py-2 border border-slate-200 rounded-lg text-sm outline-none focus:border-red-500" />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 mb-1">Til dato</label>
-                <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
-                  className="px-3 py-2 border border-slate-200 rounded-lg text-sm outline-none focus:border-red-500" />
-              </div>
-            </>)}
-            <button onClick={exportCSV}
-              className="ml-auto flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-semibold">
-              <Download className="w-4 h-4" /> CSV
-            </button>
-          </div>
-
-          {rapportLoading ? (
-            <div className="py-16 text-center"><Loader2 className="w-6 h-6 animate-spin inline text-slate-400" /></div>
-          ) : rapport && (<>
-            {/* Summary */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              {[
-                { label: "Ture i alt",   value: rapport.summary?.total_tours ?? 0,                                           cls: "text-slate-900" },
-                { label: "Total beløb",  value: `${(rapport.summary?.total_amount ?? 0).toLocaleString("da-DK")} kr`,        cls: "text-emerald-600" },
-                { label: "Haster tillæg",value: `${(rapport.summary?.haster_amount ?? 0).toLocaleString("da-DK")} kr`,       cls: "text-amber-500" },
-                { label: "Chauffører",   value: rapport.summary?.driver_count ?? 0,                                           cls: "text-slate-900" },
-              ].map(s => (
-                <div key={s.label} className="bg-white border border-border rounded-xl p-4">
-                  <p className="text-[10px] uppercase tracking-wide text-slate-400 font-semibold mb-1">{s.label}</p>
-                  <p className={`text-2xl font-bold ${s.cls}`}>{s.value}</p>
-                </div>
-              ))}
-            </div>
-
-            {/* Driver table */}
-            {rapport.by_driver?.length > 0 && (
-              <div className="bg-white border border-border rounded-xl overflow-hidden">
-                <div className="px-4 py-3 border-b border-border font-bold text-slate-800">
-                  Chauffør oversigt {selectedPlads ? `- ${selectedPlads}` : ""}
-                </div>
-                <div className="grid text-[10px] font-semibold uppercase tracking-wider text-slate-400 bg-slate-50 px-4 py-2"
-                  style={{ gridTemplateColumns: "1fr 80px 80px 120px" }}>
-                  <div>Chauffør</div><div className="text-right">Ture</div>
-                  <div className="text-right">Haster</div><div className="text-right">Beløb</div>
-                </div>
-                {rapport.by_driver.map((d, i) => (
-                  <div key={i} className="grid items-center px-4 py-3 border-b border-slate-100 last:border-0"
-                    style={{ gridTemplateColumns: "1fr 80px 80px 120px" }}>
-                    <div className="font-medium text-slate-800">{d.driver}</div>
-                    <div className="text-right text-slate-500">{d.tours}</div>
-                    <div className="text-right text-amber-500 font-medium">{d.haster}</div>
-                    <div className="text-right font-bold text-emerald-600">{d.amount.toLocaleString("da-DK")} kr</div>
-                  </div>
-                ))}
-                <div className="grid items-center px-4 py-3 bg-slate-50 border-t border-slate-200"
-                  style={{ gridTemplateColumns: "1fr 80px 80px 120px" }}>
-                  <div className="font-bold text-slate-800">Total</div>
-                  <div className="text-right font-bold text-slate-700">{rapport.summary?.total_tours}</div>
-                  <div className="text-right font-bold text-amber-500">{rapport.summary?.total_haster}</div>
-                  <div className="text-right font-bold text-emerald-600">{(rapport.summary?.total_amount ?? 0).toLocaleString("da-DK")} kr</div>
-                </div>
-              </div>
-            )}
-
-            {/* Tour detail rows */}
-            {rapport.rows?.length > 0 && (
-              <div className="bg-white border border-border rounded-xl overflow-hidden">
-                <div className="px-4 py-3 border-b border-border font-bold text-slate-800">
-                  Alle ture ({rapport.rows.length})
-                </div>
-                <div className="grid text-[10px] font-semibold uppercase tracking-wider text-slate-400 bg-slate-50 px-4 py-2"
-                  style={{ gridTemplateColumns: "90px 1fr 140px 110px 60px 90px" }}>
-                  <div>Dato</div><div>Fraction</div><div>Chauffør</div>
-                  <div>Plads</div><div className="text-center">Haster</div><div className="text-right">Pris</div>
-                </div>
-                <div className="max-h-96 overflow-y-auto">
-                  {rapport.rows.map((r, i) => (
-                    <div key={i} className="grid items-center px-4 py-2.5 border-b border-slate-100 last:border-0 hover:bg-slate-50"
-                      style={{ gridTemplateColumns: "90px 1fr 140px 110px 60px 90px" }}>
-                      <div className="text-xs font-mono text-slate-500">{r.date}</div>
-                      <div className="text-sm font-medium text-slate-800 truncate pr-2">{r.fraction || "-"}</div>
-                      <div className="text-sm text-slate-500 truncate pr-2">{r.driver}</div>
-                      <div className="text-xs text-slate-400 truncate">{r.plads}</div>
-                      <div className="text-center">
-                        {r.is_haster && <span className="text-[9px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-bold">HASTER</span>}
-                      </div>
-                      <div className="text-right text-sm font-bold text-emerald-600">{r.price} kr</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {!rapport.rows?.length && !rapportLoading && (
-              <div className="bg-white border border-border rounded-xl py-16 text-center text-slate-400">
-                <DollarSign className="w-10 h-10 mx-auto mb-3 text-slate-200" />
-                <p className="font-medium">Ingen ture i denne periode</p>
-                <p className="text-sm mt-1">Vælg en anden plads eller periode</p>
-              </div>
-            )}
-          </>)}
-        </div>
-      )}
-
-      {/* PRISER */}
-      {subTab === "priser" && (
-        <div className="space-y-4">
-          {/* Haster fee */}
-          <div className="bg-white border border-border rounded-xl p-4 flex items-center justify-between">
-            <div>
-              <p className="font-semibold text-slate-800 flex items-center gap-2">⚡ Haster tillæg</p>
-              <p className="text-xs text-slate-400 mt-0.5">Ekstra beløb per haster-tur, oven i grundprisen</p>
-            </div>
-            {editingHaster ? (
-              <div className="flex items-center gap-2">
-                <input type="number" value={hasterFee} onChange={e => setHasterFee(Number(e.target.value))}
-                  className="w-24 px-3 py-1.5 border-2 border-amber-400 rounded-lg text-sm font-mono text-right outline-none" />
-                <span className="text-sm text-slate-500">kr</span>
-                <button onClick={saveHasterFee} className="px-3 py-1.5 bg-emerald-500 text-white rounded-lg text-sm font-bold">Gem</button>
-                <button onClick={() => setEditingHaster(false)} className="px-3 py-1.5 bg-slate-200 rounded-lg text-sm">Annuller</button>
-              </div>
-            ) : (
-              <div className="flex items-center gap-3">
-                <span className="text-xl font-bold text-amber-500">+ {hasterFee} kr</span>
-                <button onClick={() => setEditingHaster(true)} className="p-1.5 hover:bg-slate-100 rounded-lg">
-                  <Edit2 className="w-4 h-4 text-slate-400" />
-                </button>
-              </div>
-            )}
-          </div>
-
-          {/* Price table */}
-          <div className="bg-white border border-border rounded-xl overflow-hidden">
-            <div className="px-4 py-3 border-b border-border flex items-center gap-3">
-              <select value={selectedPlads} onChange={e => setSelectedPlads(e.target.value)}
-                className="text-sm px-3 py-1.5 border border-slate-200 rounded-lg outline-none flex-1">
-                <option value="">Alle pladser</option>
-                {pladsNames.map(p => <option key={p} value={p}>{p}</option>)}
-              </select>
-              <button onClick={() => { setEditing(null); setForm({ plads: selectedPlads || "", fraction: "", price: "", kind: "material" }); setShowForm(true); }}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-semibold whitespace-nowrap">
-                <Plus className="w-4 h-4" /> Tilføj pris
-              </button>
-            </div>
-
-            {loadingPrices ? (
-              <div className="py-10 text-center"><Loader2 className="w-5 h-5 animate-spin inline text-slate-400" /></div>
-            ) : filteredPrices.length === 0 ? (
-              <div className="py-10 text-center text-slate-400 text-sm">
-                Ingen priser endnu - klik "+ Tilføj pris" for at starte
-              </div>
-            ) : (<>
-              <div className="grid text-[10px] font-semibold uppercase tracking-wider text-slate-400 bg-slate-50 px-4 py-2 border-b border-slate-100"
-                style={{ gridTemplateColumns: "1fr 1fr 100px 72px" }}>
-                <div>Plads</div><div>Fraction / Materiale</div><div className="text-right">Pris</div><div></div>
-              </div>
-              {filteredPrices.map(p => (
-                <div key={p.id} className="grid items-center px-4 py-2.5 border-b border-slate-100 last:border-0 hover:bg-slate-50 group"
-                  style={{ gridTemplateColumns: "1fr 1fr 100px 72px" }}>
-                  <div className="font-medium text-sm text-slate-800">{p.plads}</div>
-                  <div className="text-sm text-slate-500">
-                    {p.kind && p.kind !== "material" ? (
-                      <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700">{KIND_LABELS[p.kind] || p.kind}</span>
-                    ) : p.fraction}
-                  </div>
-                  <div className="text-right font-bold text-sm text-emerald-600">{p.price} kr</div>
-                  <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button onClick={() => { setEditing(p); setForm({ plads: p.plads, fraction: p.fraction || "", price: String(p.price), kind: p.kind || "material" }); setShowForm(true); }}
-                      className="p-1.5 hover:bg-slate-100 rounded text-slate-400 hover:text-slate-600">
-                      <Edit2 className="w-3.5 h-3.5" />
-                    </button>
-                    <button onClick={() => setDeletingId(p.id)}
-                      className="p-1.5 hover:bg-red-50 rounded text-slate-400 hover:text-red-500">
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </div>
-              ))}
-              <div className="px-4 py-2 bg-slate-50 border-t border-slate-100 text-xs text-slate-400">
-                {filteredPrices.length} priser
-              </div>
-            </>)}
-          </div>
-        </div>
-      )}
-
-      {/* Form modal */}
-      {showForm && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm p-5">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-bold text-slate-900">{editing ? "Rediger pris" : "Tilføj ny pris"}</h3>
-              <button onClick={() => setShowForm(false)} className="p-1 hover:bg-slate-100 rounded"><X className="w-4 h-4 text-slate-400" /></button>
-            </div>
-            <div className="space-y-3">
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 mb-1">Type</label>
-                <select value={form.kind} onChange={e => setForm({ ...form, kind: e.target.value })}
-                  className="w-full px-3 py-2 border-2 border-slate-200 rounded-lg text-sm focus:border-red-500 outline-none">
-                  <option value="material">Materiale (pr. fraction)</option>
-                  <option value="flyt">Flyt container (fast pr. plads)</option>
-                  <option value="vaerksted">Til værksted (fast pr. plads)</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 mb-1">Plads</label>
-                <select value={form.plads} onChange={e => setForm({ ...form, plads: e.target.value })}
-                  className="w-full px-3 py-2 border-2 border-slate-200 rounded-lg text-sm focus:border-red-500 outline-none">
-                  <option value="">Vælg plads...</option>
-                  {pladsNames.map(p => <option key={p} value={p}>{p}</option>)}
-                </select>
-                <input value={form.plads} onChange={e => setForm({ ...form, plads: e.target.value })}
-                  placeholder="Eller skriv navn..."
-                  className="w-full px-3 py-2 border-2 border-slate-200 rounded-lg text-sm focus:border-red-500 outline-none mt-1" />
-              </div>
-              {(!form.kind || form.kind === "material") && (
-                <div>
-                  <label className="block text-xs font-semibold text-slate-500 mb-1">Fraction / Materiale</label>
-                  <input value={form.fraction} onChange={e => setForm({ ...form, fraction: e.target.value })}
-                    placeholder="f.eks. Jord, grus"
-                    className="w-full px-3 py-2 border-2 border-slate-200 rounded-lg text-sm focus:border-red-500 outline-none" />
-                </div>
-              )}
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 mb-1">Pris (kr)</label>
-                <input type="number" value={form.price} onChange={e => setForm({ ...form, price: e.target.value })}
-                  placeholder="500"
-                  className="w-full px-3 py-2 border-2 border-slate-200 rounded-lg text-sm focus:border-red-500 outline-none" />
-              </div>
-              <div className="flex gap-2 pt-1">
-                <button onClick={() => setShowForm(false)} className="flex-1 py-2 bg-slate-100 text-slate-600 rounded-lg text-sm">Annuller</button>
-                <button onClick={savePrice} className="flex-1 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-bold">
-                  {editing ? "Gem" : "Tilføj"}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Delete confirm */}
-      {deletingId && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-2xl p-5 max-w-xs w-full text-center">
-            <p className="font-bold text-slate-900 mb-2">Slet pris?</p>
-            <p className="text-sm text-slate-500 mb-4">Kan ikke fortrydes.</p>
-            <div className="flex gap-2">
-              <button onClick={() => setDeletingId(null)} className="flex-1 py-2 bg-slate-100 text-slate-600 rounded-lg text-sm">Annuller</button>
-              <button onClick={() => removePrice(deletingId)} className="flex-1 py-2 bg-red-500 text-white rounded-lg text-sm font-bold">Slet</button>
-            </div>
-          </div>
-        </div>
-      )}
-    </section>
-  );
-};
-
 // ============= RECEIPT SCANNER =============
 const ReceiptScanner = ({ onSave, onClose, driverName, plads }) => {
   const videoContainerRef = useRef(null);
@@ -14273,6 +13870,108 @@ const ReceiptViewer = ({ receipt, onClose }) => {
 // Bottom-sheet modal shown when a driver taps a tour card. Displays tour
 // details and exposes the main per-tour actions (On Way / Complete / Delete /
 // Chat). All action callbacks come from the parent App component.
+// 2026-10-16: Afregning på turen (PRICING_SPEC.md). Chaufføren ser HVORDAN
+// turen afregnes - aldrig faste priser, tillæg eller totaler. Mens turen
+// kører vælger han Med/Uden hænger; efter turen kan han anmode om rettelse
+// af tider, hænger og ventetid, som logistik admin skal godkende.
+const TourBillingBox = ({ tour }) => {
+  const [info, setInfo] = useState(null);
+  const [form, setForm] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(async () => {
+    if (!tour?.id) return;
+    try {
+      const { data } = await axios.get(`${API}/driver/tour-pricing`, { params: { ids: tour.id } });
+      setInfo(data[tour.id] || null);
+    } catch (_) { setInfo(null); }
+  }, [tour?.id]);
+  useEffect(() => { load(); }, [load, tour?.completed, tour?.on_way]);
+  if (!info) return null;
+
+  const trailer = info.used_trailer === true;
+  const setTrailer = async (v) => {
+    try {
+      await axios.put(`${API}/driver/tours/${tour.id}/trailer`, { used_trailer: v });
+      setInfo(i => ({ ...i, used_trailer: v }));
+    } catch (e) { toast.error(formatApiError(e)); }
+  };
+  const submit = async () => {
+    if (!form.comment.trim()) { toast.error("Skriv hvad der skal rettes og hvorfor"); return; }
+    setBusy(true);
+    try {
+      await axios.post(`${API}/driver/tours/${tour.id}/change-request`, {
+        start_time: form.start_time, end_time: form.end_time, used_trailer: form.used_trailer,
+        waiting_min: form.waiting_min === "" ? undefined : Number(form.waiting_min), comment: form.comment,
+      });
+      toast.success("Sendt til godkendelse hos din logistik admin");
+      setForm(null); load();
+    } catch (e) { toast.error(formatApiError(e)); }
+    finally { setBusy(false); }
+  };
+  const modelText = info.model === "hourly"
+    ? `Timepris · ${Number(info.hourly_rate || 0).toLocaleString("da-DK")} kr/t · ${info.deduct_pause ? "pause trækkes fra" : "pause tæller med"}${info.rounding && info.rounding !== "Ingen afrunding" ? ` · ${info.rounding.toLowerCase()}` : ""}`
+    : info.model === "per_container" ? "Afregnes pr. container"
+    : info.model === "fixed" ? "Fast pris pr. tur" : null;
+  const last = info.last_request;
+
+  return (
+    <div className="mx-4 mb-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 p-3 space-y-2.5" data-testid="tour-billing-box">
+      {modelText && (
+        <div className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
+          <Clock className="w-3.5 h-3.5 shrink-0" /> <span><b>Afregning:</b> {modelText}</span>
+        </div>
+      )}
+      {tour.on_way && !tour.completed && (
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs font-semibold text-slate-600 dark:text-slate-300">Bruger du hænger på denne tur?</span>
+          <div className="inline-flex p-0.5 rounded-lg bg-slate-200 dark:bg-slate-900" data-testid="tour-trailer-toggle">
+            {[[false, "Uden"], [true, "Med hænger"]].map(([v, l]) => (
+              <button key={l} type="button" onClick={() => setTrailer(v)}
+                className={`px-3 py-1.5 rounded-md text-xs font-bold ${trailer === v ? "bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-sm" : "text-slate-500"}`}>{l}</button>
+            ))}
+          </div>
+        </div>
+      )}
+      {tour.completed && (
+        <>
+          {last && (
+            <div className={`text-xs px-2.5 py-1.5 rounded-lg ${last.status === "pending" ? "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200" : last.status === "approved" ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200" : "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-200"}`}>
+              {last.status === "pending" ? "Din rettelse venter på godkendelse" : last.status === "approved" ? "Din rettelse er godkendt" : `Din rettelse blev afvist${last.decision_note ? `: ${last.decision_note}` : ""}`}
+            </div>
+          )}
+          {!form && !info.invoiced && info.pending_requests === 0 && (
+            <button type="button" onClick={() => setForm({ start_time: tour.on_way_time || "", end_time: tour.time || "", used_trailer: trailer, waiting_min: "", comment: "" })}
+              className="w-full px-3 py-2 rounded-lg text-sm font-semibold bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 flex items-center justify-center gap-2" data-testid="tour-change-request-btn">
+              <Edit2 className="w-4 h-4" /> Ret tid, hænger eller ventetid
+            </button>
+          )}
+          {form && (
+            <div className="space-y-2" data-testid="tour-change-request-form">
+              <div className="grid grid-cols-2 gap-2">
+                <label className="text-[11px] font-bold uppercase text-slate-500">På vej
+                  <input type="time" value={form.start_time} onChange={e => setForm({ ...form, start_time: e.target.value })} className="mt-1 w-full px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 text-sm" /></label>
+                <label className="text-[11px] font-bold uppercase text-slate-500">Afsluttet
+                  <input type="time" value={form.end_time} onChange={e => setForm({ ...form, end_time: e.target.value })} className="mt-1 w-full px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 text-sm" /></label>
+                <label className="text-[11px] font-bold uppercase text-slate-500">Ventetid (min)
+                  <input type="number" min="0" inputMode="numeric" value={form.waiting_min} onChange={e => setForm({ ...form, waiting_min: e.target.value })} placeholder="0" className="mt-1 w-full px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 text-sm" /></label>
+                <label className="text-[11px] font-bold uppercase text-slate-500">Hænger
+                  <select value={form.used_trailer ? "1" : "0"} onChange={e => setForm({ ...form, used_trailer: e.target.value === "1" })} className="mt-1 w-full px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 text-sm">
+                    <option value="0">Uden</option><option value="1">Med hænger</option>
+                  </select></label>
+              </div>
+              <textarea rows={2} value={form.comment} onChange={e => setForm({ ...form, comment: e.target.value })} placeholder="Hvad skal rettes og hvorfor?" className="w-full px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 text-sm" />
+              <div className="flex gap-2">
+                <button type="button" onClick={() => setForm(null)} className="flex-1 px-3 py-2 rounded-lg text-sm font-semibold bg-slate-200 dark:bg-slate-700">Annuller</button>
+                <button type="button" disabled={busy} onClick={submit} className="flex-1 px-3 py-2 rounded-lg text-sm font-semibold bg-emerald-600 text-white disabled:opacity-50">Send til godkendelse</button>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+};
+
 const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onToggleComplete, currentDriverName, onChat }) => {
   const [weightInput, setWeightInput] = useState("");
   const [askingWeight, setAskingWeight] = useState(false);
@@ -15147,6 +14846,8 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
           </div>
         )}
 
+        {!isClaimedByOther && (tour.on_way || tour.completed) && <TourBillingBox tour={tour} />}
+
         {/* Actions */}
         <div className="grid grid-cols-2 gap-2 p-4 border-t border-slate-200 dark:border-slate-700">
           {/* Fase 14 (2026-06-19): Når turen er AFSLUTTET ser chaufføren
@@ -15157,7 +14858,7 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
               <div className="px-3 py-2.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 text-sm text-emerald-800 dark:text-emerald-200 flex items-start gap-2"
                 data-testid="mobile-tour-panel-completed-notice">
                 <CheckCircle2 className="w-4 h-4 mt-0.5 flex-shrink-0" />
-                <span>Turen er afsluttet - kontakt din logistikadmin ved fejl.</span>
+                <span>Turen er afsluttet. Forkert tid, hænger eller ventetid? Brug "Ret" ovenfor.</span>
               </div>
               {(tour.tour_type || "normal") === "normal" && !editingWeight && (
                 <button

@@ -305,6 +305,54 @@ for cu in CUSTOMERS:
     print(f"{cu['name']}: {len(cu['locations'])} lokationer, {len(cu['location_admins'])} "
           f"lokation admins, partnere: {', '.join(cu['partners'])}")
 
+# Example price rules (Økonomi) so the report has numbers from day one
+customer_ids = {c["id"]: c["name"] for c in db.companies.find({"company_type": "customer"}, {"_id": 0, "id": 1, "name": 1})}
+by_name = {v: k for k, v in customer_ids.items()}
+
+
+def rule(kind, name, cond=None, **kw):
+    body = {"kind": kind, "name": name, "conditions": cond or {}}
+    body.update(kw)
+    return body
+
+
+ILK_RULES = [
+    rule("base", "Standard afhentning", pricing={"model": "fixed", "amount": 950}),
+    rule("base", "ARGO timepris", {"customer_ids": [by_name["ARGO"]]},
+         pricing={"model": "hourly", "hourly_rate": 650, "start_fee": 200, "min_minutes": 60,
+                  "rounding_mode": "up", "rounding_minutes": 15, "deduct_pause": True}),
+    rule("base", "Løs afhentning pr. container", {"task_types": ["loes_afhentning"]},
+         pricing={"model": "per_container", "amount": 450}),
+    rule("base", "Byt container / værksted", {"task_types": ["flyt", "vaerksted", "afhent_vaerksted"]},
+         pricing={"model": "fixed", "amount": 1150}),
+    rule("base", "Forgæves kørsel", {"outcome": "not_completed"}, pricing={"model": "fixed", "amount": 450}),
+    rule("surcharge", "Weekendtillæg", {"day_types": ["saturday", "sunday"]}, category="weekend",
+         surcharge={"unit": "kr", "value": 500}),
+    rule("surcharge", "Weekend - Helsingør Forsyning aftale", {"customer_ids": [by_name["Helsingør Forsyning"]],
+                                                             "day_types": ["saturday", "sunday"]},
+         category="weekend", surcharge={"unit": "kr", "value": 300}),
+    rule("surcharge", "Helligdagstillæg", {"day_types": ["holiday"]}, category="holiday",
+         surcharge={"unit": "percent", "value": 50}),
+    rule("surcharge", "Haster", {"priorities": ["haster"]}, category="haster", surcharge={"unit": "kr", "value": 300}),
+    rule("surcharge", "Hænger", {"trailer": "with"}, category="trailer", surcharge={"unit": "per_hour", "value": 150}),
+    rule("surcharge", "Aften/nat", {"time_from": "18:00", "time_to": "06:00"}, category="evening",
+         surcharge={"unit": "kr", "value": 350}),
+    rule("surcharge", "Ventetid", category="waiting", surcharge={"unit": "per_hour", "value": 600}),
+]
+CITY_RULES = [
+    rule("base", "Timepris", pricing={"model": "hourly", "hourly_rate": 590, "rounding_mode": "up",
+                                      "rounding_minutes": 30, "deduct_pause": True}),
+    rule("base", "Gladsaxe pap/papir fast pris", {"location_codes": ["3101"], "materials": ["Pap", "Papir"]},
+         pricing={"model": "fixed", "amount": 1100}),
+    rule("surcharge", "Weekendtillæg", {"day_types": ["saturday", "sunday"]}, category="weekend",
+         surcharge={"unit": "percent", "value": 25}),
+]
+for admin_slug, rules in (("ilk.admin", ILK_RULES), ("city.admin", CITY_RULES)):
+    tok = login(email(admin_slug))
+    for r in rules:
+        call("POST", "/pricing/rules", r, tok)
+print(f"Prisregler: {len(ILK_RULES)} for ILK, {len(CITY_RULES)} for City Container")
+
 # Summary for the person testing
 lines = ["# Lokale test-logins (kun din lokale ContainerFlow)",
          "", "Adgangskode for alle: LOCAL_TEST_PASSWORD i .env.local", "",

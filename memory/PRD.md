@@ -19,6 +19,39 @@ Data must be strictly isolated per company.
   and `/api/health` bypass tenant filtering so the QR-code customer flow continues to work.
 
 ## What's been implemented (2026-02-15)
+## What's new in 2026-10-16 (Økonomi: prisregler, rapport, godkendelser)
+
+"Priser & Rapport" (fast pris pr. plads + fraktion) er erstattet af **Økonomi**
+på logistik admin-siden. Fuld specifikation: `PRICING_SPEC.md`.
+
+- **Prisregler:** grundpris (fast / timepris / pr. container) + tillæg (weekend,
+  helligdag, haster, hænger, aften/nat, ventetid, andet). Betingelser: kunde,
+  lokation, leveringsadresse (matchet på modtagerens navn), materiale,
+  opgavetype, prioritet, dagtype, hænger, containerstørrelse, tidsrum, udfald
+  (gennemført/forgæves), gyldig fra/til. Mest specifikke grundpris vinder; ét
+  tillæg pr. kategori (mest specifikke), så kundespecifikke satser overstyrer
+  generelle uden dobbeltopkrævning.
+- **Timepris:** "På vej" → "Afslut tur"; pauser fra "Tid" trækkes fra pr. regel;
+  afrunding (op/nærmeste/ned, 15/30/60 eller eget tal), minimum minutter/beløb,
+  startgebyr. Samtidige ture (hænger) får den fælles tid fordelt ligeligt
+  (indstilling).
+- **Helligdage:** egen kalender beregnes automatisk for alle år (påske/pinse) +
+  valgfrie dage + egne dage; som standard bruges kundens/lokationens kalender
+  først (samme kalender som bestillingssiden).
+- **Rapport:** KPI'er, "mangler pris/tid", fakturagrundlag (CSV), markér som
+  faktureret (prisen fryses), tur-detaljer med prisopbygning og tilpasning
+  (fast beløb, ekstra linjer, rettede fakta - begrundelse påkrævet).
+- **Chauffør:** ser afregningsform (aldrig beløb, undtagen timeprisen), vælger
+  Med/Uden hænger pr. tur mens den kører, og kan anmode om rettelse af tid,
+  hænger og ventetid efter turen → **Godkendelser** hos logistik admin.
+- **Dagrapport-PDF:** viser nu alle arbejds-/pauseperioder, alle ture afsluttet
+  på dagen og pause pr. tur. "Timer i dag" står ikke længere på 0 efter login.
+- **Logistik admin → Arkiv → Ture:** nyt tur-overblik (egne ture).
+- Motor: `backend/pricing.py` (rene funktioner), tests i
+  `backend/tests/test_pricing_engine.py`. Nye collections: `price_rules`,
+  `price_settings`, `tour_change_requests`. Nye tur-felter: `used_trailer`,
+  `fact_overrides`, `price_override`, `price_locked`, `price_history`.
+
 ## What's new in 2026-07-11 (Copy-config bug fix — kopierer nu ALT)
 
 **Bug rapporteret af bruger:** "jeg lavede en kopi... så sørg for at alt bliver

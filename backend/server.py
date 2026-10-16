@@ -403,6 +403,8 @@ class Tour(BaseModel):
     reactivated_at: str = ""
     reactivated_by_name: str = ""
     reactivate_comment: str = ""
+    # 2026-10-16: Prisgrundlag (se PRICING_SPEC.md). None = ikke angivet.
+    used_trailer: Optional[bool] = None
 
 class TourCreate(BaseModel):
     date: str = Field(default_factory=get_dk_date_str)
@@ -2194,6 +2196,16 @@ async def update_tour(tour_id: str, update: TourUpdate, payload: dict = Depends(
     # admin altid kan se hvornår turen blev lukket.
     if update_data.get("completed") is True and not existing_tour.get("completed"):
         update_data.setdefault("completed_at", datetime.now(DK_TZ).isoformat())
+
+    # 2026-10-16: "Med hænger" er et prisgrundlag pr. tur. Når turen startes
+    # (på vej) foreslås værdien ud fra om chaufføren har valgt en hænger ved
+    # login; chaufføren kan ændre den på turen bagefter.
+    if (update_data.get("on_way") is True and not existing_tour.get("on_way")
+            and existing_tour.get("used_trailer") is None):
+        starter_id = update_data.get("claimed_by_id") or existing_tour.get("claimed_by_id") or ""
+        if starter_id:
+            _starter = await _raw_db.users.find_one({"id": starter_id}, {"_id": 0, "active_trailer_id": 1})
+            update_data["used_trailer"] = bool((_starter or {}).get("active_trailer_id"))
     elif update_data.get("completed") is False:
         # Reverter en afsluttet tur → ryd completed_at så stempel ikke
         # forbliver fra forrige afslutning.
@@ -5970,6 +5982,15 @@ async def driver_day_report(
             "duration_min": _tour_duration_min(start, end),
             "completed_at": t.get("completed_at", ""),
         })
+    # 2026-10-16: Pause (fra "Tid") der faldt inden for turens tidsrum - så
+    # PDF'en kan vise turens tid både med og uden pause.
+    pauses = [(_time_to_min(p.get("start_time") or ""), _time_to_min(p.get("effective_end") or p.get("end_time") or ""))
+              for p in summary.get("pause_slices") or []]
+    for t in out_tours:
+        s, e = _time_to_min(t["start_time"]), _time_to_min(t["end_time"])
+        t["pause_min"] = 0
+        if s >= 0 and e > s:
+            t["pause_min"] = sum(max(0, min(e, pe) - max(s, ps)) for ps, pe in pauses if ps >= 0 and pe > ps)
     out_tours.sort(key=lambda x: (x["plads"], x["end_time"] or "99:99"))
     return {"date": date, "driver_name": driver_name, "time_summary": summary, "tours": out_tours}
 
@@ -15519,6 +15540,930 @@ async def get_customer_order_history(order_id: str,
         if first_before.get("company_id") and first_before["company_id"] != caller_cid:
             raise HTTPException(status_code=403, detail="Adgang nægtet")
     return entries
+
+
+# =====================================================================
+#   ØKONOMI — prisregler, rapport og godkendelser (PRICING_SPEC.md)
+#   Logistik admin vedligeholder prisregler; prisen pr. tur beregnes af
+#   backend/pricing.py ud fra turens fakta, kalendere og stemplinger.
+# =====================================================================
+import pricing as _pricing
+from datetime import date as _date
+
+pricing_router = APIRouter(prefix="/api/pricing", tags=["pricing"])
+
+_PRICE_SETTINGS_DEFAULT = {
+    "holiday_source": "customer_first",   # customer_first | own
+    "concurrent_mode": "split",           # split | full
+    "vat_percent": 25.0,
+    "holiday_optional": list(_pricing.DEFAULT_OPTIONAL),
+    "holiday_extra": [],
+    "holiday_excluded": [],
+}
+_PRIORITY_TO_PRICE = {"urgent": "haster", "haster": "haster", "low": "lav", "senere": "lav", "sidst": "lav"}
+
+
+async def _pricing_caller(payload: dict) -> dict:
+    """Logistik admin + hans firma. (Prisregler er logistikfirmaets egne.)"""
+    if payload.get("role") != "logistics_admin":
+        raise HTTPException(status_code=403, detail="Kun logistik admin har adgang til økonomi")
+    user = await _raw_db.users.find_one({"id": payload.get("sub")}, {"_id": 0, "password_hash": 0})
+    if not user or not user.get("company_id"):
+        raise HTTPException(status_code=401, detail="Bruger ikke fundet")
+    return user
+
+
+async def _price_settings(cid: str) -> dict:
+    doc = await _raw_db.price_settings.find_one({"company_id": cid}, {"_id": 0}) or {}
+    return {**_PRICE_SETTINGS_DEFAULT, **{k: v for k, v in doc.items() if k in _PRICE_SETTINGS_DEFAULT}}
+
+
+def _to_dk_date(iso: str) -> str:
+    if not iso:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso)
+        if dt.tzinfo:
+            dt = dt.astimezone(DK_TZ)
+        return dt.strftime("%Y-%m-%d")
+    except ValueError:
+        return iso[:10]
+
+
+def _service_date(t: dict) -> str:
+    """Den dag turen køres: afslutningsdato, forgæves-dato eller planlagt dato."""
+    if t.get("completed") and t.get("completed_at"):
+        return _to_dk_date(t["completed_at"])
+    if t.get("not_completed") and t.get("not_completed_at"):
+        return _to_dk_date(t["not_completed_at"])
+    return t.get("date") or ""
+
+
+async def _my_drivers(cid: str) -> list:
+    return await _raw_db.users.find(
+        {"company_id": cid, "role": "driver"}, {"_id": 0, "id": 1, "name": 1},
+    ).to_list(2000)
+
+
+def _fact(t: dict, key: str, fallback=None):
+    fo = t.get("fact_overrides") or {}
+    return fo[key] if fo.get(key) not in (None, "") else fallback
+
+
+def _tour_times(t: dict) -> tuple:
+    start = _fact(t, "start_time", t.get("on_way_time") or "")
+    end = _fact(t, "end_time", t.get("time") if t.get("completed") else "")
+    return start, end
+
+
+async def _billable_tours(cid: str, date_from: str, date_to: str, extra: Optional[dict] = None) -> list:
+    """Ture logistikfirmaet kan fakturere: gennemført eller forgæves, kørt af
+    firmaets egne chauffører, med køre-dato i perioden."""
+    drivers = await _my_drivers(cid)
+    ids = [d["id"] for d in drivers]
+    names = [d["name"] for d in drivers if d.get("name")]
+    if not ids:
+        return []
+    # Bred forespørgsel (±1 dag pga. tidszoner), præcis filtrering bagefter.
+    lo = (_date.fromisoformat(date_from) - timedelta(days=1)).isoformat()
+    hi = (_date.fromisoformat(date_to) + timedelta(days=2)).isoformat()
+    q: Dict[str, Any] = {"$and": [
+        {"$or": [{"claimed_by_id": {"$in": ids}}, {"claimed_by": {"$in": names}},
+                 {"not_completed_by_name": {"$in": names}}]},
+        {"$or": [{"completed": True}, {"not_completed": True}]},
+        {"$or": [{"completed_at": {"$gte": lo, "$lt": hi}},
+                 {"not_completed_at": {"$gte": lo, "$lt": hi}},
+                 {"date": {"$gte": lo, "$lt": hi}}]},
+        {"$or": [{"deleted": {"$exists": False}}, {"deleted": False}]},
+        {"$or": [{"is_pause": {"$exists": False}}, {"is_pause": False}]},
+        {"tour_type": {"$ne": "estimat"}},
+    ]}
+    if extra:
+        q["$and"].append(extra)
+    tours = await _raw_db.tours.find(q, {"_id": 0, "receipt_image": 0}).to_list(20000)
+    return [t for t in tours if date_from <= _service_date(t) <= date_to]
+
+
+class _PricingContext:
+    """Samler alt der skal til for at prissætte en mængde ture på én gang."""
+
+    def __init__(self, cid: str, settings: dict, rules: list):
+        self.cid, self.settings, self.rules = cid, settings, rules
+        self.orders: Dict[str, dict] = {}
+        self.addr_labels: Dict[str, str] = {}
+        self.addr_line_labels: Dict[tuple, str] = {}
+        self.plads_by_name: Dict[str, dict] = {}
+        self.customers: Dict[str, dict] = {}
+        self.mat_cal: Dict[tuple, str] = {}
+        self.cal_days: Dict[str, Dict[str, Any]] = {}
+        self.loc_active_cals: Dict[str, List[str]] = {}
+        self.groups: Dict[str, dict] = {}
+        self.time_by_tour: Dict[str, dict] = {}
+        self.holiday_cache: Dict[tuple, tuple] = {}
+
+    async def load(self, tours: list):
+        order_ids = list({t["order_id"] for t in tours if t.get("order_id")})
+        if order_ids:
+            for o in await _raw_db.container_orders.find(
+                {"id": {"$in": order_ids}},
+                {"_id": 0, "id": 1, "location_code": 1, "delivery_address_id": 1,
+                 "alternative_delivery_address_id": 1, "manual_alternative_address": 1},
+            ).to_list(20000):
+                self.orders[o["id"]] = o
+        addr_ids = {a for o in self.orders.values()
+                    for a in (o.get("delivery_address_id"), o.get("alternative_delivery_address_id")) if a}
+        if addr_ids:
+            for a in await _raw_db.delivery_addresses.find(
+                {"id": {"$in": list(addr_ids)}}, {"_id": 0, "id": 1, "label": 1},
+            ).to_list(20000):
+                self.addr_labels[a["id"]] = a.get("label") or ""
+        # Bestillingssiden gemmer leveringsadressen som tekst ("Energivej 10,
+        # 3000 Helsingør") uden id. Genkend modtageren ved at matche teksten
+        # mod lokationens leveringsadresser.
+        order_codes = list({o.get("location_code") for o in self.orders.values() if o.get("location_code")})
+        if order_codes:
+            for a in await _raw_db.delivery_addresses.find(
+                {"location_code": {"$in": order_codes}}, {"_id": 0},
+            ).to_list(20000):
+                line = _pricing.norm_label(_da_format_address_line(a))
+                if line and a.get("label"):
+                    self.addr_line_labels[(a.get("location_code"), line)] = a["label"]
+                    self.addr_line_labels.setdefault(("", line), a["label"])
+        names = list({t.get("plads") for t in tours if t.get("plads")})
+        for p in await _raw_db.plads.find(
+            {"name": {"$in": names}}, {"_id": 0, "name": 1, "location_code": 1, "company_id": 1},
+        ).to_list(5000):
+            self.plads_by_name[p["name"]] = p
+        cust_ids = list({t.get("company_id") for t in tours if t.get("company_id")})
+        for c in await _raw_db.companies.find(
+            {"id": {"$in": cust_ids}}, {"_id": 0, "id": 1, "name": 1, "holiday_group_id": 1},
+        ).to_list(1000):
+            self.customers[c["id"]] = c
+        codes = list({self.location_code(t) for t in tours} - {""})
+        if codes:
+            for mc in await _raw_db.material_calendars.find(
+                {"location_code": {"$in": codes}}, {"_id": 0, "location_code": 1, "material": 1,
+                                                    "holiday_calendar_id": 1},
+            ).to_list(20000):
+                if mc.get("holiday_calendar_id"):
+                    self.mat_cal[(mc["location_code"], mc["material"])] = mc["holiday_calendar_id"]
+            for hc in await _raw_db.holiday_calendars.find(
+                {"location_code": {"$in": codes}}, {"_id": 0, "id": 1, "location_code": 1,
+                                                    "is_active": 1, "days": 1},
+            ).to_list(5000):
+                self.cal_days[hc["id"]] = {d.get("date"): d.get("name") for d in (hc.get("days") or [])
+                                           if d.get("date")}
+                if hc.get("is_active", True):
+                    self.loc_active_cals.setdefault(hc["location_code"], []).append(hc["id"])
+        gids = list({c.get("holiday_group_id") for c in self.customers.values() if c.get("holiday_group_id")})
+        if gids:
+            for g in await _raw_db.holiday_groups.find({"id": {"$in": gids}}, {"_id": 0}).to_list(500):
+                self.groups[g["id"]] = {h.get("date"): h.get("name") for h in (g.get("holidays") or [])}
+        await self._load_times(tours)
+
+    def location_code(self, t: dict) -> str:
+        order = self.orders.get(t.get("order_id") or "")
+        if order and order.get("location_code"):
+            # Ordrens location_code er QR-koden; plads-navnet er den præcise plads.
+            p = self.plads_by_name.get(t.get("plads") or "")
+            return (p or {}).get("location_code") or order["location_code"]
+        return (self.plads_by_name.get(t.get("plads") or "") or {}).get("location_code") or ""
+
+    def delivery_label(self, t: dict) -> str:
+        o = self.orders.get(t.get("order_id") or "")
+        if o:
+            if o.get("alternative_delivery_address_id") in self.addr_labels:
+                return self.addr_labels[o["alternative_delivery_address_id"]]
+            if o.get("manual_alternative_address"):
+                return o["manual_alternative_address"]
+            if o.get("delivery_address_id") in self.addr_labels:
+                return self.addr_labels[o["delivery_address_id"]]
+            line = _pricing.norm_label(o.get("customer_address") or t.get("address") or "")
+            hit = (self.addr_line_labels.get((o.get("location_code"), line))
+                   or self.addr_line_labels.get(("", line)))
+            if hit:
+                return hit
+            return o.get("customer_address") or t.get("address") or ""
+        return t.get("facility") or ""
+
+    def holidays_for(self, t: dict, service_date: str) -> tuple:
+        """(set af helligdage, kilde) — kundens kalender først hvis valgt."""
+        year = service_date[:4]
+        code, material = self.location_code(t), t.get("fraction") or ""
+        key = (t.get("company_id"), code, material, year)
+        if key in self.holiday_cache:
+            return self.holiday_cache[key]
+        result = None
+        if self.settings.get("holiday_source") == "customer_first":
+            cal_ids = ([self.mat_cal[(code, material)]] if (code, material) in self.mat_cal
+                       else self.loc_active_cals.get(code, []))
+            days = {d for cid_ in cal_ids for d in self.cal_days.get(cid_, {}) if d.startswith(year)}
+            if days:
+                result = (days, "Lokationens helligdagskalender")
+            else:
+                gid = (self.customers.get(t.get("company_id")) or {}).get("holiday_group_id")
+                gdays = {d for d in self.groups.get(gid, {}) if d.startswith(year)} if gid else set()
+                if gdays:
+                    result = (gdays, "Kundens helligdagsgruppe")
+        if not result:
+            try:
+                own = _pricing.own_holidays(int(year), self.settings)
+            except ValueError:
+                own = {}
+            result = (set(own), "Egen helligdagskalender")
+        self.holiday_cache[key] = result
+        return result
+
+    async def _load_times(self, tours: list):
+        """Tid pr. tur inkl. pause-overlap og fordeling ved samtidige ture."""
+        keys = {(t.get("claimed_by_id"), _service_date(t)) for t in tours
+                if t.get("claimed_by_id") and t.get("completed")}
+        if not keys:
+            return
+        driver_ids = list({k[0] for k in keys})
+        dates = sorted({k[1] for k in keys})
+        lo = (_date.fromisoformat(dates[0]) - timedelta(days=1)).isoformat()
+        hi = (_date.fromisoformat(dates[-1]) + timedelta(days=2)).isoformat()
+        companions = await _raw_db.tours.find(
+            {"claimed_by_id": {"$in": driver_ids}, "completed": True,
+             "completed_at": {"$gte": lo, "$lt": hi},
+             "$or": [{"deleted": {"$exists": False}}, {"deleted": False}]},
+            {"_id": 0, "id": 1, "claimed_by_id": 1, "on_way_time": 1, "time": 1, "completed": 1,
+             "completed_at": 1, "fact_overrides": 1, "date": 1},
+        ).to_list(20000)
+        pauses = await _raw_db.driver_time_entries.find(
+            {"driver_id": {"$in": driver_ids}, "date": {"$in": dates}, "slice_type": "pause",
+             **_not_deleted_filter()},
+            {"_id": 0, "driver_id": 1, "date": 1, "start_time": 1, "end_time": 1},
+        ).to_list(20000)
+        pause_by_key: Dict[tuple, list] = {}
+        for p in pauses:
+            s, e = _pricing.hhmm_to_min(p.get("start_time")), _pricing.hhmm_to_min(p.get("end_time"))
+            if s >= 0 and e > s:
+                pause_by_key.setdefault((p["driver_id"], p["date"]), []).append((s, e))
+        by_key: Dict[tuple, Dict[str, tuple]] = {}
+        gross: Dict[str, int] = {}
+        for t in {c["id"]: c for c in companions + tours}.values():
+            key = (t.get("claimed_by_id"), _service_date(t))
+            if key not in keys or not t.get("completed"):
+                continue
+            st, en = _tour_times(t)
+            s, e = _pricing.hhmm_to_min(st), _pricing.hhmm_to_min(en)
+            if s < 0 or e < 0:
+                continue
+            if e <= s:
+                e += 1440  # over midnat
+            by_key.setdefault(key, {})[t["id"]] = (s, e)
+            gross[t["id"]] = e - s
+        mode = self.settings.get("concurrent_mode") or "split"
+        for key, intervals in by_key.items():
+            split = _pricing.split_driver_day(intervals, pause_by_key.get(key, []), mode)
+            for tid, v in split.items():
+                self.time_by_tour[tid] = {"gross": gross[tid], "total": v["total"], "pause": v["pause"]}
+
+    def attrs(self, t: dict) -> dict:
+        sd = _service_date(t)
+        holidays, _src = self.holidays_for(t, sd)
+        start, _end = _tour_times(t)
+        trailer = _fact(t, "used_trailer", t.get("used_trailer"))
+        containers = len(t.get("container_weights") or []) or int(t.get("loose_estimated_count") or 0) or 1
+        return {
+            "customer_id": t.get("company_id") or "",
+            "location_code": self.location_code(t),
+            "material": t.get("fraction") or "",
+            "task_type": (t.get("tour_type") or "normal").replace("værksted", "vaerksted"),
+            "priority": _PRIORITY_TO_PRICE.get(t.get("priority") or "", "normal"),
+            "day_type": _pricing.day_type(sd, holidays),
+            "trailer": bool(trailer),
+            "container_label": t.get("capacity_label") or "",
+            "delivery_label": self.delivery_label(t),
+            "start_min": _pricing.hhmm_to_min(start),
+            "outcome": "not_completed" if t.get("not_completed") and not t.get("completed") else "completed",
+            "service_date": sd,
+            "containers": containers,
+            "waiting_min": int(_fact(t, "waiting_min", 0) or 0),
+            "deduct_pause_override": (t.get("fact_overrides") or {}).get("deduct_pause"),
+        }
+
+    def price(self, t: dict) -> dict:
+        locked = t.get("price_locked")
+        if locked:
+            return {**locked, "flags": list(locked.get("flags") or []) + ["Faktureret"], "locked": True}
+        res = _pricing.price_tour(self.attrs(t), self.rules, self.time_by_tour.get(t["id"]),
+                                  t.get("price_override"))
+        res["locked"] = False
+        return res
+
+
+async def _active_rules(cid: str) -> list:
+    return await _raw_db.price_rules.find({"company_id": cid}, {"_id": 0}).to_list(5000)
+
+
+def _report_row(ctx: _PricingContext, t: dict, pending: Dict[str, int]) -> dict:
+    a = ctx.attrs(t)
+    start, end = _tour_times(t)
+    _hol, hol_src = ctx.holidays_for(t, a["service_date"])
+    return {
+        "tour_id": t["id"],
+        "tour_number": t.get("tour_number") or "",
+        "service_date": a["service_date"],
+        "customer_id": a["customer_id"],
+        "customer_name": (ctx.customers.get(a["customer_id"]) or {}).get("name") or t.get("customer_name") or "",
+        "location_code": a["location_code"],
+        "location_name": t.get("plads") or "",
+        "material": a["material"],
+        "task_type": a["task_type"],
+        "priority": a["priority"],
+        "day_type": a["day_type"],
+        "holiday_source": hol_src,
+        "trailer": a["trailer"],
+        "delivery_label": a["delivery_label"],
+        "container_label": a["container_label"],
+        "driver_name": t.get("claimed_by") or t.get("not_completed_by_name") or "",
+        "start_time": start, "end_time": end,
+        "waiting_min": a["waiting_min"],
+        "outcome": a["outcome"],
+        "weight": t.get("weight"),
+        "has_override": bool((t.get("price_override") or {}).get("mode") == "fixed"
+                             or (t.get("price_override") or {}).get("extra_lines")
+                             or t.get("fact_overrides")),
+        "pending_requests": pending.get(t["id"], 0),
+        "price": ctx.price(t),
+    }
+
+
+# ----- Indstillinger + helligdage ------------------------------------------
+@pricing_router.get("/settings")
+async def pricing_get_settings(payload: dict = Depends(get_current_user_payload)):
+    me = await _pricing_caller(payload)
+    return await _price_settings(me["company_id"])
+
+
+@pricing_router.put("/settings")
+async def pricing_put_settings(body: dict, payload: dict = Depends(get_current_user_payload)):
+    me = await _pricing_caller(payload)
+    cur = await _price_settings(me["company_id"])
+    upd = {}
+    if body.get("holiday_source") in ("customer_first", "own"):
+        upd["holiday_source"] = body["holiday_source"]
+    if body.get("concurrent_mode") in ("split", "full"):
+        upd["concurrent_mode"] = body["concurrent_mode"]
+    if "vat_percent" in body:
+        upd["vat_percent"] = max(0.0, min(100.0, float(body.get("vat_percent") or 0)))
+    if isinstance(body.get("holiday_optional"), list):
+        upd["holiday_optional"] = [k for k in body["holiday_optional"] if k in _pricing.OPTIONAL_HOLIDAYS]
+    if isinstance(body.get("holiday_extra"), list):
+        extra = []
+        for x in body["holiday_extra"]:
+            d = str((x or {}).get("date") or "")
+            if re.match(r"^\d{4}-\d{2}-\d{2}$", d):
+                extra.append({"date": d, "name": str(x.get("name") or "Ekstra fridag").strip()[:60]})
+        upd["holiday_extra"] = sorted(extra, key=lambda x: x["date"])
+    if isinstance(body.get("holiday_excluded"), list):
+        upd["holiday_excluded"] = sorted({d for d in body["holiday_excluded"]
+                                          if re.match(r"^\d{4}-\d{2}-\d{2}$", str(d))})
+    new = {**cur, **upd}
+    await _raw_db.price_settings.update_one(
+        {"company_id": me["company_id"]},
+        {"$set": {**new, "company_id": me["company_id"],
+                  "updated_at": datetime.now(timezone.utc).isoformat()}},
+        upsert=True,
+    )
+    return new
+
+
+@pricing_router.get("/holidays")
+async def pricing_holidays(year: int, payload: dict = Depends(get_current_user_payload)):
+    me = await _pricing_caller(payload)
+    s = await _price_settings(me["company_id"])
+    official = _pricing.danish_holidays(year)
+    optional_all = _pricing.danish_holidays(year, list(_pricing.OPTIONAL_HOLIDAYS))
+    own = _pricing.own_holidays(year, s)
+    extra_dates = {x["date"] for x in s.get("holiday_extra") or []}
+    rows = []
+    for d, name in sorted({**optional_all, **own}.items()):
+        kind = "official" if d in official else "extra" if d in extra_dates else "optional"
+        rows.append({"date": d, "name": own.get(d) or name, "kind": kind,
+                     "active": d in own, "excluded": d in (s.get("holiday_excluded") or [])})
+    return {"year": year, "days": rows, "settings": s,
+            "optional_keys": _pricing.OPTIONAL_HOLIDAYS}
+
+
+# ----- Valgmuligheder til regel-editoren -----------------------------------
+@pricing_router.get("/options")
+async def pricing_options(payload: dict = Depends(get_current_user_payload)):
+    me = await _pricing_caller(payload)
+    cid = me["company_id"]
+    plads = await _raw_db.plads.find(
+        {"assigned_logistics_company_ids": cid},
+        {"_id": 0, "name": 1, "location_code": 1, "company_id": 1, "materials": 1, "partner_materials": 1},
+    ).to_list(5000)
+    comp = await _raw_db.companies.find_one({"id": cid}, {"_id": 0, "serves_company_ids": 1}) or {}
+    cust_ids = set(comp.get("serves_company_ids") or []) | {p.get("company_id") for p in plads}
+    customers = await _raw_db.companies.find(
+        {"id": {"$in": [c for c in cust_ids if c]}, "company_type": COMPANY_TYPE_CUSTOMER},
+        {"_id": 0, "id": 1, "name": 1},
+    ).to_list(1000)
+    codes = [p["location_code"] for p in plads if p.get("location_code")]
+    labels = sorted({(a.get("label") or "").strip() for a in await _raw_db.delivery_addresses.find(
+        {"location_code": {"$in": codes}}, {"_id": 0, "label": 1}).to_list(20000)} - {""})
+    caps = sorted({(c.get("label") or "").strip() for c in await _raw_db.capacity_measures.find(
+        {"location_code": {"$in": codes}}, {"_id": 0, "label": 1}).to_list(20000)} - {""})
+    materials = set()
+    for p in plads:
+        pm = (p.get("partner_materials") or {}).get(cid)
+        materials.update(pm if pm else (p.get("materials") or []))
+    legacy = await _raw_db.tour_prices.count_documents({"company_id": cid})
+    return {
+        "customers": sorted(customers, key=lambda c: c["name"]),
+        "locations": sorted([{"code": p["location_code"], "name": p["name"], "customer_id": p.get("company_id")}
+                             for p in plads if p.get("location_code")], key=lambda x: x["name"]),
+        "delivery_labels": labels,
+        "container_labels": caps,
+        "materials": sorted(materials),
+        "task_types": _pricing.TASK_TYPES,
+        "priorities": _pricing.PRIORITIES,
+        "day_types": _pricing.DAY_TYPES,
+        "categories": _pricing.SURCHARGE_CATEGORIES,
+        "models": _pricing.BASE_MODELS,
+        "legacy_prices": legacy,
+    }
+
+
+# ----- Prisregler ----------------------------------------------------------
+_COND_LISTS = ("customer_ids", "location_codes", "delivery_labels", "materials", "task_types",
+               "priorities", "day_types", "container_labels")
+
+
+def _clean_rule(body: dict) -> dict:
+    kind = body.get("kind")
+    if kind not in ("base", "surcharge"):
+        raise HTTPException(status_code=400, detail="Vælg grundpris eller tillæg")
+    name = str(body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Navn er påkrævet")
+    c = body.get("conditions") or {}
+    cond = {k: [str(x) for x in (c.get(k) or []) if str(x).strip()] for k in _COND_LISTS}
+    cond["trailer"] = c.get("trailer") if c.get("trailer") in ("with", "without") else ""
+    cond["outcome"] = c.get("outcome") if c.get("outcome") in ("completed", "not_completed", "any") else "completed"
+    tf, tt = str(c.get("time_from") or ""), str(c.get("time_to") or "")
+    if tf or tt:
+        if _pricing.hhmm_to_min(tf) < 0 or _pricing.hhmm_to_min(tt) < 0 or tf == tt:
+            raise HTTPException(status_code=400, detail="Tidsrum skal være to forskellige klokkeslæt (TT:MM)")
+    cond["time_from"], cond["time_to"] = tf, tt
+
+    def num(x, label, allow_none=False):
+        if x in (None, ""):
+            if allow_none:
+                return None
+            raise HTTPException(status_code=400, detail=f"{label} mangler")
+        try:
+            v = float(x)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"{label} skal være et tal")
+        if v < 0:
+            raise HTTPException(status_code=400, detail=f"{label} må ikke være negativ")
+        return v
+
+    doc = {"kind": kind, "name": name[:80], "conditions": cond,
+           "active": bool(body.get("active", True)), "note": str(body.get("note") or "")[:300],
+           "valid_from": str(body.get("valid_from") or ""), "valid_to": str(body.get("valid_to") or ""),
+           "category": "", "pricing": {}, "surcharge": {}}
+    if doc["valid_from"] and doc["valid_to"] and doc["valid_from"] > doc["valid_to"]:
+        raise HTTPException(status_code=400, detail="Gyldig fra skal være før gyldig til")
+    if kind == "base":
+        p = body.get("pricing") or {}
+        model = p.get("model")
+        if model not in _pricing.BASE_MODELS:
+            raise HTTPException(status_code=400, detail="Vælg prismodel")
+        if model in ("fixed", "per_container"):
+            doc["pricing"] = {"model": model, "amount": num(p.get("amount"), "Beløb")}
+        else:
+            rmode = p.get("rounding_mode") if p.get("rounding_mode") in ("none", "up", "nearest", "down") else "none"
+            rmin = int(num(p.get("rounding_minutes"), "Afrunding", True) or 0)
+            if rmode != "none" and not (1 <= rmin <= 240):
+                raise HTTPException(status_code=400, detail="Afrunding skal være 1–240 minutter")
+            doc["pricing"] = {
+                "model": "hourly",
+                "hourly_rate": num(p.get("hourly_rate"), "Timepris"),
+                "start_fee": num(p.get("start_fee"), "Startgebyr", True) or 0,
+                "min_minutes": int(num(p.get("min_minutes"), "Minimum minutter", True) or 0),
+                "min_amount": num(p.get("min_amount"), "Minimumsbeløb", True) or 0,
+                "rounding_mode": rmode, "rounding_minutes": rmin if rmode != "none" else 0,
+                "deduct_pause": bool(p.get("deduct_pause", True)),
+            }
+    else:
+        cat = body.get("category")
+        if cat not in _pricing.SURCHARGE_CATEGORIES:
+            raise HTTPException(status_code=400, detail="Vælg tillægstype")
+        s = body.get("surcharge") or {}
+        unit = s.get("unit") if s.get("unit") in ("kr", "percent", "per_hour") else "kr"
+        doc["category"] = cat
+        doc["surcharge"] = {"unit": unit, "value": num(s.get("value"), "Tillæg")}
+    return doc
+
+
+@pricing_router.get("/rules")
+async def pricing_list_rules(payload: dict = Depends(get_current_user_payload)):
+    me = await _pricing_caller(payload)
+    rules = await _active_rules(me["company_id"])
+    for r in rules:
+        r["specificity"] = _pricing.specificity(r)
+    return sorted(rules, key=lambda r: (r["kind"] != "base", r.get("category") or "", -r["specificity"], r["name"]))
+
+
+@pricing_router.post("/rules")
+async def pricing_create_rule(body: dict, payload: dict = Depends(get_current_user_payload)):
+    me = await _pricing_caller(payload)
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {**_clean_rule(body), "id": str(uuid.uuid4()), "company_id": me["company_id"],
+           "created_at": now, "updated_at": now, "updated_by": me.get("name") or me.get("email")}
+    await _raw_db.price_rules.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@pricing_router.put("/rules/{rule_id}")
+async def pricing_update_rule(rule_id: str, body: dict, payload: dict = Depends(get_current_user_payload)):
+    me = await _pricing_caller(payload)
+    upd = {**_clean_rule(body), "updated_at": datetime.now(timezone.utc).isoformat(),
+           "updated_by": me.get("name") or me.get("email")}
+    res = await _raw_db.price_rules.update_one({"id": rule_id, "company_id": me["company_id"]}, {"$set": upd})
+    if not res.matched_count:
+        raise HTTPException(status_code=404, detail="Regel ikke fundet")
+    return await _raw_db.price_rules.find_one({"id": rule_id}, {"_id": 0})
+
+
+@pricing_router.delete("/rules/{rule_id}")
+async def pricing_delete_rule(rule_id: str, payload: dict = Depends(get_current_user_payload)):
+    me = await _pricing_caller(payload)
+    res = await _raw_db.price_rules.delete_one({"id": rule_id, "company_id": me["company_id"]})
+    if not res.deleted_count:
+        raise HTTPException(status_code=404, detail="Regel ikke fundet")
+    return {"success": True}
+
+
+@pricing_router.post("/import-legacy")
+async def pricing_import_legacy(payload: dict = Depends(get_current_user_payload)):
+    """Konverterer den gamle prisliste (plads + fraktion + haster-gebyr)."""
+    me = await _pricing_caller(payload)
+    cid = me["company_id"]
+    old = await _raw_db.tour_prices.find({"company_id": cid}, {"_id": 0}).to_list(5000)
+    if not old:
+        raise HTTPException(status_code=404, detail="Ingen gamle priser at importere")
+    plads = {p["name"].lower(): p.get("location_code") for p in await _raw_db.plads.find(
+        {}, {"_id": 0, "name": 1, "location_code": 1}).to_list(10000) if p.get("name")}
+    now = datetime.now(timezone.utc).isoformat()
+    made = 0
+    for p in old:
+        code = plads.get((p.get("plads") or "").lower())
+        kind = p.get("kind") or "material"
+        cond = {k: [] for k in _COND_LISTS}
+        cond.update({"location_codes": [code] if code else [], "trailer": "", "outcome": "completed",
+                     "time_from": "", "time_to": ""})
+        if kind in ("flyt", "vaerksted"):
+            cond["task_types"] = [kind]
+        elif p.get("fraction"):
+            cond["materials"] = [p["fraction"]]
+        name = f"{p.get('plads')} · {p.get('fraction') or _pricing.TASK_TYPES.get(kind, kind)}"
+        await _raw_db.price_rules.insert_one({
+            "id": str(uuid.uuid4()), "company_id": cid, "kind": "base", "name": name[:80],
+            "conditions": cond, "pricing": {"model": "fixed", "amount": float(p.get("price") or 0)},
+            "surcharge": {}, "category": "", "active": True, "note": "Importeret fra gammel prisliste",
+            "valid_from": "", "valid_to": "", "created_at": now, "updated_at": now,
+            "updated_by": me.get("name") or "",
+        })
+        made += 1
+    comp = await _raw_db.companies.find_one({"id": cid}, {"_id": 0, "haster_fee": 1}) or {}
+    fee = comp.get("haster_fee")
+    if fee:
+        cond = {k: [] for k in _COND_LISTS}
+        cond.update({"priorities": ["haster"], "trailer": "", "outcome": "completed",
+                     "time_from": "", "time_to": ""})
+        await _raw_db.price_rules.insert_one({
+            "id": str(uuid.uuid4()), "company_id": cid, "kind": "surcharge", "category": "haster",
+            "name": "Haster-tillæg", "conditions": cond, "pricing": {},
+            "surcharge": {"unit": "kr", "value": float(fee)}, "active": True,
+            "note": "Importeret fra gammel prisliste", "valid_from": "", "valid_to": "",
+            "created_at": now, "updated_at": now, "updated_by": me.get("name") or "",
+        })
+        made += 1
+    return {"created": made}
+
+
+# ----- Rapport + tur-detaljer ----------------------------------------------
+async def _pending_counts(tour_ids: list) -> Dict[str, int]:
+    out: Dict[str, int] = {}
+    if tour_ids:
+        for r in await _raw_db.tour_change_requests.find(
+            {"tour_id": {"$in": tour_ids}, "status": "pending"}, {"_id": 0, "tour_id": 1},
+        ).to_list(20000):
+            out[r["tour_id"]] = out.get(r["tour_id"], 0) + 1
+    return out
+
+
+@pricing_router.get("/report")
+async def pricing_report(date_from: str, date_to: str, customer_id: str = "", location_code: str = "",
+                         payload: dict = Depends(get_current_user_payload)):
+    me = await _pricing_caller(payload)
+    cid = me["company_id"]
+    try:
+        _date.fromisoformat(date_from); _date.fromisoformat(date_to)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Ugyldig periode")
+    extra = {"company_id": customer_id} if customer_id else None
+    tours = await _billable_tours(cid, date_from, date_to, extra)
+    settings = await _price_settings(cid)
+    ctx = _PricingContext(cid, settings, await _active_rules(cid))
+    await ctx.load(tours)
+    if location_code:
+        tours = [t for t in tours if ctx.location_code(t) == location_code]
+    pending = await _pending_counts([t["id"] for t in tours])
+    rows = sorted((_report_row(ctx, t, pending) for t in tours),
+                  key=lambda r: (r["service_date"], r["start_time"] or ""), reverse=True)
+    priced = [r for r in rows if r["price"].get("total") is not None]
+    net = round(sum(r["price"]["total"] for r in priced), 2)
+    vat = round(net * float(settings.get("vat_percent") or 0) / 100, 2)
+    by_customer: Dict[str, dict] = {}
+    for r in rows:
+        b = by_customer.setdefault(r["customer_id"], {"customer_id": r["customer_id"],
+                                                      "customer_name": r["customer_name"],
+                                                      "tours": 0, "net": 0.0, "missing": 0})
+        b["tours"] += 1
+        if r["price"].get("total") is None:
+            b["missing"] += 1
+        else:
+            b["net"] = round(b["net"] + r["price"]["total"], 2)
+    billable_min = sum((r["price"].get("time") or {}).get("billable_min") or 0 for r in priced)
+    return {
+        "rows": rows,
+        "totals": {
+            "tours": len(rows), "net": net, "vat": vat, "gross": round(net + vat, 2),
+            "vat_percent": settings.get("vat_percent"),
+            "billable_hours": round(billable_min / 60, 2),
+            "missing_rule": sum(1 for r in rows if r["price"]["status"] == "missing_rule"),
+            "missing_time": sum(1 for r in rows if r["price"]["status"] == "missing_time"),
+            "pending_requests": sum(r["pending_requests"] for r in rows),
+            "invoiced": sum(1 for r in rows if r["price"].get("locked")),
+            "not_completed": sum(1 for r in rows if r["outcome"] == "not_completed"),
+        },
+        "by_customer": sorted(by_customer.values(), key=lambda b: -b["net"]),
+    }
+
+
+async def _owned_tour(cid: str, tour_id: str) -> dict:
+    t = await _raw_db.tours.find_one({"id": tour_id}, {"_id": 0, "receipt_image": 0})
+    if not t:
+        raise HTTPException(status_code=404, detail="Tur ikke fundet")
+    drivers = await _my_drivers(cid)
+    if not ({d["id"] for d in drivers} & {t.get("claimed_by_id")}
+            or {d["name"] for d in drivers} & {t.get("claimed_by"), t.get("not_completed_by_name")}):
+        raise HTTPException(status_code=404, detail="Tur ikke fundet")
+    return t
+
+
+@pricing_router.get("/tours/{tour_id}")
+async def pricing_tour_detail(tour_id: str, payload: dict = Depends(get_current_user_payload)):
+    me = await _pricing_caller(payload)
+    t = await _owned_tour(me["company_id"], tour_id)
+    ctx = _PricingContext(me["company_id"], await _price_settings(me["company_id"]),
+                          await _active_rules(me["company_id"]))
+    await ctx.load([t])
+    row = _report_row(ctx, t, await _pending_counts([tour_id]))
+    requests = await _raw_db.tour_change_requests.find(
+        {"tour_id": tour_id}, {"_id": 0}).sort("created_at", -1).to_list(100)
+    return {**row, "original": {"start_time": t.get("on_way_time") or "",
+                                "end_time": t.get("time") if t.get("completed") else "",
+                                "used_trailer": t.get("used_trailer")},
+            "fact_overrides": t.get("fact_overrides") or {},
+            "price_override": t.get("price_override") or {},
+            "history": t.get("price_history") or [], "requests": requests}
+
+
+@pricing_router.put("/tours/{tour_id}/adjust")
+async def pricing_adjust_tour(tour_id: str, body: dict, payload: dict = Depends(get_current_user_payload)):
+    me = await _pricing_caller(payload)
+    t = await _owned_tour(me["company_id"], tour_id)
+    if t.get("price_locked"):
+        raise HTTPException(status_code=409, detail="Turen er faktureret. Fjern markeringen før du ændrer.")
+    note = str(body.get("note") or "").strip()
+    if not note:
+        raise HTTPException(status_code=400, detail="Skriv en kort begrundelse")
+    fo_in = body.get("fact_overrides") or {}
+    fo: Dict[str, Any] = {}
+    for k in ("start_time", "end_time"):
+        v = str(fo_in.get(k) or "").strip()
+        if v:
+            if _pricing.hhmm_to_min(v) < 0:
+                raise HTTPException(status_code=400, detail="Tid skal være TT:MM")
+            fo[k] = v
+    if fo_in.get("used_trailer") in (True, False):
+        fo["used_trailer"] = fo_in["used_trailer"]
+    if fo_in.get("deduct_pause") in (True, False):
+        fo["deduct_pause"] = fo_in["deduct_pause"]
+    if fo_in.get("waiting_min") not in (None, ""):
+        fo["waiting_min"] = max(0, int(float(fo_in["waiting_min"])))
+    po_in = body.get("price_override") or {}
+    po: Dict[str, Any] = {"mode": "fixed" if po_in.get("mode") == "fixed" else "rules"}
+    if po["mode"] == "fixed":
+        try:
+            po["amount"] = float(po_in.get("amount"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Angiv det faste beløb")
+    po["extra_lines"] = [{"label": str(x.get("label") or "Ekstra").strip()[:60],
+                          "amount": float(x.get("amount") or 0)}
+                         for x in (po_in.get("extra_lines") or []) if str(x.get("label") or "").strip()]
+    hist = {"at": datetime.now(timezone.utc).isoformat(), "by": me.get("name") or me.get("email"),
+            "note": note[:300], "kind": "admin", "fact_overrides": fo, "price_override": po}
+    await _raw_db.tours.update_one({"id": tour_id}, {
+        "$set": {"fact_overrides": fo, "price_override": po}, "$push": {"price_history": hist}})
+    return await pricing_tour_detail(tour_id, payload)
+
+
+@pricing_router.post("/invoice")
+async def pricing_mark_invoiced(body: dict, payload: dict = Depends(get_current_user_payload)):
+    """Markér ture som faktureret (prisen fryses) — eller fjern markeringen."""
+    me = await _pricing_caller(payload)
+    cid = me["company_id"]
+    ids = [str(x) for x in (body.get("tour_ids") or [])][:5000]
+    if not ids:
+        raise HTTPException(status_code=400, detail="Ingen ture valgt")
+    tours = []
+    for tid in ids:
+        tours.append(await _owned_tour(cid, tid))
+    if not body.get("invoiced", True):
+        await _raw_db.tours.update_many({"id": {"$in": ids}}, {"$unset": {"price_locked": ""}})
+        return {"updated": len(ids)}
+    ctx = _PricingContext(cid, await _price_settings(cid), await _active_rules(cid))
+    await ctx.load(tours)
+    now, by = datetime.now(timezone.utc).isoformat(), me.get("name") or me.get("email")
+    done, skipped = 0, 0
+    for t in tours:
+        if t.get("price_locked"):
+            continue
+        p = ctx.price(t)
+        if p.get("total") is None:
+            skipped += 1
+            continue
+        snap = {k: p.get(k) for k in ("status", "model", "base_rule", "lines", "time", "total", "flags")}
+        snap.update({"invoiced_at": now, "invoiced_by": by})
+        await _raw_db.tours.update_one({"id": t["id"]}, {"$set": {"price_locked": snap}})
+        done += 1
+    return {"updated": done, "skipped_without_price": skipped}
+
+
+# ----- Godkendelser (chaufførens rettelser) --------------------------------
+@pricing_router.get("/requests")
+async def pricing_list_requests(status: str = "pending", payload: dict = Depends(get_current_user_payload)):
+    me = await _pricing_caller(payload)
+    q: Dict[str, Any] = {"company_id": me["company_id"]}
+    if status != "all":
+        q["status"] = status
+    return await _raw_db.tour_change_requests.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+
+
+@pricing_router.post("/requests/{req_id}/decide")
+async def pricing_decide_request(req_id: str, body: dict, payload: dict = Depends(get_current_user_payload)):
+    me = await _pricing_caller(payload)
+    r = await _raw_db.tour_change_requests.find_one({"id": req_id, "company_id": me["company_id"]}, {"_id": 0})
+    if not r:
+        raise HTTPException(status_code=404, detail="Anmodning ikke fundet")
+    if r.get("status") != "pending":
+        raise HTTPException(status_code=409, detail="Anmodningen er allerede behandlet")
+    approve = bool(body.get("approve"))
+    note = str(body.get("note") or "").strip()[:300]
+    if not approve and not note:
+        raise HTTPException(status_code=400, detail="Skriv hvorfor anmodningen afvises")
+    now, by = datetime.now(timezone.utc).isoformat(), me.get("name") or me.get("email")
+    if approve:
+        t = await _owned_tour(me["company_id"], r["tour_id"])
+        if t.get("price_locked"):
+            raise HTTPException(status_code=409, detail="Turen er faktureret. Fjern markeringen før du godkender.")
+        fo = {**(t.get("fact_overrides") or {}), **(r.get("changes") or {})}
+        await _raw_db.tours.update_one({"id": r["tour_id"]}, {
+            "$set": {"fact_overrides": fo},
+            "$push": {"price_history": {"at": now, "by": by, "kind": "driver_request",
+                                        "note": f"Godkendt rettelse fra {r.get('driver_name')}: {r.get('comment')}",
+                                        "fact_overrides": r.get("changes")}}})
+    await _raw_db.tour_change_requests.update_one({"id": req_id}, {"$set": {
+        "status": "approved" if approve else "rejected", "decided_at": now, "decided_by": by,
+        "decision_note": note}})
+    return await _raw_db.tour_change_requests.find_one({"id": req_id}, {"_id": 0})
+
+
+app.include_router(pricing_router)
+
+
+# ----- Chaufføren: prisinfo (uden beløb), hænger pr. tur, rettelser ---------
+async def _driver_doc(payload: dict) -> dict:
+    u = await _raw_db.users.find_one({"id": payload.get("sub")}, {"_id": 0, "id": 1, "name": 1, "company_id": 1})
+    if not u:
+        raise HTTPException(status_code=401, detail="Bruger ikke fundet")
+    return u
+
+
+async def _driver_own_tour(me: dict, tour_id: str) -> dict:
+    t = await _raw_db.tours.find_one({"id": tour_id}, {"_id": 0, "receipt_image": 0})
+    if not t or not (t.get("claimed_by_id") == me["id"] or (me.get("name") and t.get("claimed_by") == me["name"])):
+        raise HTTPException(status_code=404, detail="Tur ikke fundet")
+    return t
+
+
+@api_router.get("/driver/tour-pricing")
+async def driver_tour_pricing(ids: str, payload: dict = Depends(require_role("driver"))):
+    """Hvordan turen afregnes — prismodel, timepris og pause-regel. Chaufføren
+    ser aldrig faste priser, tillæg eller totaler."""
+    me = await _driver_doc(payload)
+    tour_ids = [x for x in ids.split(",") if x][:200]
+    tours = await _raw_db.tours.find({"id": {"$in": tour_ids}}, {"_id": 0, "receipt_image": 0}).to_list(200)
+    rules = await _active_rules(me["company_id"])
+    ctx = _PricingContext(me["company_id"], await _price_settings(me["company_id"]), rules)
+    await ctx.load(tours)
+    pending = await _pending_counts(tour_ids)
+    reqs = await _raw_db.tour_change_requests.find(
+        {"tour_id": {"$in": tour_ids}}, {"_id": 0, "tour_id": 1, "status": 1, "created_at": 1,
+                                         "decision_note": 1}).sort("created_at", -1).to_list(1000)
+    latest: Dict[str, dict] = {}
+    for r in reqs:
+        latest.setdefault(r["tour_id"], r)
+    out = {}
+    for t in tours:
+        base, _s = _pricing.select_rules(rules, ctx.attrs(t))
+        po = t.get("price_override") or {}
+        info: Dict[str, Any] = {"model": None}
+        if po.get("mode") == "fixed":
+            info = {"model": "fixed"}
+        elif base:
+            p = base.get("pricing") or {}
+            info = {"model": p.get("model")}
+            if p.get("model") == "hourly":
+                info.update({"hourly_rate": p.get("hourly_rate"),
+                             "deduct_pause": (t.get("fact_overrides") or {}).get("deduct_pause",
+                                                                                 p.get("deduct_pause", True)),
+                             "rounding": _pricing.rounding_label(p),
+                             "min_minutes": p.get("min_minutes") or 0})
+        info["used_trailer"] = _fact(t, "used_trailer", t.get("used_trailer"))
+        info["pending_requests"] = pending.get(t["id"], 0)
+        info["last_request"] = latest.get(t["id"])
+        info["invoiced"] = bool(t.get("price_locked"))
+        out[t["id"]] = info
+    return out
+
+
+@api_router.put("/driver/tours/{tour_id}/trailer")
+async def driver_set_trailer(tour_id: str, body: dict, payload: dict = Depends(require_role("driver"))):
+    me = await _driver_doc(payload)
+    t = await _driver_own_tour(me, tour_id)
+    if t.get("completed"):
+        raise HTTPException(status_code=409, detail="Turen er afsluttet - brug 'Ret tur' for at anmode om ændring")
+    await _raw_db.tours.update_one({"id": tour_id}, {"$set": {"used_trailer": bool(body.get("used_trailer"))}})
+    return {"used_trailer": bool(body.get("used_trailer"))}
+
+
+@api_router.post("/driver/tours/{tour_id}/change-request")
+async def driver_change_request(tour_id: str, body: dict, payload: dict = Depends(require_role("driver"))):
+    me = await _driver_doc(payload)
+    t = await _driver_own_tour(me, tour_id)
+    if not t.get("completed"):
+        raise HTTPException(status_code=409, detail="Rettelser kan kun anmodes om på afsluttede ture")
+    if t.get("price_locked"):
+        raise HTTPException(status_code=409, detail="Turen er allerede faktureret - kontakt din logistik admin")
+    if await _raw_db.tour_change_requests.find_one({"tour_id": tour_id, "status": "pending"}):
+        raise HTTPException(status_code=409, detail="Der er allerede en rettelse til godkendelse på denne tur")
+    comment = str(body.get("comment") or "").strip()
+    if not comment:
+        raise HTTPException(status_code=400, detail="Skriv hvad der skal rettes og hvorfor")
+    changes: Dict[str, Any] = {}
+    cur_start, cur_end = _tour_times(t)
+    for k, cur in (("start_time", cur_start), ("end_time", cur_end)):
+        v = str(body.get(k) or "").strip()
+        if v and v != cur:
+            if _pricing.hhmm_to_min(v) < 0:
+                raise HTTPException(status_code=400, detail="Tid skal være TT:MM")
+            changes[k] = v
+    if body.get("used_trailer") in (True, False) and body["used_trailer"] != bool(
+            _fact(t, "used_trailer", t.get("used_trailer"))):
+        changes["used_trailer"] = body["used_trailer"]
+    if body.get("waiting_min") not in (None, ""):
+        w = max(0, int(float(body["waiting_min"])))
+        if w != int(_fact(t, "waiting_min", 0) or 0):
+            changes["waiting_min"] = w
+    if not changes:
+        raise HTTPException(status_code=400, detail="Du har ikke ændret noget")
+    logi = me["company_id"]
+    doc = {
+        "id": str(uuid.uuid4()), "tour_id": tour_id, "company_id": logi,
+        "tour_number": t.get("tour_number") or "", "tour_label": f"{t.get('fraction', '')} · {t.get('plads', '')}",
+        "service_date": _service_date(t), "driver_id": me["id"], "driver_name": me.get("name") or "",
+        "before": {"start_time": cur_start, "end_time": cur_end,
+                   "used_trailer": bool(_fact(t, "used_trailer", t.get("used_trailer"))),
+                   "waiting_min": int(_fact(t, "waiting_min", 0) or 0)},
+        "changes": changes, "comment": comment[:500], "status": "pending",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await _raw_db.tour_change_requests.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
 
 
 
