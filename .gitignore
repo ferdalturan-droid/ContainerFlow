@@ -346,3 +346,6 @@ data-migration/dump/test_database/receipts.bson
 frontend/node_modules/.cache/default-development/55.pack
 frontend/node_modules/.cache/default-development/55.pack
 frontend/node_modules/.cache/default-development/58.pack
+
+# Emergent session summary (contains credentials)
+.emergent/summary.txt
