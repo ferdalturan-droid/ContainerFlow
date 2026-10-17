@@ -546,6 +546,7 @@ function TourPriceDrawer({ tourId, options, onClose, onChanged }) {
       used_trailer: fo.used_trailer === undefined ? "" : String(fo.used_trailer),
       waiting_min: fo.waiting_min ?? "", deduct_pause: fo.deduct_pause === undefined ? "" : String(fo.deduct_pause),
       mode: po.mode === "fixed" ? "fixed" : "rules", amount: po.amount ?? "",
+      add_waiting: !!po.add_waiting, label: po.label || "",
       extra_lines: po.extra_lines || [], note: "",
     });
   };
@@ -561,7 +562,9 @@ function TourPriceDrawer({ tourId, options, onClose, onChanged }) {
     try {
       const { data } = await axios.put(`${API}/pricing/tours/${tourId}/adjust`, {
         note: edit.note, fact_overrides: fact,
-        price_override: { mode: edit.mode, amount: edit.mode === "fixed" ? Number(edit.amount) : undefined, extra_lines: edit.extra_lines.filter(x => x.label) },
+        price_override: { mode: edit.mode, amount: edit.mode === "fixed" ? Number(edit.amount) : undefined,
+          add_waiting: edit.mode === "fixed" ? !!edit.add_waiting : undefined, label: edit.label || undefined,
+          extra_lines: edit.extra_lines.filter(x => x.label) },
       });
       setD(data); setEdit(null); toast.success("Turen er opdateret"); onChanged();
     } catch (e) { toast.error(formatApiError(e)); }
@@ -652,6 +655,12 @@ function TourPriceDrawer({ tourId, options, onClose, onChanged }) {
                   <span className={label}>Pris</span>
                   <Segmented value={edit.mode} onChange={v => setEdit({ ...edit, mode: v })} options={[{ value: "rules", label: "Beregn efter regler" }, { value: "fixed", label: "Fast beløb" }]} />
                   {edit.mode === "fixed" && <input type="number" min="0" className={`${input} mt-2`} placeholder="Beløb ekskl. moms" value={edit.amount} onChange={e => setEdit({ ...edit, amount: e.target.value })} />}
+                  {edit.mode === "fixed" && (
+                    <label className="mt-2 flex items-center gap-2 text-sm">
+                      <input type="checkbox" className="accent-emerald-600 w-4 h-4" checked={!!edit.add_waiting} onChange={e => setEdit({ ...edit, add_waiting: e.target.checked })} />
+                      Læg ventetid oveni (efter ventetidsreglen)
+                    </label>
+                  )}
                 </div>
                 <div>
                   <span className={label}>Ekstra linjer</span>
@@ -704,7 +713,7 @@ const Row = ({ k, v }) => (
 /* ======================================================================
    Prisregler
    ====================================================================== */
-const EMPTY_COND = { customer_ids: [], location_codes: [], delivery_labels: [], materials: [], task_types: [], priorities: [], day_types: [], container_labels: [], trailer: "", time_from: "", time_to: "", outcome: "completed" };
+const EMPTY_COND = { customer_ids: [], location_codes: [], delivery_labels: [], materials: [], task_types: [], priorities: [], day_types: [], container_labels: [], trailer: "", trailer_counts: [], time_from: "", time_to: "", outcome: "completed" };
 
 function ruleSummary(rule, options) {
   if (rule.kind === "base") {
@@ -735,6 +744,7 @@ function conditionChips(c, options) {
   if (c.priorities?.length) out.push(c.priorities.map(p => options.priorities[p]).join(", "));
   if (c.day_types?.length) out.push(c.day_types.map(d => options.day_types[d]).join(", "));
   if (c.trailer) out.push(c.trailer === "with" ? "Med hænger" : "Uden hænger");
+  if ((c.trailer_counts || []).length) out.push(`${c.trailer_counts.map(n => (Number(n) >= 3 ? "3+" : n)).join("/")} hænger${c.trailer_counts.length === 1 && Number(c.trailer_counts[0]) === 1 ? "" : "e"}`);
   if (c.container_labels?.length) out.push(c.container_labels.join(", "));
   if (c.time_from && c.time_to) out.push(`Start ${c.time_from}–${c.time_to}`);
   if (c.outcome === "not_completed") out.push("Forgæves ture");
@@ -1080,7 +1090,7 @@ function RuleEditor({ rule, options, onClose, onSaved, firstRule = false }) {
   }));
   const [more, setMore] = useState(() => {
     const c = rule.conditions || {};
-    return !!(c.delivery_labels?.length || c.priorities?.length || c.trailer || c.container_labels?.length || c.time_from || (c.outcome && c.outcome !== "completed") || rule.valid_from || rule.valid_to);
+    return !!(c.delivery_labels?.length || c.priorities?.length || c.trailer || c.trailer_counts?.length || c.container_labels?.length || c.time_from || (c.outcome && c.outcome !== "completed") || rule.valid_from || rule.valid_to);
   });
   const [saving, setSaving] = useState(false);
   const setC = (k, v) => setR(x => ({ ...x, conditions: { ...x.conditions, [k]: v } }));
@@ -1149,6 +1159,15 @@ function RuleEditor({ rule, options, onClose, onSaved, firstRule = false }) {
                 <MultiPick title="Containerstørrelse" items={options.container_labels.map(m => ({ value: m, label: m }))} value={c.container_labels} onChange={v => setC("container_labels", v)} />
                 <div><span className={label}>Hænger</span>
                   <Segmented value={c.trailer} onChange={v => setC("trailer", v)} options={[{ value: "", label: "Ligegyldigt" }, { value: "with", label: "Med" }, { value: "without", label: "Uden" }]} /></div>
+                <div><span className={label}>Antal hængere</span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {[1, 2, 3].map(n => {
+                      const on = (c.trailer_counts || []).map(Number).includes(n);
+                      return <button key={n} type="button" className={`${chipBase} ${on ? chipOn : chipOff}`}
+                        onClick={() => setC("trailer_counts", on ? (c.trailer_counts || []).filter(x => Number(x) !== n) : [...(c.trailer_counts || []), n])}>{n === 3 ? "3+" : n}</button>;
+                    })}
+                  </div>
+                  <span className="text-[11px] text-slate-500">Fx 1 hænger = 700 kr og 2 hængere = 1.100 kr som to regler. Tomt = ligegyldigt.</span></div>
                 <div><span className={label}>Turen starter i tidsrummet</span>
                   <div className="flex items-center gap-2">
                     <input type="time" className={input} value={c.time_from} onChange={e => setC("time_from", e.target.value)} />

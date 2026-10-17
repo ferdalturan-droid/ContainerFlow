@@ -33,8 +33,6 @@ før den kan bygges rigtigt.
 | E | Ikke relevant | Fakturaeksport fjernet fra listen |
 | F | iPhone, Android og iPad | Chauffør- og admin-siderne testet på telefon- og iPad-bredde |
 
-## Åbent spørgsmål
-
-| # | Spørgsmål | Hvorfor |
-|---|---|---|
-| G | Web push til chauffører er slået fra efter et tidligere ønske ("kun information i appen"). Skal en ny besked eller tildeling sende en notifikation til telefonen, også når appen er lukket? | I dag ser chaufføren beskeden i appen inden for ca. 15 sek. med vibration, men ikke hvis appen er lukket. Kræver på iPhone/iPad at appen er lagt på hjemmeskærmen |
+## Besvaret 2026-10-17
+- **Push til chauffører:** slået til som standard; chaufføren kan slå det fra under Profil. Det kræver VAPID-nøgler i Scaleway (se `WORKFLOW.md` 4b).
+- **Gods og andet:** premium-firmaer kan nu køre ture der ikke handler om containere (se `TURE_REDESIGN.md`).

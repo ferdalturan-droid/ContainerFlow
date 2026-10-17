@@ -9,7 +9,7 @@ import {
   Truck, Users, Mail, FileText, CheckCircle2, MapPin,
   Wand2, Plus, Trash2, Clock, Weight, X, 
   Pause, RotateCcw, Download, Settings, ChevronDown, Calendar,
-  Shield, Send, Eye, Phone, Car, BarChart3, Navigation, Edit2, LogOut,
+  Shield, Send, Eye, Phone, Bell, Car, BarChart3, Navigation, Edit2, LogOut,
   History, Building2, ChevronLeft, ChevronRight, MessageCircle, MessageSquare, GripVertical,
   AlertTriangle, AlertCircle, Circle, WifiOff, Wifi, Archive,
   Camera, Image, ZoomIn, RotateCw, Crop, ScanLine, FolderOpen, FileUp, Megaphone,
@@ -26,7 +26,9 @@ import LocationAdminPage from "@/pages/LocationAdminPage";
 import ToursWorkspace from "@/pages/ToursWorkspace";
 import AdminTabNav from "@/components/AdminTabNav";
 import TeamPanel from "@/pages/TeamPanel";
-import DriverTourCard, { DriverChatSheet, CallPlannerButton } from "@/components/DriverTourCard";
+import { DriverChatSheet, CallPlannerButton } from "@/components/DriverTourCard";
+import DriverTodayView from "@/components/DriverTodayView";
+import { enablePush, disablePush, syncPush, pushSupported, isIOS, isStandalone, permission as pushPermission } from "@/lib/push";
 import EconomyPanel from "@/pages/EconomyPanel";
 import LogisticsLocations from "@/pages/LogisticsLocations";
 import { buildDayReportPdf, dayReportFileName } from "@/lib/dayReportPdf";
@@ -9168,6 +9170,7 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
             drivers={drivers}
             pladsList={pladsList}
             perms={can}
+            profile={logisticsProfile}
             siteWord={isPremiumLogistics ? "Lokation" : "Genbrugsplads"}
           />
         )}
@@ -13274,12 +13277,15 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
     // ALTID når turen ikke er afsluttet, så chaufføren straks kan se
     // eksisterende drafts og tilføje flere. For øvrige opgavetyper opens
     // den kun på Afslut-klik (klassisk inline vægt-prompt).
-    const isLoesActive = (tour?.tour_type === "loes_afhentning") && !tour?.completed;
+    // 2026-10-17: Flere læs (løs afhentning ELLER flere indholdslinjer, fx
+    // hænger 1: Beton, hænger 2: Træ) vejes hver for sig med samme UI.
+    const _cargoN = Array.isArray(tour?.cargo_lines) ? tour.cargo_lines.length : 0;
+    const isLoesActive = (tour?.tour_type === "loes_afhentning" || _cargoN > 1) && !tour?.completed;
     setAskingWeight(isLoesActive);
     setEditingWeight(false);
     setEditWeightVal(tour?.weight != null && tour?.weight !== "" ? String(tour.weight) : "");
     const existing = Array.isArray(tour?.container_weights) ? tour.container_weights : [];
-    setContainerWeights(existing.length > 0 ? existing.map(w => String(w)) : [""]);
+    setContainerWeights(existing.length > 0 ? existing.map(w => String(w)) : (_cargoN > 1 ? Array(_cargoN).fill("") : [""]));
     // Fase 17.3 (2026-02-27): Pending-billeder NULSTILLES IKKE her - de
     // loades fra sessionStorage så iOS Safari-reload (kamera-overtagelse)
     // ikke koster chaufføren et scan. Når uploaden lykkes ryddes både
@@ -13291,6 +13297,13 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
   const [isSubmittingWeight, setIsSubmittingWeight] = useState(false);
   if (!tour) return null;
   const isClaimedByOther = tour.claimed_by && tour.claimed_by !== currentDriverName;
+  const cargoLines = Array.isArray(tour.cargo_lines) ? tour.cargo_lines : [];
+  const isMultiLoadTour = tour.tour_type === "loes_afhentning" || cargoLines.length > 1;
+  const isGoodsTour = tour.tour_kind === "goods";
+  const multiTitle = tour.tour_type === "loes_afhentning" ? "LØS AFHENTNING" : "turen";
+  const loadLabel = (idx) => (cargoLines.length > 1
+    ? `${cargoLines[idx]?.trailer ? `H${cargoLines[idx].trailer} ` : ""}${cargoLines[idx]?.text || `Læs ${idx + 1}`}`
+    : `#${idx + 1}`);
   const handleDelete = () => {
     if (window.confirm(`Slet turen "${tour.fraction || ""}"?`)) {
       onDelete?.(tour.id);
@@ -13346,16 +13359,24 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
     const askConfirm = (msg) => {
       try { return window.confirm(msg); } catch (_) { return true; }
     };
-    if (tt === "loes_afhentning") {
+    if (isMultiLoadTour) {
       const existing = Array.isArray(tour.container_weights) ? tour.container_weights : [];
       const hasAtLeastOne = existing.some(w => parseFloat(w) > 0);
       if (!hasAtLeastOne) {
+        // Flere læs: vægtene indtastes i felterne ovenfor. Gods må afsluttes uden vægt.
+        if (isGoodsTour) {
+          if (!askConfirm(`Afslut uden vægt?\n\n${tour.fraction || ""}`)) return;
+          const r = await onToggleComplete?.(tour.id, { skipWeight: true });
+          if (r?.ok) onClose?.();
+          return;
+        }
         setAskingWeight(true);
+        toast.error("Indtast mindst én vægt i felterne ovenfor");
         return;
       }
       const total = existing.reduce((s, w) => s + (parseFloat(w) || 0), 0);
       const ok = askConfirm(
-        `Afslut LØS AFHENTNING?\n\n` +
+        `Afslut ${multiTitle}?\n\n` +
         `Materiale: ${tour.fraction || "?"}\n` +
         `Containere: ${existing.length}\n` +
         `Total vægt: ${total.toLocaleString("da-DK")} kg\n\n` +
@@ -13364,6 +13385,11 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
       if (!ok) return;
       const result = await onToggleComplete?.(tour.id);
       if (result?.ok) onClose?.();
+      return;
+    }
+    if (isGoodsTour) {
+      // Gods: vægt er valgfri - vis feltet med "Afslut uden vægt".
+      setAskingWeight(true);
       return;
     }
     if (tt !== "normal") {
@@ -13392,7 +13418,15 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
   const handleConfirmWeight = async () => {
     if (isSubmittingWeight) return; // kort lock kun til tour-completion (millisekunder)
     const val = parseFloat(weightInput);
-    if (!val || val <= 0) { toast.error("Indtast vægt"); return; }
+    if ((!val || val <= 0) && !isGoodsTour) { toast.error("Indtast vægt"); return; }
+    if (!val || val <= 0) {
+      setIsSubmittingWeight(true);
+      try {
+        const r = await onToggleComplete?.(tour.id, { skipWeight: true });
+        if (r?.ok) onClose?.();
+      } finally { setIsSubmittingWeight(false); }
+      return;
+    }
     setIsSubmittingWeight(true);
     try {
       // Fase 17.13: Luk panelet straks når turen er marked completed.
@@ -13428,7 +13462,13 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
       .map(w => parseFloat(w))
       .filter(w => Number.isFinite(w) && w > 0);
     if (clean.length === 0) {
-      toast.error("Indtast mindst én container-vægt > 0");
+      if (isGoodsTour) {
+        if (!window.confirm(`Afslut uden vægt?\n\n${tour.fraction || ""}`)) return;
+        const r = await onToggleComplete?.(tour.id, { skipWeight: true });
+        if (r?.ok) onClose?.();
+        return;
+      }
+      toast.error("Indtast mindst én vægt > 0");
       return;
     }
     // Fase 15.44 (2026-02-22): SOFT-VALIDATION inden endelig afslutning.
@@ -13436,7 +13476,7 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
     let confirmed = true;
     try {
       confirmed = window.confirm(
-        `Afslut LØS AFHENTNING?\n\n` +
+        `Afslut ${multiTitle}?\n\n` +
         `Materiale: ${tour.fraction || "?"}\n` +
         `Containere: ${clean.length}\n` +
         `Total vægt: ${total.toLocaleString("da-DK")} kg\n\n` +
@@ -13601,9 +13641,13 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
             <p className="text-xs text-slate-500 dark:text-slate-400 truncate">
               {/* Fase 15.41 (2026-02-22): Skjul container-id for løs
                   afhentning - vis i stedet estimeret antal containere. */}
-              {tour.plads || "-"} • {tour.tour_type === "loes_afhentning"
-                ? `Løs afhentning · ${tour.loose_estimated_count || 0} container(e)`
-                : (tour.container || "-")}
+              {[tour.plads,
+                tour.tour_type === "loes_afhentning"
+                  ? `Løs afhentning · ${tour.loose_estimated_count || 0} container(e)`
+                  : isGoodsTour
+                    ? `Gods${Number(tour.trailer_count) ? ` · ${tour.trailer_count} hængere` : ""}`
+                    : (tour.container ? `Container ${tour.container}` : (Number(tour.trailer_count) ? `${tour.trailer_count} hængere` : "")),
+              ].filter(Boolean).join(" • ")}
             </p>
           </div>
           <button
@@ -13633,7 +13677,7 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
         <div className="p-4 space-y-3 text-sm">
           {tour.facility && (
             <div>
-              <div className="text-xs uppercase tracking-wide text-slate-500 mb-0.5">Modtageanlæg</div>
+              <div className="text-xs uppercase tracking-wide text-slate-500 mb-0.5">{isGoodsTour ? "Aflevering" : "Modtageanlæg"}</div>
               <div className="text-slate-800 dark:text-slate-200">{tour.facility}</div>
             </div>
           )}
@@ -13681,10 +13725,10 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
             Fase 15.41 (2026-02-22): Når tour.tour_type === "loes_afhentning"
             vises en MULTI-vægt-UI med "+ Tilføj container"-knap. Total
             beregnes live. */}
-        {askingWeight && !isClaimedByOther && (tour.tour_type === "loes_afhentning") && (
+        {askingWeight && !isClaimedByOther && isMultiLoadTour && (
           <div className="mx-4 mb-2 p-3 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-800" data-testid="mobile-tour-panel-loose-prompt">
             <label className="block text-xs uppercase tracking-wide text-amber-700 dark:text-amber-300 mb-2 font-semibold">
-              Container-vægte (kg) - mindst én påkrævet
+              {cargoLines.length > 1 ? `Vægt pr. læs (kg)${isGoodsTour ? " - valgfri" : " - mindst én påkrævet"}` : "Container-vægte (kg) - mindst én påkrævet"}
             </label>
             <div className="space-y-2">
               {containerWeights.map((w, idx) => {
@@ -13697,7 +13741,7 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
                 const hasServer = !!serverReceipt;
                 return (
                 <div key={idx} className="flex flex-wrap items-center gap-2" data-testid={`loose-weight-row-${idx}`}>
-                  <span className="text-xs font-bold text-amber-800 dark:text-amber-200 w-8 shrink-0">#{idx + 1}</span>
+                  <span className={`text-xs font-bold text-amber-800 dark:text-amber-200 shrink-0 ${cargoLines.length > 1 ? "w-full sm:w-auto sm:max-w-[140px] truncate" : "w-8"}`}>{loadLabel(idx)}</span>
                   <input
                     type="number"
                     inputMode="decimal"
@@ -13847,16 +13891,16 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
               </button>
             </div>
             <p className="text-[10px] text-amber-700 dark:text-amber-300 mt-2 italic">
-              Tryk på den grønne <strong>Afslut</strong>-knap nederst når alle containere er vejet.
+              Tryk på den grønne <strong>Afslut</strong>-knap nederst når alt er vejet.
             </p>
           </div>
         )}
 
         {/* Inline weight prompt - shown when user clicked "Afslut" but no weight yet */}
-        {askingWeight && !isClaimedByOther && (tour.tour_type || "normal") !== "loes_afhentning" && (
+        {askingWeight && !isClaimedByOther && !isMultiLoadTour && (
           <div className="mx-4 mb-2 p-3 rounded-lg bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-300 dark:border-emerald-800" data-testid="mobile-tour-panel-weight-prompt">
             <label className="block text-xs uppercase tracking-wide text-emerald-700 dark:text-emerald-300 mb-1.5 font-semibold">
-              Vægt (kg) - påkrævet for at afslutte
+              {isGoodsTour ? "Vægt (kg) - valgfri" : "Vægt (kg) - påkrævet for at afslutte"}
             </label>
             <div className="flex gap-2">
               <input
@@ -13880,7 +13924,7 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
                 {isSubmittingWeight ? (
                   <><Loader2 className="w-4 h-4 animate-spin" /> Gemmer…</>
                 ) : (
-                  <><CheckCircle2 className="w-4 h-4" /> OK</>
+                  <><CheckCircle2 className="w-4 h-4" /> {isGoodsTour && !(parseFloat(weightInput) > 0) ? "Afslut uden vægt" : "Afslut"}</>
                 )}
               </button>
               <button
@@ -13973,16 +14017,48 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
                 <CheckCircle2 className="w-4 h-4 mt-0.5 flex-shrink-0" />
                 <span>Turen er afsluttet. Forkert tid, hænger eller ventetid? Brug "Ret" ovenfor.</span>
               </div>
-              {(tour.tour_type || "normal") === "normal" && !editingWeight && (
+              {((tour.tour_type || "normal") === "normal" || isMultiLoadTour || isGoodsTour) && !editingWeight && (
                 <button
-                  onClick={() => { setEditWeightVal(tour.weight != null ? String(tour.weight) : ""); setEditingWeight(true); }}
+                  onClick={() => {
+                    setEditWeightVal(tour.weight != null ? String(tour.weight) : "");
+                    if (isMultiLoadTour) {
+                      const cw = Array.isArray(tour.container_weights) ? tour.container_weights.map(String) : [];
+                      setContainerWeights(cw.length ? cw : (cargoLines.length > 1 ? Array(cargoLines.length).fill("") : [""]));
+                    }
+                    setEditingWeight(true);
+                  }}
                   className="w-full px-3 py-2.5 rounded-lg font-semibold text-sm bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700 flex items-center justify-center gap-2"
                   data-testid="mobile-tour-panel-edit-weight-btn"
                 >
                   <Edit2 className="w-4 h-4" /> Ret vægt
                 </button>
               )}
-              {editingWeight && (
+              {editingWeight && isMultiLoadTour && (
+                <div className="px-3 py-2.5 rounded-lg bg-amber-50 border border-amber-300 space-y-2" data-testid="mobile-tour-panel-edit-loads-block">
+                  <label className="block text-xs uppercase tracking-wide text-amber-700 font-semibold">Ret vægt pr. læs (kg)</label>
+                  {containerWeights.map((w, idx) => (
+                    <div key={idx} className="flex items-center gap-2">
+                      <span className="text-xs font-bold text-amber-800 w-28 truncate">{loadLabel(idx)}</span>
+                      <input type="number" inputMode="decimal" min="0" value={w}
+                        onChange={(e) => setContainerWeights(containerWeights.map((x, j) => (j === idx ? e.target.value : x)))}
+                        className="flex-1 px-3 py-2 rounded-lg border-2 border-amber-300 font-mono text-base outline-none focus:border-amber-500" />
+                    </div>
+                  ))}
+                  <div className="flex gap-2">
+                    <button className="flex-1 px-4 py-2.5 bg-amber-500 text-white rounded-lg font-semibold" data-testid="mobile-tour-panel-edit-loads-save"
+                      onClick={async () => {
+                        const clean = containerWeights.map(x => parseFloat(x)).filter(x => Number.isFinite(x) && x >= 0);
+                        try {
+                          await onUpdate?.(tour.id, { container_weights: clean, claimed_by: tour.claimed_by || currentDriverName });
+                          toast.success("Vægte rettet");
+                          setEditingWeight(false);
+                        } catch (_) { /* parent toaster */ }
+                      }}>Gem</button>
+                    <button onClick={() => setEditingWeight(false)} className="px-4 py-2.5 text-slate-500">Annuller</button>
+                  </div>
+                </div>
+              )}
+              {editingWeight && !isMultiLoadTour && (
                 <div className="px-3 py-2.5 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-800" data-testid="mobile-tour-panel-edit-weight-block">
                   <label className="block text-xs uppercase tracking-wide text-amber-700 dark:text-amber-300 mb-1.5 font-semibold">
                     Ret vægt (kg)
@@ -14060,7 +14136,7 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
                 onClick={() => {
                   if (tour.completed) return;
                   const tt = (tour.tour_type || "normal");
-                  if (tt === "loes_afhentning" && askingWeight) {
+                  if ((tt === "loes_afhentning" || isMultiLoadTour) && askingWeight) {
                     // UI er åben - afslut hvis valid
                     handleConfirmLooseWeights();
                     return;
@@ -14736,7 +14812,9 @@ function App() {
   // til). Ingen modal længere - turene vises direkte i hovedlisten så
   // chaufføren kan starte dem fra samme view. Original `date`-felt på
   // turen ændres ikke.
-  const [showPendingInList, setShowPendingInList] = useState(false);
+  // 2026-10-17: Ledige ture fra tidligere dage vises altid (under "Ledige" ›
+  // "Fra tidligere dage") - før lå de bag en skjult "Afventende"-knap.
+  const [showPendingInList, setShowPendingInList] = useState(true);
 
   // Hent dagens stempling-perioder
   const fetchTimeEntries = useCallback(async () => {
@@ -15048,20 +15126,37 @@ function App() {
   }, [driverName]);
   
   // Subscribe to push notifications
-  // Fase 15.23 (2026-02-21): Web-push på chauffør-siden er deaktiveret pr.
-  // brugerkrav - chauffører skal udelukkende få informationer via app-UI'et
-  // og ikke modtage OS-/browser-baserede notifikationer. Vi forsøger
-  // desuden at af-abonnere eksisterende push-subscriptions.
+  // 2026-10-17: Push er slået TIL igen efter ønske (Fase 15.23 slog det fra).
+  // Har chaufføren givet lov, fornyes abonnementet stille ved opstart.
+  // Første gang vises en venlig "Slå til"-boks (iOS kræver et tryk), og på
+  // iPhone/iPad uden hjemmeskærm-installation en kort guide. Chaufføren kan
+  // slå det fra under Profil.
+  const [pushPrompt, setPushPrompt] = useState(null); // null | "ask" | "ios-install"
+  const [pushOn, setPushOn] = useState(true);
   const subscribeToPush = useCallback(async () => {
-    if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
+    const enabled = authUser?.push_enabled !== false;
+    setPushOn(enabled && pushPermission() === "granted");
+    if (!enabled) return;
+    if (await syncPush(driverName, true)) { setPushOn(true); return; }
+    let dismissed = 0;
+    try { dismissed = Number(localStorage.getItem("cf_push_prompt_dismissed") || 0); } catch (_) { /* ignore */ }
+    if (Date.now() - dismissed < 3 * 86400000) return;
+    if (pushSupported() && pushPermission() === "default") setPushPrompt("ask");
+    else if (isIOS() && !isStandalone()) setPushPrompt("ios-install");
+  }, [authUser, driverName]);
+  const dismissPushPrompt = () => {
+    try { localStorage.setItem("cf_push_prompt_dismissed", String(Date.now())); } catch (_) { /* ignore */ }
+    setPushPrompt(null);
+  };
+  const handleTogglePush = async (on) => {
     try {
-      const registration = await navigator.serviceWorker.ready;
-      const existing = await registration.pushManager.getSubscription();
-      if (existing) {
-        try { await existing.unsubscribe(); } catch (_) { /* ignore */ }
-      }
-    } catch (_) { /* ignore */ }
-  }, []);
+      if (on) { await enablePush(driverName); setPushOn(true); setPushPrompt(null); toast.success("Notifikationer er slået til"); }
+      else { await disablePush(); setPushOn(false); toast.success("Notifikationer er slået fra"); }
+    } catch (e) {
+      toast.error(e?.message || "Kunne ikke ændre notifikationer");
+      if (on && isIOS() && !isStandalone()) setPushPrompt("ios-install");
+    }
+  };
   
   // Send message (to admin or another driver)
   const sendChatMessage = async () => {
@@ -15692,13 +15787,14 @@ function App() {
     // (containerWeights array). Mindst én > 0 påkrævet. Backend auto-
     // beregner total `weight` som SUM så de aldrig kommer ud af sync.
     const tourType = (tour.tour_type || "normal");
-    if (nowCompleting && tourType === "loes_afhentning") {
+    const isMultiLoad = tourType === "loes_afhentning" || (tour.cargo_lines || []).length > 1;
+    if (nowCompleting && isMultiLoad && !opts.skipWeight) {
       const incoming = Array.isArray(opts.containerWeights) ? opts.containerWeights : null;
       const existing = Array.isArray(tour.container_weights) ? tour.container_weights : [];
       const finalWeights = incoming && incoming.length > 0 ? incoming : existing;
       const positive = (finalWeights || []).map(w => parseFloat(w)).filter(w => Number.isFinite(w) && w > 0);
       if (positive.length === 0) {
-        toast.error("Indtast mindst én container-vægt før du kan afslutte løs afhentning");
+        toast.error("Indtast mindst én vægt før du kan afslutte turen");
         return { needsWeight: true };
       }
       try {
@@ -15710,7 +15806,7 @@ function App() {
           claimed_by: driverName,
           claimed_by_id: selectedDriver?.id || authUser?.id || "",
         });
-        toast.success("Løs afhentning fuldført!");
+        toast.success(tourType === "loes_afhentning" ? "Løs afhentning fuldført!" : "Tur fuldført!");
         return { ok: true };
       } catch (e) {
         return { error: e };
@@ -15743,13 +15839,16 @@ function App() {
         return { error: e };
       }
     }
-    // Non-normal tour completion path (no weight required) OR opts.skipWeight
+    // Non-normal tour completion path (no weight required) OR opts.skipWeight.
+    // 2026-10-17: Gods-ture kan afsluttes med en valgfri vægt.
     if (nowCompleting) {
       try {
+        const optW = opts.weight != null ? parseFloat(opts.weight) : null;
         await handleUpdateTour(tourId, {
           completed: true,
           on_way: false,
           time: currentTime,
+          ...(optW && optW > 0 ? { weight: optW } : {}),
           claimed_by: driverName,
           claimed_by_id: selectedDriver?.id || authUser?.id || ""
         });
@@ -15886,6 +15985,26 @@ function App() {
   };
 
   // Route optimization handler
+  // 2026-10-17: Optimér chaufførens egne ture fra den plads de fleste hører
+  // til - uden at skulle vælge en plads først (ny TURE-fane).
+  const handleOptimizeFor = async (pladsName, tourIds) => {
+    if (!pladsName || !tourIds?.length) return;
+    setIsOptimizing(true);
+    try {
+      const res = await axios.post(`${API}/optimize-route`, { plads_name: pladsName, tour_ids: tourIds });
+      if (res.data?.optimized) {
+        setRouteOptimization(res.data);
+        toast.success(`Rækkefølge optimeret - ${res.data.tours_with_coordinates}/${res.data.total_tours} ture med placering`);
+      } else {
+        toast.error(res.data?.reason || "Kunne ikke optimere ruten");
+      }
+    } catch (e) {
+      toast.error(formatApiError(e));
+    } finally {
+      setIsOptimizing(false);
+    }
+  };
+
   const handleOptimizeRoute = async () => {
     if (!selectedPlads) { toast.error("Vælg en lokation først"); return; }
     const activeTours = tours.filter(t => t.plads === selectedPlads && !t.is_pause);
@@ -16871,415 +16990,37 @@ function App() {
           eksisterende - ZERO funktionsændring.
           ============================================================ */}
       {activeTab === 'ture' && (
-        <div data-testid="ture-tab-hero" style={{ background: '#f4f4f5' }}>
-          <div className="max-w-3xl mx-auto">
-          {(() => {
-            // Beregn fra eksisterende scope-variabler.
-            const isMine = selectedPlads === "__MINE__";
-            const scopeName = isMine
-              ? (mineSelectedPlads || "Mine ture")
-              : (selectedPlads || "Vælg lokation");
-            const total = filteredActive.length;
-            const completedN = filteredCompleted.length;
-            const onWayN = filteredOnWay.length;
-            const waitingN = filteredWaiting.length;
-            const pct = total > 0 ? Math.round((completedN / total) * 100) : 0;
-            const remaining = Math.max(0, total - completedN);
-            const weightKg = Math.round((filteredWeight || 0) * 10) / 10;
-            // SVG ring math (radius 38, circumference ~239)
-            const RING_C = 239;
-            const ringOffset = RING_C - (pct / 100) * RING_C;
-            // Næste ikke-færdige tur
-            const nextTour = filteredActive.find(t => !t.completed) || null;
-            const nextLabel = nextTour ? `${nextTour.fraction || "Tur"}${nextTour.customer_name ? " · " + nextTour.customer_name : ""}` : "";
-            // Timer i dag fra timeEntries
-            const workMinToday = (timeEntries || [])
-              .filter(e => (e.slice_type || "work") !== "pause")
-              .reduce((sum, e) => sum + (e.duration_minutes || 0), 0);
-            const wH = Math.floor(workMinToday / 60);
-            const wM = workMinToday % 60;
-            const timerStr = `${wH}:${String(wM).padStart(2, "0")}`;
-            const unreadCount = (driverMessages || []).filter(m => m.from_admin && !m.read).length;
-            // Dato pænt
-            const dateLabel = (() => {
-              try {
-                const d = new Date(reportDate + "T00:00:00");
-                return d.toLocaleDateString("da-DK", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
-              } catch (_) { return reportDate; }
-            })();
-            // Aktive (ikke-færdige) i dag
-            const activeRemaining = filteredActive.filter(t => !t.completed).length;
-            return (
-              <div style={{ padding: '12px 14px 16px' }}>
-                {/* === Brand strip === */}
-                <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
-                  <div className="flex items-center gap-3 min-w-0 flex-1">
-                    <div className="flex items-center justify-center flex-shrink-0" style={{ width: 38, height: 38, borderRadius: 12, background: '#111111' }}>
-                      <Truck style={{ width: 18, height: 18, color: '#f97316' }} />
-                    </div>
-                    <div className="min-w-0">
-                      <h1 className="font-heading font-black tracking-tight leading-none truncate" style={{ fontSize: 18, color: '#111111' }}>
-                        Container<span style={{ color: '#f97316' }}>Flow</span>
-                      </h1>
-                      <p className="font-bold uppercase truncate" style={{ fontSize: 9, letterSpacing: 1, color: '#9ca3af', marginTop: 3 }}>{driverName}</p>
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => setShowChat(true)}
-                    className="relative flex items-center justify-center flex-shrink-0"
-                    style={{ width: 38, height: 38, borderRadius: 12, background: '#ffffff', border: '0.5px solid #e5e7eb' }}
-                    data-testid="ture-bell-btn"
-                  >
-                    <MessageCircle style={{ width: 17, height: 17, color: '#6b7280' }} />
-                    {unreadCount > 0 && (
-                      <span className="absolute" style={{ top: 8, right: 8, width: 8, height: 8, borderRadius: 999, background: '#f97316', animation: 'pulse 1.5s infinite' }} />
-                    )}
-                  </button>
-                </div>
-
-                {/* === Dato-navigation + Log ud (Beskeder fjernet - bell-ikon
-                    øverst dækker det). === */}
-                <div className="grid gap-2.5" style={{ gridTemplateColumns: 'auto 1fr auto auto', marginBottom: 14 }} data-testid="ture-date-row">
-                  <button
-                    onClick={() => navigateDate(-1)}
-                    className="flex items-center justify-center"
-                    style={{ background: '#ffffff', borderRadius: 12, border: '0.5px solid #e5e7eb', width: 44, minHeight: 48 }}
-                    data-testid="ture-date-prev"
-                    title="Forrige dag"
-                  >
-                    <ChevronLeft style={{ width: 16, height: 16, color: '#374151' }} />
-                  </button>
-                  <input
-                    type="date"
-                    value={reportDate}
-                    onChange={(e) => setReportDate(e.target.value)}
-                    className="font-bold text-center bg-white"
-                    style={{ borderRadius: 12, border: '0.5px solid #e5e7eb', padding: '0 8px', fontSize: 12, color: '#111111', minHeight: 48 }}
-                    data-testid="ture-date-input"
-                  />
-                  <button
-                    onClick={() => navigateDate(1)}
-                    className="flex items-center justify-center"
-                    style={{ background: '#ffffff', borderRadius: 12, border: '0.5px solid #e5e7eb', width: 44, minHeight: 48 }}
-                    data-testid="ture-date-next"
-                    title="Næste dag"
-                  >
-                    <ChevronRight style={{ width: 16, height: 16, color: '#374151' }} />
-                  </button>
-                  <button
-                    onClick={handleLogoutDriver}
-                    className="flex items-center justify-center gap-2"
-                    style={{ background: '#ffffff', borderRadius: 12, padding: '0 16px', border: '0.5px solid #e5e7eb', minHeight: 48 }}
-                    data-testid="ture-logud-btn"
-                  >
-                    <LogOut style={{ width: 15, height: 15, color: '#374151' }} />
-                    <span className="font-extrabold uppercase" style={{ fontSize: 11, letterSpacing: 0.4, color: '#111111' }}>Log ud</span>
-                  </button>
-                </div>
-
-                {/* === STOR GRØN HERO === */}
-                <div
-                  className="rounded-3xl shadow-md relative overflow-hidden"
-                  style={{
-                    background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
-                    padding: 18,
-                    marginBottom: 12,
-                  }}
-                  data-testid="ture-big-hero"
-                >
-                  <div className="flex items-center gap-4">
-                    {/* SVG ring */}
-                    <div style={{ position: 'relative', width: 96, height: 96, flexShrink: 0 }}>
-                      <svg width="96" height="96" viewBox="0 0 96 96">
-                        <circle cx="48" cy="48" r="38" fill="none" stroke="rgba(255,255,255,0.25)" strokeWidth="7" />
-                        <circle
-                          cx="48" cy="48" r="38" fill="none"
-                          stroke="#ffffff" strokeWidth="7" strokeLinecap="round"
-                          strokeDasharray={RING_C}
-                          strokeDashoffset={ringOffset}
-                          transform="rotate(-90 48 48)"
-                          style={{ transition: 'stroke-dashoffset 0.5s ease' }}
-                        />
-                      </svg>
-                      <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                        <span className="font-black" style={{ fontSize: 22, color: '#ffffff', lineHeight: 1 }} data-testid="ture-hero-pct">{pct}%</span>
-                      </div>
-                    </div>
-                    {/* Tekst */}
-                    <div className="flex-1 min-w-0">
-                      <p className="font-bold uppercase" style={{ fontSize: 10, letterSpacing: 1, color: 'rgba(255,255,255,0.85)' }}>God dag · {driverName}</p>
-                      <p className="font-black leading-tight" style={{ fontSize: 26, color: '#ffffff', marginTop: 4, letterSpacing: '-0.5px' }} data-testid="ture-hero-remaining">
-                        {remaining} {remaining === 1 ? "tur" : "ture"} tilbage
-                      </p>
-                      <div className="flex flex-wrap gap-1.5" style={{ marginTop: 8 }}>
-                        <span className="font-bold" style={{ fontSize: 10, color: '#ffffff', background: 'rgba(255,255,255,0.18)', padding: '3px 9px', borderRadius: 999 }}>
-                          {total} ture
-                        </span>
-                        <span className="font-bold" style={{ fontSize: 10, color: '#ffffff', background: 'rgba(255,255,255,0.18)', padding: '3px 9px', borderRadius: 999 }}>
-                          {weightKg >= 1000 ? `${(weightKg / 1000).toFixed(1)}t` : `${Math.round(weightKg)} kg`}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                  {/* Næste advarsel */}
-                  {nextTour && (
-                    <div
-                      className="flex items-center gap-2 rounded-full"
-                      style={{
-                        background: 'rgba(255,255,255,0.18)',
-                        padding: '8px 12px',
-                        marginTop: 12,
-                      }}
-                      data-testid="ture-hero-next"
-                    >
-                      <AlertTriangle style={{ width: 14, height: 14, color: '#ffffff', flexShrink: 0 }} />
-                      <span className="font-bold truncate" style={{ fontSize: 11, color: '#ffffff' }}>
-                        Næste: {nextLabel}
-                      </span>
-                    </div>
-                  )}
-                </div>
-
-                {/* === 3 stat cards === */}
-                <div className="grid grid-cols-3 gap-2.5" style={{ marginBottom: 12 }}>
-                  <div className="rounded-2xl" style={{ background: '#ffffff', border: '0.5px solid #e5e7eb', padding: 12 }} data-testid="ture-stat-weight">
-                    <div className="flex items-center justify-center" style={{ width: 30, height: 30, borderRadius: 9, background: '#ecfdf5', marginBottom: 6 }}>
-                      <BarChart3 style={{ width: 15, height: 15, color: '#10b981' }} />
-                    </div>
-                    <p className="font-black leading-none" style={{ fontSize: 19, color: '#10b981' }} data-testid="ture-stat-weight-value">
-                      {weightKg >= 1000 ? `${(weightKg / 1000).toFixed(1)}t` : `${Math.round(weightKg)} kg`}
-                    </p>
-                    <p className="font-bold uppercase" style={{ fontSize: 9, letterSpacing: 0.6, color: '#9ca3af', marginTop: 4 }}>Vægt</p>
-                  </div>
-                  <div className="rounded-2xl" style={{ background: '#ffffff', border: '0.5px solid #e5e7eb', padding: 12 }} data-testid="ture-stat-tours">
-                    <div className="flex items-center justify-center" style={{ width: 30, height: 30, borderRadius: 9, background: '#f4f4f5', marginBottom: 6 }}>
-                      <Truck style={{ width: 15, height: 15, color: '#374151' }} />
-                    </div>
-                    <p className="font-black leading-none" style={{ fontSize: 19, color: '#111111' }} data-testid="ture-stat-tours-value">{completedN}/{total}</p>
-                    <p className="font-bold uppercase" style={{ fontSize: 9, letterSpacing: 0.6, color: '#9ca3af', marginTop: 4 }}>Ture</p>
-                  </div>
-                  <div className="rounded-2xl" style={{ background: '#ffffff', border: '0.5px solid #e5e7eb', padding: 12 }} data-testid="ture-stat-timer">
-                    <div className="flex items-center justify-center" style={{ width: 30, height: 30, borderRadius: 9, background: '#f4f4f5', marginBottom: 6 }}>
-                      <Clock style={{ width: 15, height: 15, color: '#374151' }} />
-                    </div>
-                    <p className="font-black leading-none" style={{ fontSize: 19, color: '#111111' }} data-testid="ture-stat-timer-value">{timerStr}</p>
-                    <p className="font-bold uppercase" style={{ fontSize: 9, letterSpacing: 0.6, color: '#9ca3af', marginTop: 4 }}>Timer</p>
-                  </div>
-                </div>
-
-                {/* === Mine ture card med dato + aktiv badge === */}
-                <div className="rounded-2xl" style={{ background: '#ffffff', border: '0.5px solid #e5e7eb', padding: 14, marginBottom: 12 }} data-testid="ture-mine-card">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex-1 min-w-0">
-                      <p className="font-black" style={{ fontSize: 18, color: '#111111', letterSpacing: '-0.3px' }} data-testid="ture-mine-scope">{scopeName}</p>
-                      <p className="font-medium capitalize" style={{ fontSize: 11, color: '#9ca3af', marginTop: 2 }}>{dateLabel}</p>
-                    </div>
-                    {activeRemaining > 0 ? (
-                      <span className="font-extrabold flex-shrink-0" style={{ fontSize: 11, color: '#ffffff', background: '#f97316', padding: '5px 11px', borderRadius: 999 }} data-testid="ture-mine-active-badge">
-                        {activeRemaining} aktiv
-                      </span>
-                    ) : (
-                      <span className="font-extrabold flex-shrink-0" style={{ fontSize: 11, color: '#ffffff', background: '#10b981', padding: '5px 11px', borderRadius: 999 }}>
-                        Alle færdige
-                      </span>
-                    )}
-                  </div>
-                  <div style={{ width: '100%', height: 7, background: '#f3f4f6', borderRadius: 999, overflow: 'hidden', marginTop: 12 }}>
-                    <div style={{ width: `${pct}%`, height: '100%', background: pct >= 100 ? '#10b981' : 'linear-gradient(90deg, #10b981 0%, #34d399 100%)', borderRadius: 999, transition: 'width 0.4s ease' }} />
-                  </div>
-                  <p className="font-medium text-right" style={{ fontSize: 11, color: '#9ca3af', marginTop: 6 }}>{completedN} af {total} · {pct}%</p>
-                </div>
-
-                {/* === Søgning + Afventende toggle === */}
-                <div className="grid gap-2" style={{ gridTemplateColumns: '1fr auto', marginBottom: 10 }}>
-                  <div className="flex items-center gap-2 rounded-xl" style={{ background: '#ffffff', border: '0.5px solid #e5e7eb', padding: '10px 12px' }} data-testid="ture-search-wrap">
-                    <Search style={{ width: 14, height: 14, color: '#9ca3af' }} />
-                    <input
-                      type="text"
-                      value={tourSearch}
-                      onChange={(e) => setTourSearch(e.target.value)}
-                      placeholder="Søg fraktion…"
-                      className="flex-1 bg-transparent outline-none min-w-0"
-                      style={{ fontSize: 12, color: '#111111' }}
-                      data-testid="ture-search-input"
-                    />
-                    {tourSearch && (
-                      <button onClick={() => setTourSearch("")} className="flex-shrink-0" data-testid="ture-search-clear">
-                        <X style={{ width: 13, height: 13, color: '#9ca3af' }} />
-                      </button>
-                    )}
-                  </div>
-                  <button
-                    onClick={() => setShowPendingInList(v => !v)}
-                    className="flex items-center justify-center gap-1.5 rounded-xl"
-                    style={{
-                      background: showPendingInList ? '#fff7ed' : '#ffffff',
-                      border: showPendingInList ? '1.5px solid #f97316' : '0.5px solid #e5e7eb',
-                      padding: '10px 14px',
-                      minHeight: 42,
-                    }}
-                    data-testid="ture-pending-toggle"
-                  >
-                    <ListFilter style={{ width: 14, height: 14, color: '#f97316' }} />
-                    <span className="font-extrabold" style={{ fontSize: 11, color: '#f97316' }}>Afventende</span>
-                  </button>
-                </div>
-
-                {/* === Mine ture / Lokation switcher === */}
-                <div className="flex items-center gap-2 rounded-2xl" style={{ background: '#ffffff', border: '0.5px solid #e5e7eb', padding: 4, marginBottom: 10 }} data-testid="ture-scope-switcher">
-                  <button
-                    onClick={() => { setSelectedPlads("__MINE__"); setMineSelectedPlads(""); setTurePladsPickerOpen(false); }}
-                    className="flex-1 flex items-center justify-center gap-1.5"
-                    style={{
-                      padding: '10px 6px',
-                      borderRadius: 12,
-                      background: isMine ? '#111111' : 'transparent',
-                      minHeight: 42,
-                    }}
-                    data-testid="ture-switch-mine"
-                  >
-                    <Users style={{ width: 14, height: 14, color: isMine ? '#f97316' : '#6b7280' }} />
-                    <span className="font-extrabold" style={{ fontSize: 12, color: isMine ? '#ffffff' : '#374151' }}>Mine ture</span>
-                  </button>
-                  <button
-                    onClick={() => setTurePladsPickerOpen(v => !v)}
-                    className="flex-1 flex items-center justify-center gap-1.5"
-                    style={{
-                      padding: '10px 6px',
-                      borderRadius: 12,
-                      background: !isMine && selectedPlads ? '#111111' : 'transparent',
-                      minHeight: 42,
-                    }}
-                    data-testid="ture-switch-lokation"
-                  >
-                    <MapPin style={{ width: 14, height: 14, color: !isMine && selectedPlads ? '#f97316' : '#6b7280' }} />
-                    <span className="font-extrabold truncate" style={{ fontSize: 12, color: !isMine && selectedPlads ? '#ffffff' : '#374151' }}>
-                      {!isMine && selectedPlads ? selectedPlads : "Lokation"}
-                    </span>
-                    <ChevronDown style={{ width: 13, height: 13, color: !isMine && selectedPlads ? '#ffffff' : '#9ca3af', flexShrink: 0, transform: turePladsPickerOpen ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s' }} />
-                  </button>
-                </div>
-
-                {/* Inline Lokation picker (åbnes via "Lokation"-knappen) */}
-                {turePladsPickerOpen && (
-                  <div className="rounded-2xl" style={{ background: '#ffffff', border: '0.5px solid #e5e7eb', marginBottom: 10, maxHeight: 280, overflowY: 'auto' }} data-testid="ture-plads-picker">
-                    <button
-                      onClick={() => { setSelectedPlads("__MINE__"); setMineSelectedPlads(""); setTurePladsPickerOpen(false); }}
-                      className="w-full flex items-center justify-between gap-2"
-                      style={{ padding: '12px 14px', background: selectedPlads === "__MINE__" ? '#fff7ed' : 'transparent', borderBottom: '0.5px solid #f1f1f1', minHeight: 48 }}
-                      data-testid="ture-plads-option-mine"
-                    >
-                      <div className="flex items-center gap-2 min-w-0">
-                        <Users style={{ width: 14, height: 14, color: selectedPlads === "__MINE__" ? '#f97316' : '#9ca3af', flexShrink: 0 }} />
-                        <span className="font-bold truncate" style={{ fontSize: 13, color: selectedPlads === "__MINE__" ? '#c2410c' : '#111111' }}>Mine ture (alle pladser)</span>
-                      </div>
-                      {selectedPlads === "__MINE__" && <Check style={{ width: 15, height: 15, color: '#f97316', flexShrink: 0 }} />}
-                    </button>
-                    {pladsList.length === 0 ? (
-                      <p style={{ fontSize: 11, color: '#9ca3af', padding: 14 }}>Ingen pladser tilgængelige</p>
-                    ) : pladsList.map(p => {
-                      const selected = selectedPlads === p.name;
-                      return (
-                        <button
-                          key={p.id || p.name}
-                          onClick={() => { setSelectedPlads(p.name); setMineSelectedPlads(""); setTurePladsPickerOpen(false); }}
-                          className="w-full flex items-center justify-between gap-2"
-                          style={{ padding: '12px 14px', background: selected ? '#fff7ed' : 'transparent', borderBottom: '0.5px solid #f1f1f1', minHeight: 48 }}
-                          data-testid={`ture-plads-option-${p.name}`}
-                        >
-                          <div className="flex items-center gap-2 min-w-0">
-                            <MapPin style={{ width: 14, height: 14, color: selected ? '#f97316' : '#9ca3af', flexShrink: 0 }} />
-                            <span className="font-bold truncate" style={{ fontSize: 13, color: selected ? '#c2410c' : '#111111' }}>{p.name}</span>
-                          </div>
-                          {selected && <Check style={{ width: 15, height: 15, color: '#f97316', flexShrink: 0 }} />}
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-
-                {/* === Optimer rute knap (skjul hvis ingen plads) === */}
-                {(selectedPlads && selectedPlads !== "__MINE__") && (
-                  <button
-                    onClick={handleOptimizeRoute}
-                    disabled={isOptimizing}
-                    className="w-full flex items-center justify-center gap-2 rounded-xl"
-                    style={{
-                      background: routeOptimization?.optimized ? '#ecfdf5' : '#ffffff',
-                      border: routeOptimization?.optimized ? '1.5px solid #10b981' : '1.5px solid #f97316',
-                      padding: '12px 14px',
-                      marginBottom: 14,
-                      opacity: isOptimizing ? 0.6 : 1,
-                      minHeight: 46,
-                    }}
-                    data-testid="ture-optimize-btn"
-                  >
-                    <Navigation style={{ width: 15, height: 15, color: routeOptimization?.optimized ? '#10b981' : '#f97316' }} />
-                    <span className="font-extrabold" style={{ fontSize: 12, color: routeOptimization?.optimized ? '#10b981' : '#f97316' }}>
-                      {isOptimizing ? "Optimerer rute…" : routeOptimization?.optimized ? "Rute optimeret" : "Optimer rute"}
-                    </span>
-                  </button>
-                )}
-
-                {/* === TUREOVERSIGT header === */}
-                <div className="flex items-center justify-between" style={{ marginBottom: 6, paddingLeft: 4 }} data-testid="ture-list-heading">
-                  <h2 className="font-black uppercase" style={{ fontSize: 12, letterSpacing: 1, color: '#374151' }}>Tureoversigt</h2>
-                  <span className="font-bold" style={{ fontSize: 10, color: '#6b7280', background: '#ffffff', padding: '3px 10px', borderRadius: 999, border: '0.5px solid #e5e7eb' }}>{total} i dag</span>
-                </div>
-
-                {/* === Tour list - viser MobileTourCard med ALLE detaljer
-                    (opgavetype, kapacitet, prioritet, kunde, bestillingsdato,
-                    bestillingstid, kvitteringer, container-nummer, etc.) og
-                    fuld funktionalitet (claim, on-way, complete, edit,
-                    scanner) via eksisterende handlers. === */}
-                <div className="space-y-2.5" data-testid="ture-list-cards">
-                  {visibleTours.length === 0 ? (
-                    <div className="text-center rounded-2xl bg-white border border-slate-200" style={{ padding: '32px 16px' }} data-testid="ture-empty">
-                      <Truck style={{ width: 28, height: 28, color: '#94a3b8', margin: '0 auto 8px' }} />
-                      <p className="font-bold" style={{ fontSize: 13, color: '#475569' }}>
-                        {selectedPlads ? "Ingen ture matcher" : "Vælg en lokation eller 'Mine ture' for at se ture"}
-                      </p>
-                    </div>
-                  ) : visibleTours.map((tour, idx) => (
-                    <DriverTourCard
-                      key={tour.id || idx}
-                      tour={tour}
-                      index={idx}
-                      routeInfo={getRouteInfo(tour.id)}
-                      unread={driverTourUnread[tour.id] || 0}
-                      onStart={(t) => handleToggleOnWay(t.id)}
-                      onFinish={(t) => {
-                        // Vægt kræves for "afhent container" og "løs afhentning" -
-                        // åbn panelet hvor den indtastes. Andre opgaver afsluttes direkte.
-                        const tt = t.tour_type || "normal";
-                        if (tt === "normal" || tt === "loes_afhentning") setSelectedTourForPanel(t);
-                        else handleToggleComplete(t.id);
-                      }}
-                      onOpen={(t) => setSelectedTourForPanel(t)}
-                      onChat={(t) => setChatTour(t)}
-                    />
-                  ))}
-                </div>
-
-                {/* Vis færdiggjorte toggle */}
-                {filteredCompleted.length > 0 && (
-                  <button
-                    onClick={() => setShowCompletedDriver(v => !v)}
-                    className="w-full flex items-center justify-center gap-2"
-                    style={{ background: 'transparent', padding: '12px 14px', marginTop: 8 }}
-                    data-testid="ture-show-completed-toggle"
-                  >
-                    <span className="font-bold" style={{ fontSize: 11, color: '#6b7280' }}>
-                      {showCompletedDriver ? "Skjul færdiggjorte" : `Vis ${filteredCompleted.length} færdiggjorte`}
-                    </span>
-                    <ChevronDown style={{ width: 12, height: 12, color: '#9ca3af', transform: showCompletedDriver ? 'rotate(180deg)' : 'rotate(0deg)' }} />
-                  </button>
-                )}
-              </div>
-            );
-          })()}
-          </div>
-        </div>
+        <DriverTodayView
+          tours={tours}
+          myId={selectedDriver?.id || authUser?.id || ""}
+          myName={driverName || authUser?.name || ""}
+          reportDate={reportDate}
+          setReportDate={setReportDate}
+          onPrevDay={() => navigateDate(-1)}
+          onNextDay={() => navigateDate(1)}
+          customers={driverCustomers}
+          activeCustomer={activeCustomer}
+          onSwitchCustomer={handleSwitchCustomer}
+          unread={driverTourUnread}
+          messagesUnread={(driverMessages || []).filter(m => m.from_admin && !m.read).length}
+          onMessages={() => setShowChat(true)}
+          onStart={(t) => handleToggleOnWay(t.id)}
+          onFinish={(t) => {
+            // Vægt (eller flere vægte) indtastes i tur-panelet. Opgaver uden
+            // vægt (fx byt container, værksted) afsluttes direkte med bekræftelse.
+            const tt = t.tour_type || "normal";
+            const multi = tt === "loes_afhentning" || (t.cargo_lines || []).length > 1;
+            if (tt === "normal" || multi || t.tour_kind === "goods") setSelectedTourForPanel(t);
+            else if (window.confirm(`Afslut "${TOUR_TYPE_LABELS[tt] || tt}"?\n\n${t.fraction || ""}`)) handleToggleComplete(t.id);
+          }}
+          onOpen={(t) => setSelectedTourForPanel(t)}
+          onChat={(t) => setChatTour(t)}
+          getRouteInfo={getRouteInfo}
+          onOptimize={handleOptimizeFor}
+          optimizing={isOptimizing}
+          workedMin={(timeEntries || []).filter(e => e && !e.deleted && e.date === reportDate && (e.slice_type || "work") !== "pause")
+            .reduce((sum, e) => sum + (e.duration_minutes || 0), 0)}
+        />
       )}
       {(() => {
         // Beregn dagens worked + pause status fra timeEntries
@@ -17522,137 +17263,102 @@ function App() {
             )}
 
             {/* ===== PROFIL TAB (lys) ===== */}
-            {activeTab === 'profil' && (
-              <div className="fixed inset-0 z-40 overflow-y-auto" style={{ background: '#f4f4f5', paddingBottom: '76px' }} data-testid="profil-tab">
-                <div className="max-w-md mx-auto">
-                {/* Header (lys) */}
-                <div className="flex items-center justify-between" style={{ padding: '12px 16px', background: '#ffffff', borderBottom: '0.5px solid #ebebeb' }}>
-                  <div className="flex items-center gap-2.5">
-                    <div className="flex items-center justify-center flex-shrink-0" style={{ width: 28, height: 28, borderRadius: 8, background: '#111111' }}>
-                      <Truck style={{ width: 14, height: 14, color: '#ffffff' }} />
+            {activeTab === 'profil' && (() => {
+              // 2026-10-17: Profil samler det chaufføren indstiller: hvem man kører
+              // for, vogn, hænger, notifikationer og log ud (før manglede både
+              // kunde-skift, hænger og log ud her).
+              const Row = ({ icon: Icon, label, value, onClick, open, testid }) => (
+                <button onClick={onClick} className="w-full flex items-center gap-3 px-4 min-h-[60px] text-left active:bg-slate-50" data-testid={testid}>
+                  <span className="w-9 h-9 rounded-xl bg-slate-100 flex items-center justify-center shrink-0"><Icon className="w-[18px] h-[18px] text-slate-600" /></span>
+                  <span className="flex-1 min-w-0"><span className="block text-[11px] text-slate-400">{label}</span><span className="block text-[15px] font-bold text-slate-900 truncate">{value}</span></span>
+                  <ChevronDown className={`w-4 h-4 text-slate-300 transition-transform ${open ? "rotate-180" : ""}`} />
+                </button>
+              );
+              const Option = ({ on, label, onClick, testid }) => (
+                <button onClick={onClick} className={`w-full flex items-center justify-between gap-2 px-5 min-h-[48px] text-left border-t border-slate-100 ${on ? "bg-orange-50" : "active:bg-slate-50"}`} data-testid={testid}>
+                  <span className={`text-[14px] font-semibold truncate ${on ? "text-orange-700" : "text-slate-800"}`}>{label}</span>
+                  {on && <Check className="w-4 h-4 text-orange-600 shrink-0" />}
+                </button>
+              );
+              const trailerLabel = (trailersList || []).find(t => t.id === activeTrailerId)?.number || "Ingen hænger";
+              return (
+              <div className="fixed inset-0 z-40 overflow-y-auto bg-slate-100" style={{ paddingBottom: 96, paddingTop: "env(safe-area-inset-top)" }} data-testid="profil-tab">
+                <div className="max-w-md mx-auto px-4 pt-5 space-y-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-12 h-12 rounded-2xl bg-slate-900 text-white flex items-center justify-center text-lg font-extrabold">{(driverName || "?").charAt(0).toUpperCase()}</div>
+                    <div className="min-w-0">
+                      <p className="text-lg font-extrabold text-slate-900 truncate" data-testid="profil-driver-name">{driverName || "-"}</p>
+                      <p className="text-sm text-slate-500 truncate">{authUser?.company_name || "Chauffør"}</p>
                     </div>
+                  </div>
+
+                  {(driverCustomers || []).length > 1 && (
+                    <div className="rounded-2xl bg-white border border-slate-200 overflow-hidden">
+                      <Row icon={Building2} label="Kører for" value={activeCustomer?.name || "Vælg kunde"} open={profilPicker === 'customer'}
+                        onClick={() => setProfilPicker(profilPicker === 'customer' ? null : 'customer')} testid="profil-customer" />
+                      {profilPicker === 'customer' && driverCustomers.map(c => (
+                        <Option key={c.id} on={activeCustomer?.id === c.id} label={c.name}
+                          onClick={() => { setProfilPicker(null); if (activeCustomer?.id !== c.id) handleSwitchCustomer(c); }} />
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="rounded-2xl bg-white border border-slate-200 overflow-hidden divide-y divide-slate-100">
                     <div>
-                      <h1 className="font-heading font-black tracking-tight leading-none" style={{ fontSize: 15, color: '#111111' }}>
-                        Container<span style={{ color: '#f97316' }}>Flow</span>
-                      </h1>
-                      <p className="font-bold uppercase mt-1" style={{ fontSize: 8, letterSpacing: 1, color: '#9ca3af' }}>{driverName}</p>
+                      <Row icon={Truck} label="Vognnummer" value={vehicleReg || "Vælg vogn"} open={profilPicker === 'vehicle'}
+                        onClick={() => setProfilPicker(profilPicker === 'vehicle' ? null : 'vehicle')} testid="profil-vehicle" />
+                      {profilPicker === 'vehicle' && (
+                        <div className="max-h-64 overflow-y-auto" data-testid="profil-vehicle-picker">
+                          {vehiclesList.length === 0 && <p className="px-5 py-3 text-sm text-slate-400 border-t border-slate-100">Ingen vogne oprettet</p>}
+                          {vehiclesList.map(v => {
+                            const label = v.number || v.registration_number || v.vehicle_number || v.name || `Vogn ${(v.id || "").slice(0, 6)}`;
+                            return <Option key={v.id || label} on={vehicleReg === label} label={label} testid={`profil-vehicle-option-${label}`}
+                              onClick={() => { setVehicleReg(label); setProfilPicker(null); toast.success(`Vognnummer skiftet til ${label}`); }} />;
+                          })}
+                        </div>
+                      )}
                     </div>
+                    {(trailersList || []).length > 0 && (
+                      <div>
+                        <Row icon={Package2} label="Hænger" value={trailerLabel} open={profilPicker === 'trailer'}
+                          onClick={() => setProfilPicker(profilPicker === 'trailer' ? null : 'trailer')} testid="profil-trailer" />
+                        {profilPicker === 'trailer' && (
+                          <div className="max-h-64 overflow-y-auto">
+                            <Option on={!activeTrailerId} label="Ingen hænger" onClick={() => { setProfilPicker(null); handleChangeTrailer(""); }} />
+                            {trailersList.map(t => <Option key={t.id} on={activeTrailerId === t.id} label={t.number || t.name} onClick={() => { setProfilPicker(null); handleChangeTrailer(t.id); }} />)}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
-                  <button onClick={() => setShowChat(true)} className="relative flex items-center justify-center" style={{ width: 32, height: 32, borderRadius: 10, background: '#ffffff', border: '0.5px solid #e5e7eb' }} data-testid="profil-tab-bell">
-                    <MessageCircle style={{ width: 16, height: 16, color: '#6b7280' }} />
-                    {unreadCount > 0 && <span className="absolute" style={{ top: 6, right: 6, width: 8, height: 8, borderRadius: 999, background: '#f97316' }} />}
-                  </button>
-                </div>
 
-                {/* Indhold */}
-                <div style={{ padding: '12px 16px' }}>
-                  <p className="font-extrabold uppercase" style={{ fontSize: 10, letterSpacing: 0.8, color: '#9ca3af', marginTop: 8 }}>CHAUFFØR</p>
-                  <div style={{ background: '#ffffff', borderRadius: 12, border: '0.5px solid #ededed', padding: 12, marginTop: 6 }}>
+                  <div className="rounded-2xl bg-white border border-slate-200 px-4 py-3.5" data-testid="profil-push">
                     <div className="flex items-center gap-3">
-                      <div className="flex items-center justify-center" style={{ width: 32, height: 32, borderRadius: 8, background: '#f4f4f5' }}>
-                        <Users style={{ width: 16, height: 16, color: '#374151' }} />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p style={{ fontSize: 9, color: '#9ca3af' }}>Navn</p>
-                        <p className="font-extrabold truncate" style={{ fontSize: 13, color: '#111111' }} data-testid="profil-driver-name">{driverName || "-"}</p>
-                      </div>
+                      <span className="w-9 h-9 rounded-xl bg-slate-100 flex items-center justify-center shrink-0"><Bell className="w-[18px] h-[18px] text-slate-600" /></span>
+                      <span className="flex-1 min-w-0">
+                        <span className="block text-[15px] font-bold text-slate-900">Notifikationer</span>
+                        <span className="block text-[12px] text-slate-500">Nye ture, haster, ændringer og beskeder</span>
+                      </span>
+                      <button role="switch" aria-checked={pushOn} onClick={() => handleTogglePush(!pushOn)} data-testid="profil-push-toggle"
+                        className={`w-[52px] h-[30px] rounded-full relative transition-colors shrink-0 ${pushOn ? "bg-emerald-500" : "bg-slate-300"}`}>
+                        <span className={`absolute top-[3px] w-6 h-6 rounded-full bg-white shadow transition-all ${pushOn ? "left-[25px]" : "left-[3px]"}`} />
+                      </button>
                     </div>
-                  </div>
-
-                  <p className="font-extrabold uppercase" style={{ fontSize: 10, letterSpacing: 0.8, color: '#9ca3af', marginTop: 20 }}>KØRETØJ</p>
-                  <div style={{ background: '#ffffff', borderRadius: 12, border: '0.5px solid #ededed', marginTop: 6 }}>
-                    <button onClick={() => setProfilPicker(profilPicker === 'vehicle' ? null : 'vehicle')} className="w-full flex items-center gap-3" style={{ padding: 12, borderBottom: '0.5px solid #f1f1f1', minHeight: 56 }} data-testid="profil-vehicle">
-                      <div className="flex items-center justify-center flex-shrink-0" style={{ width: 32, height: 32, borderRadius: 8, background: '#f4f4f5' }}>
-                        <Truck style={{ width: 16, height: 16, color: '#374151' }} />
-                      </div>
-                      <div className="flex-1 min-w-0 text-left">
-                        <p style={{ fontSize: 9, color: '#9ca3af' }}>Vognnummer</p>
-                        <p className="font-extrabold truncate" style={{ fontSize: 13, color: '#111111' }}>{vehicleReg || "Vælg vogn"}</p>
-                      </div>
-                      <ChevronDown style={{ width: 16, height: 16, color: '#d1d5db', transform: profilPicker === 'vehicle' ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s' }} />
-                    </button>
-                    {/* Inline vehicle picker */}
-                    {profilPicker === 'vehicle' && (
-                      <div style={{ borderBottom: '0.5px solid #f1f1f1', maxHeight: 240, overflowY: 'auto' }} data-testid="profil-vehicle-picker">
-                        {vehiclesList.length === 0 ? (
-                          <p style={{ fontSize: 11, color: '#9ca3af', padding: 12 }}>Ingen vogne tilgængelige</p>
-                        ) : vehiclesList.map(v => {
-                          const label = v.number || v.registration_number || v.vehicle_number || v.name || `Vogn ${(v.id || "").slice(0,6)}`;
-                          const selected = vehicleReg === label;
-                          return (
-                            <button
-                              key={v.id || label}
-                              onClick={() => { setVehicleReg(label); setProfilPicker(null); toast.success(`Vognnummer skiftet til ${label}`); }}
-                              className="w-full flex items-center justify-between gap-2"
-                              style={{ padding: '12px 14px', background: selected ? '#fff7ed' : 'transparent', borderTop: '0.5px solid #f4f4f5', minHeight: 48 }}
-                              data-testid={`profil-vehicle-option-${label}`}
-                            >
-                              <div className="flex items-center gap-2 min-w-0">
-                                <Truck style={{ width: 14, height: 14, color: selected ? '#f97316' : '#9ca3af', flexShrink: 0 }} />
-                                <span className="font-bold truncate" style={{ fontSize: 13, color: selected ? '#c2410c' : '#111111' }}>{label}</span>
-                              </div>
-                              {selected && <Check style={{ width: 15, height: 15, color: '#f97316', flexShrink: 0 }} />}
-                            </button>
-                          );
-                        })}
-                      </div>
+                    {isIOS() && !isStandalone() && (
+                      <p className="mt-2 text-[12px] text-amber-800 bg-amber-50 rounded-lg px-3 py-2">På iPhone/iPad virker notifikationer kun når appen er lagt på hjemmeskærmen: tryk Del-ikonet i Safari og vælg "Føj til hjemmeskærm". Åbn så appen derfra.</p>
                     )}
-                    <button onClick={() => setProfilPicker(profilPicker === 'plads' ? null : 'plads')} className="w-full flex items-center gap-3" style={{ padding: 12, minHeight: 56 }} data-testid="profil-plads">
-                      <div className="flex items-center justify-center flex-shrink-0" style={{ width: 32, height: 32, borderRadius: 8, background: '#f4f4f5' }}>
-                        <MapPin style={{ width: 16, height: 16, color: '#374151' }} />
-                      </div>
-                      <div className="flex-1 min-w-0 text-left">
-                        <p style={{ fontSize: 9, color: '#9ca3af' }}>Plads</p>
-                        <p className="font-extrabold truncate" style={{ fontSize: 13, color: '#111111' }}>{selectedPlads === "__MINE__" ? "Mine ture" : (selectedPlads || "Alle")}</p>
-                      </div>
-                      <ChevronDown style={{ width: 16, height: 16, color: '#d1d5db', transform: profilPicker === 'plads' ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s' }} />
-                    </button>
-                    {/* Inline plads picker */}
-                    {profilPicker === 'plads' && (
-                      <div style={{ maxHeight: 240, overflowY: 'auto' }} data-testid="profil-plads-picker">
-                        <button
-                          onClick={() => { setSelectedPlads("__MINE__"); setMineSelectedPlads(""); setProfilPicker(null); }}
-                          className="w-full flex items-center justify-between gap-2"
-                          style={{ padding: '10px 14px', background: selectedPlads === "__MINE__" ? '#fff7ed' : 'transparent', borderTop: '0.5px solid #f4f4f5', minHeight: 44 }}
-                          data-testid="profil-plads-option-mine"
-                        >
-                          <span className="font-bold truncate" style={{ fontSize: 12, color: selectedPlads === "__MINE__" ? '#c2410c' : '#111111' }}>Mine ture (alle pladser)</span>
-                          {selectedPlads === "__MINE__" && <Check style={{ width: 14, height: 14, color: '#f97316' }} />}
-                        </button>
-                        {pladsList.length === 0 ? (
-                          <p style={{ fontSize: 11, color: '#9ca3af', padding: 12 }}>Ingen pladser tilgængelige</p>
-                        ) : pladsList.map(p => {
-                          const selected = selectedPlads === p.name;
-                          return (
-                            <button
-                              key={p.id || p.name}
-                              onClick={() => { setSelectedPlads(p.name); setMineSelectedPlads(""); setProfilPicker(null); }}
-                              className="w-full flex items-center justify-between gap-2"
-                              style={{ padding: '10px 14px', background: selected ? '#fff7ed' : 'transparent', borderTop: '0.5px solid #f4f4f5', minHeight: 44 }}
-                              data-testid={`profil-plads-option-${p.name}`}
-                            >
-                              <span className="font-bold truncate" style={{ fontSize: 12, color: selected ? '#c2410c' : '#111111' }}>{p.name}</span>
-                              {selected && <Check style={{ width: 14, height: 14, color: '#f97316' }} />}
-                            </button>
-                          );
-                        })}
-                      </div>
+                    {pushSupported() && pushPermission() === "denied" && (
+                      <p className="mt-2 text-[12px] text-amber-800 bg-amber-50 rounded-lg px-3 py-2">Notifikationer er blokeret i telefonens indstillinger for denne app. Slå dem til der og prøv igen.</p>
                     )}
                   </div>
 
-                  <button onClick={() => setProfilPicker(profilPicker ? null : 'vehicle')}
-                    className="w-full flex items-center justify-center gap-2"
-                    style={{ background: profilPicker ? '#f4f4f5' : '#111111', borderRadius: 12, padding: 14, marginTop: 20, minHeight: 48, border: profilPicker ? '0.5px solid #e5e7eb' : 'none' }}
-                    data-testid="profil-edit">
-                    <Settings style={{ width: 16, height: 16, color: profilPicker ? '#374151' : '#ffffff' }} />
-                    <span className="font-extrabold" style={{ fontSize: 12, color: profilPicker ? '#374151' : '#ffffff' }}>
-                      {profilPicker ? "Luk redigering" : "Rediger oplysninger"}
-                    </span>
+                  <button onClick={handleLogoutDriver} className="w-full min-h-[52px] rounded-2xl bg-white border border-slate-200 text-rose-600 font-bold flex items-center justify-center gap-2" data-testid="profil-logout">
+                    <LogOut className="w-5 h-5" /> Log ud
                   </button>
                 </div>
-                </div>{/* /max-w wrapper Profil */}
               </div>
-            )}
+              );
+            })()}
 
             {/* ===== BOTTOM NAV (altid synlig) ===== */}
             <div className="fixed bottom-0 left-0 right-0 z-50 flex"
@@ -18389,6 +18095,31 @@ function App() {
         )}
 
         <DriverChatSheet tour={chatTour} onClose={() => setChatTour(null)} onChanged={fetchDriverTourUnread} />
+
+        {pushPrompt && authUser?.role === "driver" && (
+          <div className="fixed inset-x-0 z-[85] px-3" style={{ bottom: "calc(84px + env(safe-area-inset-bottom))" }} data-testid="push-prompt">
+            <div className="max-w-md mx-auto rounded-2xl bg-slate-900 text-white shadow-2xl p-4">
+              <div className="flex items-start gap-3">
+                <Bell className="w-5 h-5 text-orange-400 shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0">
+                  <p className="font-bold">Få besked på telefonen</p>
+                  {pushPrompt === "ask" ? (
+                    <p className="text-sm text-slate-300 mt-0.5">Når du får en ny tur, en haster-tur, en ændring eller en besked fra planlæggeren - også når appen er lukket.</p>
+                  ) : (
+                    <p className="text-sm text-slate-300 mt-0.5">Læg appen på hjemmeskærmen for at få notifikationer: tryk Del-ikonet i Safari → "Føj til hjemmeskærm", og åbn appen derfra.</p>
+                  )}
+                </div>
+                <button onClick={dismissPushPrompt} className="p-1 -mr-1 text-slate-400" aria-label="Luk"><X className="w-5 h-5" /></button>
+              </div>
+              {pushPrompt === "ask" && (
+                <div className="mt-3 flex gap-2">
+                  <button onClick={() => handleTogglePush(true)} className="flex-1 h-11 rounded-xl bg-orange-500 font-bold" data-testid="push-prompt-enable">Slå til</button>
+                  <button onClick={dismissPushPrompt} className="h-11 px-4 rounded-xl bg-white/10 font-semibold">Senere</button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Fase 14 (2026-06-19): "Bemærkninger"-sektionen er fjernet pr.
             brugerens ønske - den blev ikke brugt. */}

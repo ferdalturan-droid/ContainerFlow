@@ -42,6 +42,11 @@ En logistik admin kan invitere **koordinatorer** under **Mere › Team & rettigh
   - Bogholder
   - Alt undtagen økonomi
 
+## Begrænsning til kunder
+- En koordinator kan begrænses til bestemte kunder (`customer_scope`). Det kan være genbrugsplads-kunders id'er og/eller `own` (firmaets egne ture og kunder). En tom liste betyder alle kunder.
+- Begrænsningen gælder Ture, beskeder, tildeling, ret og slet, samt Rapportering.
+- En begrænset koordinator kan kun give adgang inden for sin egen begrænsning.
+
 ## "Ring til planlæggeren" (chauffør)
 
 `GET /api/driver/dispatch-contact?tour_id=` returnerer telefonnummeret på den der tildelte turen, hvis vedkommende har et. Ellers returnerer den firmaets disponent-telefon, som sættes på Team-siden. Knappen ligger i beskedarket og i tur-panelet.

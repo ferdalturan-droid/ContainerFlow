@@ -125,6 +125,10 @@ Ud for hver kunde står, om den følger de generelle priser eller har en egen pr
 
 **Ventetid** (tillæg): betaling for tid chaufføren venter på adressen. Den afregnes pr. påbegyndt kvarter ud fra `waiting_min` på turen, som kommer fra chaufførens anmodning (godkendes under Godkendelser) eller fra admin i Rapport. Uden ventetid gives intet tillæg.
 
+## 3d. Hængere og aftalt pris (2026-10-17)
+- Betingelsen **Antal hængere** (1, 2, 3+) på prisregler gør det muligt at sætte fx 1 hænger = 700 kr og 2 hængere = 1.100 kr (ikke nødvendigvis det dobbelte). Antallet kommer fra turens `trailer_count` (planlagt i Ny tur). Hvis det mangler, bruges 1, hvis chaufføren kørte med hænger.
+- **Aftalt pris** (fast pris pr. tur) erstatter reglerne, og weekend-, haster- og andre tillæg er indregnet. Ventetid kan lægges oveni (`add_waiting`), fordi den ikke kendes, når prisen aftales. Valget bevares, når prisen rettes i Økonomi.
+
 ## 4. Sider (logistik admin → "Økonomi")
 
 Rapport · Kunder & priser · Prisregler · Godkendelser · Helligdage · Indstillinger

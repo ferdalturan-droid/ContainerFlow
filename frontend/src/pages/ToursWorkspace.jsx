@@ -10,8 +10,9 @@ import {
 import { API, formatApiError } from "../auth/api";
 import { ArchiveTab } from "./LocationAdminPage";
 import TourChat from "../components/TourChat";
+import AddressField, { formatAddress, parseAddress } from "../components/AddressField";
 import {
-  TOUR_TYPES, TOUR_TYPE_LABEL, SOURCE_LABEL, todayStr, addDays, fmtDayLong, fmtClock,
+  TOUR_TYPES, GOODS_TYPES, TOUR_TYPE_LABEL, SOURCE_LABEL, cargoSummary, isGoods, todayStr, addDays, fmtDayLong, fmtClock,
   isHaster, openHours, capacityText, assigneeName, tourStatus, daysLate, mapsUrl,
 } from "../lib/tourHelpers";
 
@@ -176,11 +177,17 @@ function DriverSelect({ value, drivers, load, onChange, disabled, compact = fals
 // ─────────────────────────── Ny / ret tur ───────────────────────────
 
 const WEEKDAYS = [["1", "Man"], ["2", "Tir"], ["3", "Ons"], ["4", "Tor"], ["5", "Fre"], ["6", "Lør"], ["0", "Søn"]];
+const UNITS = ["stk", "paller", "kolli", "m³", "ton", "kg"];
+const KIND_KEY = "cf_tour_kind_default";
+const readKind = () => { try { return localStorage.getItem(KIND_KEY) === "goods" ? "goods" : "container"; } catch (_) { return "container"; } };
 
 const blankForm = (date, plads) => ({
-  date, plads: plads || "", firma: "", tour_type: "normal", fraction: "", container: "", capacity_label: "",
-  stops: [""], facility: "", open_from: "", open_to: "", priority: "normal", driver_id: "", remark: "",
-  loose_count: "", agreed_price: "", repeat: "none", repeat_days: ["1", "2", "3", "4", "5"], repeat_until: addDays(date, 28),
+  date, plads: plads || "", firma: "", kind: readKind(), tour_type: readKind() === "goods" ? "afhentning" : "normal",
+  lines: [{ text: "", trailer: "", qty: "", unit: "stk" }], container: "", capacity_label: "", loose_count: "",
+  stops: [{ street: "", postal: "", city: "" }], delivery: { street: "", postal: "", city: "" },
+  open_from: "", open_to: "", priority: "normal", driver_id: "", remark: "", trailer_count: 0,
+  agreed_price: "", agreed_add_waiting: true,
+  repeat: "none", repeat_days: ["1", "2", "3", "4", "5"], repeat_until: addDays(date, 28),
 });
 
 function repeatDates(f) {
@@ -196,32 +203,67 @@ function repeatDates(f) {
   return out;
 }
 
-function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, defaultPlads, onCreated, siteWord, canPrice = false, customers = [] }) {
+const addrFilled = (a) => !!((a?.street || "").trim() || (a?.city || "").trim());
+
+/**
+ * Ny tur (2026-10-17). Det man altid skal bruge står fremme; resten ligger
+ * under "Flere detaljer". Feltsættet følger turens type:
+ *  - Container: genbrugsplads-kundens plads (B2B) eller premium-firmaets
+ *    egne containerture - materiale, container nr., kapacitet.
+ *  - Gods og andet (kun premium, egne lokationer): "hvad skal køres" med
+ *    antal/enhed, ingen containerfelter.
+ * Hængere og indhold pr. hænger er premium-funktioner.
+ */
+function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, defaultPlads, onCreated, siteWord, canPrice = false, customers = [], isPremium = false }) {
   const [f, setF] = useState(() => blankForm(initialDate, defaultPlads));
   const [saving, setSaving] = useState(false);
-  useEffect(() => { if (open) setF(blankForm(initialDate, defaultPlads)); }, [open, initialDate, defaultPlads]);
+  const [more, setMore] = useState(false);
+  useEffect(() => { if (open) { setF(blankForm(initialDate, defaultPlads)); setMore(false); } }, [open, initialDate, defaultPlads]);
   const set = (k, v) => setF(prev => ({ ...prev, [k]: v }));
-  const dates = repeatDates(f);
-  const stops = f.stops.map(s => s.trim()).filter(Boolean);
-  const total = dates.length * Math.max(stops.length, 1);
   const plads = pladsList.find(p => p.name === f.plads);
+  // Egen lokation hos et premium-firma = frit valg af type. Kundens plads = container (B2B).
+  const canChooseKind = isPremium && (!plads || !!plads.own_location);
+  const kind = canChooseKind ? f.kind : "container";
+  const goods = kind === "goods";
+  const types = goods ? GOODS_TYPES : TOUR_TYPES;
+  const tc = isPremium ? Number(f.trailer_count || 0) : 0;
+  const multiLines = goods || tc >= 2;
+  const dates = repeatDates(f);
+  const stops = f.stops.filter(addrFilled);
+  const total = dates.length * Math.max(stops.length, 1);
+  const lines = f.lines.filter(l => (l.text || "").trim());
+
+  const setKind = (k) => {
+    try { localStorage.setItem(KIND_KEY, k); } catch (_) { /* ignore */ }
+    setF(prev => ({ ...prev, kind: k, tour_type: k === "goods" ? "afhentning" : "normal" }));
+  };
+  const setLine = (i, patch) => set("lines", f.lines.map((l, j) => (j === i ? { ...l, ...patch } : l)));
 
   const submit = async () => {
-    if (!f.plads) { toast.error(`Vælg ${siteWord}`); return; }
-    if (!f.fraction.trim()) { toast.error("Skriv materiale/fraktion"); return; }
-    if (stops.length === 0) { toast.error("Skriv mindst én afhentningsadresse"); return; }
+    if (!f.plads) { toast.error(`Vælg ${siteWord.toLowerCase()}`); return; }
+    if (!lines.length) { toast.error(goods ? "Skriv hvad der skal køres" : "Skriv materiale/fraktion"); return; }
+    if (!stops.length) { toast.error("Skriv afhentningsadressen"); return; }
+    if (f.tour_type === "loes_afhentning" && !(parseInt(f.loose_count, 10) > 0)) { toast.error("Skriv antal containere"); return; }
     if (dates.length === 0) { toast.error("Gentagelsen giver ingen datoer"); return; }
     if (total > 200) { toast.error("Højst 200 ture ad gangen"); return; }
     const firma = f.firma.trim();
-    const facility = f.facility.trim() || f.plads;
+    const facility = addrFilled(f.delivery) ? formatAddress(f.delivery) : f.plads;
+    const cargo = (multiLines || tc >= 1) ? lines.map(l => ({
+      text: l.text.trim(), trailer: tc >= 2 && l.trailer ? Number(l.trailer) : (tc === 1 ? 1 : null),
+      ...(goods && l.qty ? { qty: Number(String(l.qty).replace(",", ".")), unit: l.unit } : {}),
+    })) : [];
     const body = [];
-    dates.forEach(date => stops.forEach((addr, i) => body.push({
-      date, plads: f.plads, fraction: f.fraction.trim(), facility, address: addr,
-      tour_type: f.tour_type, container: f.container.trim(), capacity_label: f.capacity_label.trim(),
+    dates.forEach(date => stops.forEach((st, i) => body.push({
+      date, plads: f.plads, tour_kind: kind, tour_type: f.tour_type,
+      fraction: cargo.length ? "" : lines[0].text.trim(), cargo_lines: cargo, trailer_count: tc,
+      address: formatAddress(st), address_parts: st,
+      facility, facility_parts: addrFilled(f.delivery) ? f.delivery : {},
+      container: goods ? "" : f.container.trim(), capacity_label: goods ? "" : f.capacity_label.trim(),
       open_from: f.open_from, open_to: f.open_to, priority: f.priority, remark: f.remark.trim(),
       is_private: !!firma, private_company: firma, sort_order: i,
       loose_estimated_count: f.tour_type === "loes_afhentning" ? (parseInt(f.loose_count, 10) || 0) : 0,
-      ...(canPrice && f.agreed_price !== "" && !isNaN(parseFloat(f.agreed_price)) ? { agreed_price: parseFloat(f.agreed_price) } : {}),
+      ...(canPrice && f.agreed_price !== "" && !isNaN(parseFloat(f.agreed_price))
+        ? { agreed_price: parseFloat(String(f.agreed_price).replace(",", ".")), agreed_add_waiting: !!f.agreed_add_waiting } : {}),
     })));
     setSaving(true);
     try {
@@ -239,14 +281,25 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
     setSaving(false);
   };
 
-  const grouped = useMemo(() => {
-    const own = pladsList.filter(p => p.own_location);
-    const cust = pladsList.filter(p => !p.own_location);
-    return { own, cust };
-  }, [pladsList]);
+  const grouped = useMemo(() => ({
+    own: pladsList.filter(p => p.own_location),
+    cust: pladsList.filter(p => !p.own_location),
+  }), [pladsList]);
+
+  const moreSummary = [
+    f.open_from && f.open_to ? `${f.open_from}–${f.open_to}` : "",
+    f.priority === "urgent" ? "Haster" : f.priority === "low" ? "Lav prioritet" : "",
+    tc ? `${tc} hænger${tc === 1 ? "" : "e"}` : "",
+    !goods && f.container ? `Container ${f.container}` : "",
+    !goods && f.capacity_label ? f.capacity_label : "",
+    f.agreed_price ? `${f.agreed_price} kr` : "",
+    f.repeat !== "none" ? `Gentages ${dates.length} dage` : "",
+  ].filter(Boolean);
+
+  const chip = (on, extra = "") => `px-3 py-2 rounded-lg text-sm font-semibold border ${on ? "bg-emerald-600 border-emerald-600 text-white" : "border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300"} ${extra}`;
 
   return (
-    <Sheet open={open} onClose={onClose} title="Ny tur" subtitle="Udfyld det chaufføren skal bruge. Flere adresser giver én tur pr. stop." testid="tour-form"
+    <Sheet open={open} onClose={onClose} title="Ny tur" subtitle="Udfyld det chaufføren skal bruge. Flere afhentningsadresser giver én tur pr. adresse." testid="tour-form"
       footer={
         <div className="flex items-center gap-2">
           <div className="text-xs text-slate-500 flex-1">{total > 0 ? `${total} tur${total === 1 ? "" : "e"} oprettes` : ""}</div>
@@ -271,147 +324,200 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
             <input type="date" className={inputCls} value={f.date} onChange={(e) => set("date", e.target.value)} data-testid="tf-date" />
           </div>
         </div>
-        <div>
-          <label className={labelCls}>Slutkunde / firma <span className="normal-case font-normal">(valgfri - bruges i Økonomi)</span></label>
-          <input className={inputCls} list="tf-customers" value={f.firma} onChange={(e) => set("firma", e.target.value)} placeholder={customers.length ? "Vælg eller skriv en kunde" : "Fx Carlsberg Byen A/S"} data-testid="tf-firma" />
-          <datalist id="tf-customers">{customers.map(c => <option key={c.id} value={c.name} />)}</datalist>
-          {f.firma.trim() && customers.length > 0 && !customers.some(c => c.name.toLowerCase() === f.firma.trim().toLowerCase()) && (
-            <p className="text-[11px] text-slate-500 mt-1">Ny kunde - opret den under Økonomi › Kunder &amp; priser for at give den egne priser.</p>
-          )}
-        </div>
+        {(!plads || plads.own_location) && (
+          <div>
+            <label className={labelCls}>Kunde <span className="normal-case font-normal">(valgfri - bruges til priser i Økonomi)</span></label>
+            <input className={inputCls} list="tf-customers" value={f.firma} onChange={(e) => set("firma", e.target.value)} placeholder={customers.length ? "Vælg eller skriv en kunde" : "Fx Carlsberg Byen A/S"} data-testid="tf-firma" />
+            <datalist id="tf-customers">{customers.map(c => <option key={c.id} value={c.name} />)}</datalist>
+            {f.firma.trim() && customers.length > 0 && !customers.some(c => c.name.toLowerCase() === f.firma.trim().toLowerCase()) && (
+              <p className="text-[11px] text-slate-500 mt-1">Ny kunde - opret den under Økonomi › Kunder &amp; priser for at give den egne priser.</p>
+            )}
+          </div>
+        )}
+        {plads && !plads.own_location && (
+          <p className="text-xs text-slate-500 bg-slate-50 dark:bg-slate-900 rounded-lg px-3 py-2">Containertur for {plads.customer_name || "kunden"} - kunden er givet af pladsen.</p>
+        )}
       </section>
 
       <section className={`${card} p-4 space-y-3`}>
+        {canChooseKind && (
+          <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-slate-100 dark:bg-slate-900" data-testid="tf-kind">
+            {[["container", "Container"], ["goods", "Gods og andet"]].map(([k, l]) => (
+              <button key={k} type="button" onClick={() => setKind(k)}
+                className={`py-2 rounded-lg text-sm font-semibold ${kind === k ? "bg-white dark:bg-slate-700 shadow-sm text-slate-900 dark:text-white" : "text-slate-500"}`}>{l}</button>
+            ))}
+          </div>
+        )}
         <div>
           <label className={labelCls}>Opgave</label>
           <div className="flex flex-wrap gap-1.5">
-            {TOUR_TYPES.map(t => (
-              <button key={t.id} type="button" onClick={() => set("tour_type", t.id)}
-                className={`px-3 py-2 rounded-lg text-sm font-semibold border ${f.tour_type === t.id ? "bg-emerald-600 border-emerald-600 text-white" : "border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300"}`}>
-                {t.label}
-              </button>
+            {types.map(t => (
+              <button key={t.id} type="button" onClick={() => set("tour_type", t.id)} className={chip(f.tour_type === t.id)}>{t.label}</button>
             ))}
           </div>
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          <div className="sm:col-span-1">
-            <label className={labelCls}>Materiale / fraktion</label>
-            <input className={inputCls} list="tf-materials" value={f.fraction} onChange={(e) => set("fraction", e.target.value)} placeholder="Fx Træ" data-testid="tf-fraction" />
-            <datalist id="tf-materials">{(plads?.materials?.length ? plads.materials : materials).map(m => <option key={m} value={m} />)}</datalist>
-          </div>
-          {f.tour_type === "loes_afhentning" ? (
-            <div>
-              <label className={labelCls}>Antal containere</label>
-              <input type="number" min="1" inputMode="numeric" className={inputCls} value={f.loose_count} onChange={(e) => set("loose_count", e.target.value)} />
-            </div>
-          ) : (
-            <div>
-              <label className={labelCls}>Container nr.</label>
-              <input className={inputCls} value={f.container} onChange={(e) => set("container", e.target.value)} placeholder="Valgfri" />
-            </div>
-          )}
-          <div>
-            <label className={labelCls}>Kapacitet</label>
-            <input className={inputCls} value={f.capacity_label} onChange={(e) => set("capacity_label", e.target.value)} placeholder="Fx 20 m³" />
-          </div>
-        </div>
-      </section>
-
-      <section className={`${card} p-4 space-y-3`}>
         <div>
-          <label className={labelCls}>Afhentning</label>
+          <label className={labelCls}>{goods ? "Hvad skal køres" : (multiLines ? "Materiale pr. hænger" : "Materiale / fraktion")}</label>
           <div className="space-y-2">
-            {f.stops.map((s, i) => (
-              <div key={i} className="flex gap-2">
-                <span className="w-7 h-10 sm:h-9 shrink-0 flex items-center justify-center text-xs font-bold text-slate-400">{i + 1}</span>
-                <input className={inputCls} value={s} placeholder="Adresse"
-                  onChange={(e) => set("stops", f.stops.map((x, j) => j === i ? e.target.value : x))} data-testid={`tf-stop-${i}`} />
-                {f.stops.length > 1 && (
-                  <button type="button" className="p-2 text-slate-400 hover:text-rose-500" aria-label="Fjern stop"
-                    onClick={() => set("stops", f.stops.filter((_, j) => j !== i))}><X className="w-4 h-4" /></button>
+            {(multiLines ? f.lines : f.lines.slice(0, 1)).map((l, i) => (
+              <div key={i} className="flex flex-wrap sm:flex-nowrap gap-2 items-center">
+                <input className={`${inputCls} flex-1 min-w-[140px]`} list={goods ? undefined : "tf-materials"} value={l.text}
+                  onChange={(e) => setLine(i, { text: e.target.value })} placeholder={goods ? "Fx Køkkenelementer" : "Fx Træ"} data-testid={`tf-line-${i}`} />
+                {goods && (
+                  <>
+                    <input className={`${inputCls.replace("w-full ", "")} w-24 flex-none`} inputMode="decimal" value={l.qty} onChange={(e) => setLine(i, { qty: e.target.value })} placeholder="Antal" />
+                    <select className={`${inputCls.replace("w-full ", "")} w-28 flex-none`} value={l.unit} onChange={(e) => setLine(i, { unit: e.target.value })}>
+                      {UNITS.map(u => <option key={u} value={u}>{u}</option>)}
+                    </select>
+                  </>
+                )}
+                {tc >= 2 && (
+                  <select className={`${inputCls.replace("w-full ", "")} w-32 flex-none`} value={l.trailer} onChange={(e) => setLine(i, { trailer: e.target.value })} aria-label="Hænger">
+                    <option value="">Hænger…</option>
+                    {Array.from({ length: tc }, (_, k) => <option key={k} value={k + 1}>Hænger {k + 1}</option>)}
+                  </select>
+                )}
+                {multiLines && f.lines.length > 1 && (
+                  <button type="button" className="p-2 text-slate-400 hover:text-rose-500" aria-label="Fjern linje" onClick={() => set("lines", f.lines.filter((_, j) => j !== i))}><X className="w-4 h-4" /></button>
                 )}
               </div>
             ))}
-            <button type="button" className="text-sm font-semibold text-emerald-700 dark:text-emerald-400 inline-flex items-center gap-1 pl-9"
-              onClick={() => set("stops", [...f.stops, ""])}><Plus className="w-4 h-4" /> Tilføj stop</button>
+            {multiLines && (
+              <button type="button" className="text-sm font-semibold text-emerald-700 dark:text-emerald-400 inline-flex items-center gap-1"
+                onClick={() => set("lines", [...f.lines, { text: "", trailer: tc >= 2 ? String(Math.min(f.lines.length + 1, tc)) : "", qty: "", unit: "stk" }])}>
+                <Plus className="w-4 h-4" /> {goods ? "Tilføj linje" : "Tilføj materiale"}
+              </button>
+            )}
+            <datalist id="tf-materials">{(plads?.materials?.length ? plads.materials : materials).map(m => <option key={m} value={m} />)}</datalist>
           </div>
         </div>
-        <div>
-          <label className={labelCls}>Aflevering</label>
-          <input className={inputCls} value={f.facility} onChange={(e) => set("facility", e.target.value)} placeholder={f.plads ? `Standard: ${f.plads}` : "Hvor skal containeren hen?"} />
+        {f.tour_type === "loes_afhentning" && (
+          <div className="max-w-[200px]">
+            <label className={labelCls}>Antal containere</label>
+            <input type="number" min="1" inputMode="numeric" className={inputCls} value={f.loose_count} onChange={(e) => set("loose_count", e.target.value)} />
+          </div>
+        )}
+      </section>
+
+      <section className={`${card} p-4 space-y-4`}>
+        <div className="space-y-3">
+          <span className={labelCls}>Afhentning</span>
+          {f.stops.map((st, i) => (
+            <div key={i} className="relative rounded-xl border border-slate-100 dark:border-slate-700 p-3">
+              {f.stops.length > 1 && (
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-bold text-slate-500">Stop {i + 1}</span>
+                  <button type="button" className="p-1 text-slate-400 hover:text-rose-500" aria-label="Fjern stop" onClick={() => set("stops", f.stops.filter((_, j) => j !== i))}><X className="w-4 h-4" /></button>
+                </div>
+              )}
+              <AddressField value={st} onChange={(v) => set("stops", f.stops.map((x, j) => (j === i ? v : x)))} testid={`tf-stop-${i}`} inputCls={inputCls} />
+            </div>
+          ))}
+          <button type="button" className="text-sm font-semibold text-emerald-700 dark:text-emerald-400 inline-flex items-center gap-1"
+            onClick={() => set("stops", [...f.stops, { street: "", postal: "", city: "" }])}><Plus className="w-4 h-4" /> Tilføj stop (giver en tur mere)</button>
         </div>
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className={labelCls}>Tidligst</label>
-            <input type="time" className={inputCls} value={f.open_from} onChange={(e) => set("open_from", e.target.value)} />
-          </div>
-          <div>
-            <label className={labelCls}>Senest</label>
-            <input type="time" className={inputCls} value={f.open_to} onChange={(e) => set("open_to", e.target.value)} />
-          </div>
+        <div className="space-y-2">
+          <span className={labelCls}>Aflevering</span>
+          <AddressField value={f.delivery} onChange={(v) => set("delivery", v)} placeholder={f.plads ? `Tom = ${f.plads}` : "Hvor skal det hen?"} testid="tf-delivery" inputCls={inputCls} />
         </div>
       </section>
 
       <section className={`${card} p-4 space-y-3`}>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
-            <label className={labelCls}>Prioritet</label>
-            <div className="grid grid-cols-3 gap-1.5">
-              {[["low", "Lav"], ["normal", "Normal"], ["urgent", "Haster"]].map(([id, l]) => (
-                <button key={id} type="button" onClick={() => set("priority", id)}
-                  className={`py-2 rounded-lg text-sm font-semibold border ${f.priority === id
-                    ? (id === "urgent" ? "bg-rose-600 border-rose-600 text-white" : "bg-slate-800 border-slate-800 text-white dark:bg-slate-200 dark:text-slate-900")
-                    : "border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300"}`}>{l}</button>
-              ))}
-            </div>
-          </div>
-          <div>
             <label className={labelCls}>Chauffør</label>
             <DriverSelect value={f.driver_id} drivers={drivers} onChange={(v) => set("driver_id", v)} testid="tf-driver" />
           </div>
-        </div>
-        <div>
-          <label className={labelCls}>Note til chaufføren</label>
-          <textarea rows={2} className={inputCls} value={f.remark} onChange={(e) => set("remark", e.target.value)} placeholder="Fx nøgle hos portvagten, ring til Jens 20 30 40 50" />
-        </div>
-        {canPrice && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
-            <div>
-              <label className={labelCls}>Aftalt pris pr. tur (kr, ekskl. moms)</label>
-              <input type="number" min="0" inputMode="decimal" className={inputCls} value={f.agreed_price} onChange={(e) => set("agreed_price", e.target.value)} placeholder="Tom = prisreglerne bruges" data-testid="tf-price" />
-            </div>
-            <p className="text-xs text-slate-500 pb-2">Fast pris for netop disse ture. Den ændres ikke, hvis prisreglerne ændres senere, og kan rettes i Økonomi.</p>
+          <div>
+            <label className={labelCls}>Note til chaufføren</label>
+            <input className={inputCls} value={f.remark} onChange={(e) => set("remark", e.target.value)} placeholder="Fx nøgle hos portvagten" />
           </div>
-        )}
+        </div>
       </section>
 
-      <section className={`${card} p-4 space-y-3`}>
-        <label className={labelCls}>Gentag</label>
-        <div className="grid grid-cols-3 gap-1.5">
-          {[["none", "Ingen"], ["daily", "Hverdage"], ["weekly", "Valgte dage"]].map(([id, l]) => (
-            <button key={id} type="button" onClick={() => set("repeat", id)}
-              className={`py-2 rounded-lg text-sm font-semibold border ${f.repeat === id ? "bg-emerald-600 border-emerald-600 text-white" : "border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300"}`}>{l}</button>
-          ))}
-        </div>
-        {f.repeat === "weekly" && (
-          <div className="flex flex-wrap gap-1.5">
-            {WEEKDAYS.map(([id, l]) => {
-              const on = f.repeat_days.includes(id);
-              return (
-                <button key={id} type="button"
-                  onClick={() => set("repeat_days", on ? f.repeat_days.filter(x => x !== id) : [...f.repeat_days, id])}
-                  className={`w-12 py-2 rounded-lg text-sm font-semibold border ${on ? "bg-slate-800 text-white border-slate-800 dark:bg-slate-200 dark:text-slate-900" : "border-slate-200 dark:border-slate-600 text-slate-500"}`}>{l}</button>
-              );
-            })}
-          </div>
-        )}
-        {f.repeat !== "none" && (
-          <div className="grid grid-cols-2 gap-3 items-end">
-            <div>
-              <label className={labelCls}>Til og med</label>
-              <input type="date" className={inputCls} value={f.repeat_until} min={f.date} onChange={(e) => set("repeat_until", e.target.value)} />
+      <section className={`${card} overflow-hidden`}>
+        <button type="button" onClick={() => setMore(v => !v)} className="w-full flex items-center gap-3 px-4 py-3 text-left" data-testid="tf-more">
+          <span className="font-semibold text-slate-800 dark:text-slate-100">Flere detaljer</span>
+          <span className="flex-1 text-xs text-slate-500 truncate">{moreSummary.join(" · ") || "Tidsrum, prioritet, hængere, pris, gentagelse"}</span>
+          <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${more ? "rotate-180" : ""}`} />
+        </button>
+        {more && (
+          <div className="px-4 pb-4 space-y-4 border-t border-slate-100 dark:border-slate-700 pt-4">
+            <div className="grid grid-cols-2 gap-3">
+              <div><label className={labelCls}>Tidligst</label><input type="time" className={inputCls} value={f.open_from} onChange={(e) => set("open_from", e.target.value)} /></div>
+              <div><label className={labelCls}>Senest</label><input type="time" className={inputCls} value={f.open_to} onChange={(e) => set("open_to", e.target.value)} /></div>
             </div>
-            <div className="text-xs text-slate-500 pb-2">{dates.length} dag{dates.length === 1 ? "" : "e"}</div>
+            <div>
+              <label className={labelCls}>Prioritet</label>
+              <div className="grid grid-cols-3 gap-1.5 max-w-sm">
+                {[["low", "Lav"], ["normal", "Normal"], ["urgent", "Haster"]].map(([id, l]) => (
+                  <button key={id} type="button" onClick={() => set("priority", id)}
+                    className={`py-2 rounded-lg text-sm font-semibold border ${f.priority === id
+                      ? (id === "urgent" ? "bg-rose-600 border-rose-600 text-white" : "bg-slate-800 border-slate-800 text-white dark:bg-slate-200 dark:text-slate-900")
+                      : "border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300"}`}>{l}</button>
+                ))}
+              </div>
+            </div>
+            {isPremium && (
+              <div>
+                <label className={labelCls}>Hængere</label>
+                <div className="flex flex-wrap gap-1.5" data-testid="tf-trailers">
+                  {[0, 1, 2, 3, 4].map(n => (
+                    <button key={n} type="button" onClick={() => setF(prev => ({ ...prev, trailer_count: n,
+                      lines: n >= 2 && prev.lines.length < n ? [...prev.lines, ...Array.from({ length: n - prev.lines.length }, (_, k) => ({ text: "", trailer: String(prev.lines.length + k + 1), qty: "", unit: "stk" }))].map((l, k) => ({ ...l, trailer: l.trailer || String(Math.min(k + 1, n)) })) : prev.lines }))}
+                      className={chip(tc === n, "min-w-[52px]")}>{n === 0 ? "Ingen" : n}</button>
+                  ))}
+                </div>
+                <p className="text-[11px] text-slate-500 mt-1">{tc >= 2 ? "Skriv hvad der skal på hver hænger ovenfor. Prisen kan sættes samlet (aftalt pris) eller via prisregler for antal hængere." : "Planlagt antal hængere på turen."}</p>
+              </div>
+            )}
+            {!goods && (
+              <div className="grid grid-cols-2 gap-3">
+                {f.tour_type !== "loes_afhentning" && <div><label className={labelCls}>Container nr.</label><input className={inputCls} value={f.container} onChange={(e) => set("container", e.target.value)} placeholder="Valgfri" /></div>}
+                <div><label className={labelCls}>Kapacitet</label><input className={inputCls} value={f.capacity_label} onChange={(e) => set("capacity_label", e.target.value)} placeholder="Fx 20 m³" /></div>
+              </div>
+            )}
+            {canPrice && (
+              <div className="space-y-2">
+                <label className={labelCls}>Aftalt pris pr. tur (kr, ekskl. moms)</label>
+                <input type="text" inputMode="decimal" className={`${inputCls} max-w-[220px]`} value={f.agreed_price} onChange={(e) => set("agreed_price", e.target.value)} placeholder="Tom = prisreglerne" data-testid="tf-price" />
+                <p className="text-[11px] text-slate-500">
+                  Erstatter prisreglerne for netop {total > 1 ? "hver af disse ture" : "denne tur"}{tc >= 2 ? ` (samlet for alle ${tc} hængere)` : ""}.
+                  Tillæg som weekend og haster er indregnet. Senere ændringer af prisreglerne påvirker den ikke.
+                </p>
+                {f.agreed_price !== "" && (
+                  <label className="flex items-center gap-2 text-sm">
+                    <input type="checkbox" className="w-4 h-4 accent-emerald-600" checked={!!f.agreed_add_waiting} onChange={(e) => set("agreed_add_waiting", e.target.checked)} />
+                    Læg ventetid oveni, hvis chaufføren må vente (efter jeres ventetidsregel)
+                  </label>
+                )}
+              </div>
+            )}
+            <div className="space-y-2">
+              <label className={labelCls}>Gentag</label>
+              <div className="grid grid-cols-3 gap-1.5 max-w-sm">
+                {[["none", "Ingen"], ["daily", "Hverdage"], ["weekly", "Valgte dage"]].map(([id, l]) => (
+                  <button key={id} type="button" onClick={() => set("repeat", id)} className={chip(f.repeat === id)}>{l}</button>
+                ))}
+              </div>
+              {f.repeat === "weekly" && (
+                <div className="flex flex-wrap gap-1.5">
+                  {WEEKDAYS.map(([id, l]) => {
+                    const on = f.repeat_days.includes(id);
+                    return (
+                      <button key={id} type="button" onClick={() => set("repeat_days", on ? f.repeat_days.filter(x => x !== id) : [...f.repeat_days, id])}
+                        className={`w-12 py-2 rounded-lg text-sm font-semibold border ${on ? "bg-slate-800 text-white border-slate-800 dark:bg-slate-200 dark:text-slate-900" : "border-slate-200 dark:border-slate-600 text-slate-500"}`}>{l}</button>
+                    );
+                  })}
+                </div>
+              )}
+              {f.repeat !== "none" && (
+                <div className="grid grid-cols-2 gap-3 items-end max-w-sm">
+                  <div><label className={labelCls}>Til og med</label><input type="date" className={inputCls} value={f.repeat_until} min={f.date} onChange={(e) => set("repeat_until", e.target.value)} /></div>
+                  <div className="text-xs text-slate-500 pb-2">{dates.length} dag{dates.length === 1 ? "" : "e"}</div>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </section>
@@ -450,7 +556,7 @@ function Timeline({ tour, audit }) {
   );
 }
 
-function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnreadChanged, ownName, siteWord, askConfirm, can = () => true }) {
+function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnreadChanged, ownName, siteWord, askConfirm, can = () => true, isPremium = false }) {
   const [audit, setAudit] = useState(null);
   const [edit, setEdit] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -473,7 +579,18 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
   const saveEdit = async () => {
     setSaving(true);
     try {
-      await axios.put(`${API}/tours/${tour.id}`, edit);
+      const { addr, deliv, lines, ...rest } = edit;
+      const delivFilled = (deliv?.street || deliv?.city || "").trim();
+      const body = {
+        ...rest,
+        address: formatAddress(addr), address_parts: addr,
+        facility: delivFilled ? formatAddress(deliv) : (tour.plads || ""), facility_parts: delivFilled ? deliv : {},
+      };
+      if (lines) {
+        body.cargo_lines = lines.filter(l => (l.text || "").trim());
+        body.fraction = body.cargo_lines.map(l => l.text.trim()).join(" + ");
+      }
+      await axios.put(`${API}/tours/${tour.id}`, body);
       toast.success("Turen er gemt");
       setEdit(null);
       onChanged();
@@ -514,7 +631,8 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mt-4">
           {fact(siteWord, tour.plads)}
           {fact("Kunde", customerOf(tour, ownName))}
-          {fact("Opgave", TOUR_TYPE_LABEL[tour.tour_type] || tour.tour_type)}
+          {fact("Opgave", `${TOUR_TYPE_LABEL[tour.tour_type] || tour.tour_type}${isGoods(tour) ? " (gods)" : ""}`)}
+          {fact("Indhold", cargoSummary(tour))}
           {fact("Container", tour.tour_type === "loes_afhentning" ? (tour.loose_estimated_count ? `${tour.loose_estimated_count} stk. (løs)` : "") : tour.container)}
           {fact("Kapacitet", capacityText(tour))}
           {fact("Tidsvindue", oh.from ? `${oh.from}–${oh.to}` : "")}
@@ -561,19 +679,49 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
           <div className="space-y-3">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div><label className={labelCls}>Dato</label><input type="date" className={inputCls} value={edit.date} onChange={(e) => setEdit({ ...edit, date: e.target.value })} /></div>
-              <div><label className={labelCls}>Materiale</label><input className={inputCls} value={edit.fraction} onChange={(e) => setEdit({ ...edit, fraction: e.target.value })} /></div>
-              <div className="sm:col-span-2"><label className={labelCls}>Afhentning</label><input className={inputCls} value={edit.address} onChange={(e) => setEdit({ ...edit, address: e.target.value })} /></div>
-              <div className="sm:col-span-2"><label className={labelCls}>Aflevering</label><input className={inputCls} value={edit.facility} onChange={(e) => setEdit({ ...edit, facility: e.target.value })} /></div>
-              <div><label className={labelCls}>Container nr.</label><input className={inputCls} value={edit.container} onChange={(e) => setEdit({ ...edit, container: e.target.value })} /></div>
-              <div><label className={labelCls}>Kapacitet</label><input className={inputCls} value={edit.capacity_label} onChange={(e) => setEdit({ ...edit, capacity_label: e.target.value })} /></div>
-              <div><label className={labelCls}>Tidligst</label><input type="time" className={inputCls} value={edit.open_from} onChange={(e) => setEdit({ ...edit, open_from: e.target.value })} /></div>
-              <div><label className={labelCls}>Senest</label><input type="time" className={inputCls} value={edit.open_to} onChange={(e) => setEdit({ ...edit, open_to: e.target.value })} /></div>
               <div>
                 <label className={labelCls}>Opgave</label>
                 <select className={inputCls} value={edit.tour_type} onChange={(e) => setEdit({ ...edit, tour_type: e.target.value })}>
-                  {TOUR_TYPES.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+                  {(isGoods(tour) ? GOODS_TYPES : TOUR_TYPES).map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
                 </select>
               </div>
+              {edit.lines ? (
+                <div className="sm:col-span-2 space-y-2">
+                  <label className={labelCls}>Indhold</label>
+                  {edit.lines.map((l, i) => (
+                    <div key={i} className="flex gap-2">
+                      <input className={inputCls} value={l.text} onChange={(e) => setEdit({ ...edit, lines: edit.lines.map((x, j) => (j === i ? { ...x, text: e.target.value } : x)) })} />
+                      {edit.trailer_count >= 2 && (
+                        <select className={`${inputCls} w-28`} value={l.trailer || ""} onChange={(e) => setEdit({ ...edit, lines: edit.lines.map((x, j) => (j === i ? { ...x, trailer: e.target.value ? Number(e.target.value) : null } : x)) })}>
+                          <option value="">Hænger…</option>
+                          {Array.from({ length: edit.trailer_count }, (_, k) => <option key={k} value={k + 1}>Hænger {k + 1}</option>)}
+                        </select>
+                      )}
+                      {edit.lines.length > 1 && <button type="button" className="p-2 text-slate-400" onClick={() => setEdit({ ...edit, lines: edit.lines.filter((_, j) => j !== i) })}><X className="w-4 h-4" /></button>}
+                    </div>
+                  ))}
+                  <button type="button" className="text-sm font-semibold text-emerald-700 inline-flex items-center gap-1" onClick={() => setEdit({ ...edit, lines: [...edit.lines, { text: "", trailer: null }] })}><Plus className="w-4 h-4" /> Tilføj linje</button>
+                </div>
+              ) : (
+                <div><label className={labelCls}>Materiale</label><input className={inputCls} value={edit.fraction} onChange={(e) => setEdit({ ...edit, fraction: e.target.value })} /></div>
+              )}
+              {isPremium && (
+                <div>
+                  <label className={labelCls}>Hængere</label>
+                  <select className={inputCls} value={edit.trailer_count} onChange={(e) => {
+                    const n = Number(e.target.value);
+                    setEdit({ ...edit, trailer_count: n, lines: edit.lines || (n >= 2 ? [{ text: edit.fraction, trailer: 1 }] : null) });
+                  }}>
+                    {[0, 1, 2, 3, 4].map(n => <option key={n} value={n}>{n === 0 ? "Ingen" : n}</option>)}
+                  </select>
+                </div>
+              )}
+              <div className="sm:col-span-2"><AddressField label="Afhentning" value={edit.addr} onChange={(v) => setEdit({ ...edit, addr: v })} inputCls={inputCls} /></div>
+              <div className="sm:col-span-2"><AddressField label="Aflevering" value={edit.deliv} onChange={(v) => setEdit({ ...edit, deliv: v })} inputCls={inputCls} /></div>
+              {!isGoods(tour) && <div><label className={labelCls}>Container nr.</label><input className={inputCls} value={edit.container} onChange={(e) => setEdit({ ...edit, container: e.target.value })} /></div>}
+              {!isGoods(tour) && <div><label className={labelCls}>Kapacitet</label><input className={inputCls} value={edit.capacity_label} onChange={(e) => setEdit({ ...edit, capacity_label: e.target.value })} /></div>}
+              <div><label className={labelCls}>Tidligst</label><input type="time" className={inputCls} value={edit.open_from} onChange={(e) => setEdit({ ...edit, open_from: e.target.value })} /></div>
+              <div><label className={labelCls}>Senest</label><input type="time" className={inputCls} value={edit.open_to} onChange={(e) => setEdit({ ...edit, open_to: e.target.value })} /></div>
               <div>
                 <label className={labelCls}>Prioritet</label>
                 <select className={inputCls} value={edit.priority} onChange={(e) => setEdit({ ...edit, priority: e.target.value })}>
@@ -590,7 +738,11 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
         ) : (
           <div className="flex flex-wrap gap-2">
             {can("tours_edit") && <button className={btnGhost} disabled={tour.completed} data-testid="panel-edit" onClick={() => setEdit({
-              date: tour.date || "", fraction: tour.fraction || "", address: tour.address || "", facility: tour.facility || "",
+              date: tour.date || "", fraction: tour.fraction || "",
+              addr: Object.keys(tour.address_parts || {}).length ? tour.address_parts : parseAddress(tour.address),
+              deliv: Object.keys(tour.facility_parts || {}).length ? tour.facility_parts : parseAddress(tour.facility === tour.plads ? "" : tour.facility),
+              lines: (tour.cargo_lines || []).length ? tour.cargo_lines.map(l => ({ text: l.text, trailer: l.trailer })) : null,
+              trailer_count: Number(tour.trailer_count || 0),
               container: tour.container || "", capacity_label: tour.capacity_label || "", open_from: oh.from || "", open_to: oh.to || "",
               tour_type: tour.tour_type || "normal", priority: isHaster(tour) ? "urgent" : (tour.priority || "normal"), remark: tour.remark || "",
             })}><Edit2 className="w-4 h-4" /> Ret</button>}
@@ -622,11 +774,13 @@ const copyBody = (t, date) => ({
   open_from: t.open_from || "", open_to: t.open_to || "", priority: t.priority || "normal", remark: t.remark || "",
   is_private: !!t.is_private, private_company: t.private_company || "", customer_name: t.customer_name || "",
   customer_code: t.customer_code || "", loose_estimated_count: t.loose_estimated_count || 0,
+  tour_kind: t.tour_kind || "container", address_parts: t.address_parts || {}, facility_parts: t.facility_parts || {},
+  trailer_count: t.trailer_count || 0, cargo_lines: t.cargo_lines || [],
 });
 
 // ─────────────────────────── Arbejdsfladen ───────────────────────────
 
-export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord = "Lokation", perms = {} }) {
+export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord = "Lokation", perms = {}, profile = null }) {
   // 2026-10-17: Koordinator-rettigheder - mangler en nøgle, er den tilladt.
   const can = useCallback((k) => perms[k] !== false, [perms]);
   const canSelect = can("tours_assign") || can("tours_edit") || can("tours_delete");
@@ -1068,6 +1222,8 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
                                 <div className="flex items-center gap-1.5 flex-wrap">
                                   {isHaster(t) && !t.completed && <span className="px-1.5 py-0.5 rounded bg-rose-600 text-white text-[10px] font-bold uppercase">Haster</span>}
                                   <span className="font-semibold text-slate-900 dark:text-white">{t.fraction || "—"}</span>
+                                  {isGoods(t) && <span className="text-[11px] font-semibold text-sky-700 bg-sky-50 dark:bg-sky-950/40 dark:text-sky-300 px-1.5 py-0.5 rounded">Gods</span>}
+                                  {Number(t.trailer_count) > 0 && <span className="text-[11px] text-slate-500">{t.trailer_count} hænger{Number(t.trailer_count) === 1 ? "" : "e"}</span>}
                                   {t.tour_type && t.tour_type !== "normal" && <span className="text-[11px] font-semibold text-violet-700 dark:text-violet-300 bg-violet-50 dark:bg-violet-950/40 px-1.5 py-0.5 rounded">{TOUR_TYPE_LABEL[t.tour_type] || t.tour_type}</span>}
                                   {cap && <span className="text-[11px] text-slate-500 inline-flex items-center gap-0.5"><Package2 className="w-3 h-3" />{cap}</span>}
                                   {t.container && t.tour_type !== "loes_afhentning" && <span className="text-[11px] text-slate-400">#{t.container}</span>}
@@ -1116,12 +1272,12 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
         </>
       )}
 
-      <TourForm open={formOpen} canPrice={can("economy_edit")} customers={registry} onClose={() => setFormOpen(false)} initialDate={showOverdue ? todayStr() : date} pladsList={pladsList}
+      <TourForm open={formOpen} canPrice={can("economy_edit")} customers={registry} isPremium={!!profile?.is_premium} onClose={() => setFormOpen(false)} initialDate={showOverdue ? todayStr() : date} pladsList={pladsList}
         drivers={drivers} materials={materials} defaultPlads={fPlads || (pladsList.length === 1 ? pladsList[0].name : "")}
         siteWord={siteWord}
         onCreated={(d) => { setShowOverdue(false); if (d && d !== date) setDate(d); else refresh(); }} />
       <TourPanel tour={openTour} onClose={() => setOpenId(null)} drivers={drivers} load={load} onAssign={assign}
-        onChanged={refresh} onUnreadChanged={fetchUnread} ownName={ownName} siteWord={siteWord} askConfirm={setConfirm} can={can} />
+        onChanged={refresh} onUnreadChanged={fetchUnread} ownName={ownName} siteWord={siteWord} askConfirm={setConfirm} can={can} isPremium={!!profile?.is_premium} />
       <Confirm state={confirm} onClose={() => setConfirm(null)} />
     </div>
   );

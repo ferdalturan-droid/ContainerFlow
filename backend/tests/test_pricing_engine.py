@@ -164,3 +164,31 @@ def test_manual_override_and_extra_lines():
     assert r["total"] == 1050
     r2 = P.price_tour(attrs(), [], None, {"mode": "fixed", "amount": 500})
     assert r2["total"] == 500 and r2["status"] == "ok"
+
+
+def test_trailer_count_rules():
+    """2026-10-17: 1 hænger = 700, 2 hængere = 1100 (ikke nødvendigvis dobbelt)."""
+    rules = [base_rule("one", amount=700, conditions={"trailer_counts": [1]}),
+             base_rule("two", amount=1100, conditions={"trailer_counts": [2]}),
+             base_rule("gen", amount=500)]
+    assert P.price_tour(attrs(trailer_count=1, trailer=True), rules, None)["total"] == 700
+    assert P.price_tour(attrs(trailer_count=2, trailer=True), rules, None)["total"] == 1100
+    assert P.price_tour(attrs(trailer_count=0), rules, None)["total"] == 500
+    three = [base_rule("3+", amount=1500, conditions={"trailer_counts": [3]})]
+    assert P.price_tour(attrs(trailer_count=4), three, None)["total"] == 1500
+
+
+def test_agreed_price_keeps_waiting_only_when_chosen():
+    rules = [base_rule("b", amount=900),
+             surcharge("w", "waiting", "per_hour", 600),
+             surcharge("we", "weekend", "percent", 50)]
+    a = attrs(waiting_min=20, day_type="saturday")
+    plain = P.price_tour(a, rules, None, {"mode": "fixed", "amount": 1100})
+    assert plain["total"] == 1100
+    withw = P.price_tour(a, rules, None, {"mode": "fixed", "amount": 1100, "add_waiting": True, "label": "Aftalt pris"})
+    assert withw["total"] == 1100 + 300  # 20 min -> 30 min × 600 kr/t
+    assert withw["lines"][0]["label"] == "Aftalt pris"
+    # Uden grundregel virker aftalt pris + ventetid stadig
+    nobase = P.price_tour(a, [surcharge("w", "waiting", "per_hour", 600)], None,
+                          {"mode": "fixed", "amount": 800, "add_waiting": True})
+    assert nobase["status"] == "ok" and nobase["total"] == 1100

@@ -16,6 +16,12 @@ TASK_TYPES = {
     "vaerksted": "Til værksted",
     "afhent_vaerksted": "Hent fra værksted",
     "loes_afhentning": "Løs afhentning (egne containere)",
+    # 2026-10-17: Gods/andet (premium-firmaers egne ture, ikke containere)
+    "afhentning": "Afhentning (gods)",
+    "levering": "Levering",
+    "afhent_lever": "Afhentning + levering",
+    "flytning": "Flytning",
+    "andet": "Andet",
 }
 PRIORITIES = {"haster": "Haster", "normal": "Normal", "lav": "Lav"}
 DAY_TYPES = {"weekday": "Hverdag", "saturday": "Lørdag", "sunday": "Søndag", "holiday": "Helligdag"}
@@ -232,6 +238,12 @@ def rule_matches(rule: dict, attrs: dict) -> bool:
                 return False
         elif value not in wanted:
             return False
+    # 2026-10-17: Antal hængere (fx 1 hænger = 700, 2 hængere = 1100).
+    counts = [int(x) for x in (c.get("trailer_counts") or []) if str(x).isdigit()]
+    if counts:
+        n = int(attrs.get("trailer_count") or 0)
+        if not any(n == k or (k >= 3 and n >= 3) for k in counts):
+            return False
     trailer = c.get("trailer") or ""
     if trailer == "with" and not attrs.get("trailer"):
         return False
@@ -247,6 +259,7 @@ def specificity(rule: dict) -> int:
     c = rule.get("conditions") or {}
     score = sum(w for k, w in _WEIGHTS.items() if c.get(k))
     score += 1 if c.get("trailer") else 0
+    score += 2 if c.get("trailer_counts") else 0
     score += 1 if (c.get("time_from") and c.get("time_to")) else 0
     score += 1 if (c.get("outcome") or "completed") != "completed" else 0
     return score
@@ -359,7 +372,12 @@ def price_tour(attrs: dict, rules: List[dict], time_info: Optional[dict],
         result["status"] = "missing_rule"
         result["flags"].append("Ingen grundpris-regel matcher turen")
 
-    if base_amount is not None:
+    # Fast/aftalt pris: tillæg beregnes ud fra det faste beløb (fx % ved
+    # weekend), men kun ventetid beholdes - og kun hvis det er valgt.
+    fixed = override.get("mode") == "fixed"
+    surcharge_base = float(override.get("amount") or 0) if fixed else base_amount
+    if surcharge_base is not None:
+        base_amount = surcharge_base
         for s in surcharges:
             sp = s.get("surcharge") or {}
             unit, value = sp.get("unit") or "kr", float(sp.get("value") or 0)
@@ -384,9 +402,10 @@ def price_tour(attrs: dict, rules: List[dict], time_info: Optional[dict],
                                     "amount": money(amt), "rule_id": s.get("id"),
                                     "category": s.get("category")})
 
-    if override.get("mode") == "fixed":
-        result["lines"] = [{"type": "override", "label": "Manuel pris",
-                            "amount": money(float(override.get("amount") or 0))}]
+    if fixed:
+        keep = [l for l in result["lines"] if l.get("category") == "waiting"] if override.get("add_waiting") else []
+        result["lines"] = [{"type": "override", "label": override.get("label") or "Manuel pris",
+                            "amount": money(float(override.get("amount") or 0))}] + keep
         result["status"] = "ok"
         result["flags"] = [f for f in result["flags"] if f.startswith("Minimum")]
         result["flags"].append("Manuel pris")

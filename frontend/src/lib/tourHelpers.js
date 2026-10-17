@@ -9,7 +9,29 @@ export const TOUR_TYPES = [
   { id: "vaerksted", label: "Til værksted" },
   { id: "afhent_vaerksted", label: "Afhent fra værksted" },
 ];
-export const TOUR_TYPE_LABEL = Object.fromEntries(TOUR_TYPES.map(t => [t.id, t.label]));
+// 2026-10-17: Opgavetyper for "Gods og andet" (premium-firmaers egne ture
+// der ikke handler om containere).
+export const GOODS_TYPES = [
+  { id: "afhentning", label: "Afhentning" },
+  { id: "levering", label: "Levering" },
+  { id: "afhent_lever", label: "Afhentning + levering" },
+  { id: "flytning", label: "Flytning" },
+  { id: "andet", label: "Andet" },
+];
+export const TOUR_TYPE_LABEL = Object.fromEntries([...TOUR_TYPES, ...GOODS_TYPES].map(t => [t.id, t.label]));
+export const isGoods = (t) => t?.tour_kind === "goods";
+
+/** "2 hængere: 1) Beton  2) Træ" - kort tekst til kort og lister. */
+export const cargoSummary = (t) => {
+  const lines = Array.isArray(t?.cargo_lines) ? t.cargo_lines : [];
+  const n = Number(t?.trailer_count || 0);
+  if (!lines.length && !n) return "";
+  const parts = lines.map(l => `${l.trailer ? `H${l.trailer}: ` : ""}${l.text}${l.qty ? ` ×${l.qty}${l.unit ? " " + l.unit : ""}` : ""}`);
+  const head = n ? `${n} hænger${n === 1 ? "" : "e"}` : "";
+  return [head, parts.join(" · ")].filter(Boolean).join(" — ");
+};
+/** Flere læs der vejes hver for sig (løs afhentning eller flere indholdslinjer). */
+export const isMultiLoad = (t) => t?.tour_type === "loes_afhentning" || (Array.isArray(t?.cargo_lines) && t.cargo_lines.length > 1);
 
 export const SOURCE_LABEL = {
   manual: "Manuel",

@@ -197,7 +197,10 @@ self.addEventListener('push', (event) => {
     badge: '/icon-192.png',
     vibrate: [200, 100, 200],
     data: data.url || '/',
-    actions: data.actions || []
+    actions: data.actions || [],
+    // 2026-10-17: Samme tur/tråd erstatter den forrige notifikation.
+    tag: data.tag || undefined,
+    renotify: !!data.tag
   };
 
   event.waitUntil(

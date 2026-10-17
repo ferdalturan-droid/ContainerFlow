@@ -19,6 +19,20 @@ Data must be strictly isolated per company.
   and `/api/health` bypass tenant filtering so the QR-code customer flow continues to work.
 
 ## What's been implemented (2026-02-15)
+## What's new in 2026-10-17 (Gods/container, Ny tur v2, chauffør v2, push)
+- **Turtyper:** `tour_kind` er "container" eller "goods". Gods findes kun på premium-firmaets egne lokationer; B2B og partner er altid container (`_normalize_tour_doc`).
+- **Nye felter:** strukturerede adresser (`address_parts`/`facility_parts`), `trailer_count` og `cargo_lines` (indhold pr. hænger). Vægt pr. læs gemmes i `container_weights` og summeres.
+- **Ny tur v2:** Flere detaljer, by og postnummer (Datafordeler-liste i `frontend/src/data/postnumre.json`), kunderegister, aftalt pris med ventetid oveni.
+- **Prisregler:** betingelsen "Antal hængere"; aftalt pris har `label` og `add_waiting`.
+- **Chauffør v2:** `components/DriverTodayView.jsx` med fanerne Mine/Ledige/Færdige og nye kort. Profilen har kunde, vogn, hænger, notifikationer og log ud.
+- **Push genaktiveret** (ophæver Fase 15.23b efter ønske):
+  - Hændelser: tildeling, besked, ændring, aflysning, og haster til chauffører der har stemplet ind.
+  - Chaufføren kan slå det fra.
+  - VAPID-nøgle i PEM eller rå form (`_vapid_key`).
+  - `/push/send` kræver nu login.
+- **Koordinatorer:** kan begrænses til bestemte kunder (`customer_scope`).
+- **Rettelser:** `fraction` er valgfri i TourCreate (kan komme fra `cargo_lines`). Vægt pr. læs kan rettes efter afslutning. Hænger er forvalgt, når turen har planlagte hængere.
+
 ## What's new in 2026-10-17 (Koordinatorer, prisversioner, Ring planlægger)
 
 Se `TEAM_RETTIGHEDER.md`, `PRICING_SPEC.md` §3b og `LOGISTICS_ROADMAP.md` (svar A–F).

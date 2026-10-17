@@ -71,23 +71,48 @@ function PermGrid({ catalog, value, onChange, allowed, disabled }) {
   );
 }
 
-function MemberRow({ m, catalog, me, onSaved }) {
+/** Valgfri begrænsning til bestemte kunder (tom = alle). */
+function ScopePicker({ options, value, onChange, disabled }) {
+  if (!options?.length || options.length < 2) return null;
+  const set = new Set(value || []);
+  return (
+    <div className="space-y-1.5">
+      <span className={labelCls}>Adgang til kunder</span>
+      <div className="flex flex-wrap gap-1.5">
+        <button type="button" disabled={disabled} onClick={() => onChange([])}
+          className={`px-3 py-1.5 rounded-full text-xs font-semibold border ${set.size === 0 ? "bg-emerald-600 border-emerald-600 text-white" : "border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300"}`}>Alle kunder</button>
+        {options.map(o => {
+          const on = set.has(o.id);
+          return (
+            <button key={o.id} type="button" disabled={disabled}
+              onClick={() => { const n = new Set(set); on ? n.delete(o.id) : n.add(o.id); onChange(Array.from(n)); }}
+              className={`px-3 py-1.5 rounded-full text-xs font-semibold border ${on ? "bg-emerald-600 border-emerald-600 text-white" : "border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300"}`}>{o.name}</button>
+          );
+        })}
+      </div>
+      <p className="text-[11px] text-slate-500">Begrænser hvilke kunders ture koordinatoren kan se og ændre (Ture, beskeder, Rapportering).</p>
+    </div>
+  );
+}
+
+function MemberRow({ m, catalog, me, onSaved, scopeOptions }) {
   const [open, setOpen] = useState(false);
   const [perms, setPerms] = useState(m.permissions);
+  const [scope, setScope] = useState(m.customer_scope || []);
   const [phone, setPhone] = useState(m.phone || "");
   const [busy, setBusy] = useState(false);
   const isMe = m.id === me.id;
   const editable = m.is_coordinator && !isMe;
   const count = Object.values(m.permissions).filter(Boolean).length;
 
-  useEffect(() => { setPerms(m.permissions); setPhone(m.phone || ""); }, [m]);
+  useEffect(() => { setPerms(m.permissions); setPhone(m.phone || ""); setScope(m.customer_scope || []); }, [m]);
 
   const save = async (extra = {}) => {
     setBusy(true);
     try {
       const p = { ...perms };
       if (p.economy_edit) p.economy_view = true;
-      await axios.put(`${API}/logistics/team/${m.id}`, { name: m.name, phone, permissions: p, ...extra });
+      await axios.put(`${API}/logistics/team/${m.id}`, { name: m.name, phone, permissions: p, customer_scope: scope, ...extra });
       toast.success("Gemt");
       onSaved();
     } catch (e) { toast.error(formatApiError(e)); }
@@ -120,7 +145,7 @@ function MemberRow({ m, catalog, me, onSaved }) {
           </span>
           <span className="block text-xs text-slate-500 truncate">{m.email}{m.phone ? ` · ${m.phone}` : ""}</span>
         </span>
-        <span className="text-xs text-slate-400 hidden sm:inline">{m.is_coordinator ? `${count} af ${catalog.length} rettigheder` : "Alle rettigheder"}</span>
+        <span className="text-xs text-slate-400 hidden sm:inline">{m.is_coordinator ? `${count} af ${catalog.length} rettigheder${(m.customer_scope || []).length ? ` · ${m.customer_scope.length} kunde${m.customer_scope.length === 1 ? "" : "r"}` : ""}` : "Alle rettigheder"}</span>
         <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
       {open && (
@@ -130,7 +155,10 @@ function MemberRow({ m, catalog, me, onSaved }) {
             <input className={inputCls} value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+45 …" inputMode="tel" />
           </div>
           {m.is_coordinator ? (
-            <PermGrid catalog={catalog} value={perms} onChange={setPerms} allowed={me.permissions} disabled={!editable} />
+            <>
+              <PermGrid catalog={catalog} value={perms} onChange={setPerms} allowed={me.permissions} disabled={!editable} />
+              <ScopePicker options={scopeOptions} value={scope} onChange={setScope} disabled={!editable} />
+            </>
           ) : (
             <p className="text-sm text-slate-500 flex items-center gap-2"><Shield className="w-4 h-4" /> Administratorer har altid adgang til alt.</p>
           )}
@@ -150,7 +178,7 @@ function MemberRow({ m, catalog, me, onSaved }) {
 export default function TeamPanel() {
   const [data, setData] = useState(null);
   const [inviting, setInviting] = useState(false);
-  const [form, setForm] = useState({ name: "", email: "", phone: "", permissions: toPerms(PRESETS[0].keys) });
+  const [form, setForm] = useState({ name: "", email: "", phone: "", permissions: toPerms(PRESETS[0].keys), customer_scope: [] });
   const [busy, setBusy] = useState(false);
   const [contact, setContact] = useState({ phone: "", name: "" });
 
@@ -171,7 +199,7 @@ export default function TeamPanel() {
       await axios.post(`${API}/logistics/team`, { ...form, permissions: p });
       toast.success(`Invitation sendt til ${form.email}`);
       setInviting(false);
-      setForm({ name: "", email: "", phone: "", permissions: toPerms(PRESETS[0].keys) });
+      setForm({ name: "", email: "", phone: "", permissions: toPerms(PRESETS[0].keys), customer_scope: [] });
       load();
     } catch (e) { toast.error(formatApiError(e)); }
     setBusy(false);
@@ -211,6 +239,7 @@ export default function TeamPanel() {
             <div><label className={labelCls}>Telefon</label><input className={inputCls} inputMode="tel" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} placeholder="Valgfri" /></div>
           </div>
           <PermGrid catalog={data.catalog} value={form.permissions} onChange={(p) => setForm({ ...form, permissions: p })} allowed={data.me.permissions} />
+          <ScopePicker options={data.scope_options} value={form.customer_scope} onChange={(v) => setForm({ ...form, customer_scope: v })} />
           <div className="flex justify-end gap-2">
             <button className={btnGhost} onClick={() => setInviting(false)}>Annuller</button>
             <button className={btnPrimary} disabled={busy || !form.name.trim() || !form.email.trim()} onClick={invite} data-testid="team-invite-send">
@@ -223,7 +252,7 @@ export default function TeamPanel() {
 
       <div className={`${card} overflow-hidden`}>
         <ul className="divide-y divide-slate-100 dark:divide-slate-700">
-          {data.members.map(m => <MemberRow key={m.id} m={m} catalog={data.catalog} me={data.me} onSaved={load} />)}
+          {data.members.map(m => <MemberRow key={m.id} m={m} catalog={data.catalog} me={data.me} onSaved={load} scopeOptions={data.scope_options} />)}
         </ul>
       </div>
 

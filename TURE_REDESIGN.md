@@ -57,3 +57,35 @@ Begge dele er rettet. Desuden:
 - Turvarighed regnes nu rigtigt (`on_way_time` manglede i projektionen).
 - Ordrer tælles for firmaets kunder.
 - Der er en ny live-blok "I dag", som opdateres hvert 30. sekund.
+
+
+## 2026-10-17: Container eller gods, ny tur v2, ny chaufførside, push
+
+### Hvilke felter en tur har (B2B kontra premium)
+| Hvor turen hører til | Type | Felter |
+|---|---|---|
+| Genbrugsplads-kundens plads (B2B, bestilling eller manuel) | altid **Container** | materiale, container nr., kapacitet, containeropgaver; vægt kræves ved "Afhent container" |
+| Partner-firma (option 2) | altid **Container** | som B2B; ingen hængere eller indholdslinjer |
+| Premium-firmaets egne lokationer | **Container** eller **Gods og andet** (valgt pr. tur, sidste valg huskes) | Gods: "hvad skal køres" med antal og enhed, opgaver Afhentning/Levering/Afhentning + levering/Flytning/Andet, vægt valgfri, ingen containerfelter |
+
+- Backend håndhæver reglerne i `_normalize_tour_doc`. Frontend viser kun de felter, der giver mening.
+- Et premium-firma med kunder får B2B-flowet på kundernes pladser og det generiske flow på egne lokationer.
+- Forbindelsen oprettes af kunden (kunde admin › Logistik-partnere) og bruger samme firma-id. Derfor slår `has_connections` straks igennem for både admin og chauffør.
+
+### Ny tur
+- **Fremme:** lokation, dato, kunde (fra kunderegistret), type, opgave, indhold, afhentning og aflevering (vej, postnummer og by fra Datafordeler-listen, eller "Tilføj manuelt"), chauffør og note.
+- **"Flere detaljer":** tidsrum, prioritet, hængere (premium), container nr. og kapacitet, aftalt pris med valget "ventetid oveni", og gentagelse.
+- **Hængere:** ved 2 eller flere hængere vælges en hænger pr. indholdslinje. Prisen sættes enten som aftalt pris for hele turen eller med prisregler på "Antal hængere".
+
+### Chauffør (TURE)
+- **Faner:** Mine, Ledige (grupperet pr. lokation plus "Fra tidligere dage") og Færdige.
+- **I gang:** en tur der er i gang ligger øverst.
+- **Kort:** adressen står først. Én hovedknap: Start, derefter Afslut.
+- **Afslut:** vejning sker i panelet. Ved flere læs vejes hvert læs for sig; ved gods er vægten valgfri. Vægte kan rettes pr. læs efter afslutning.
+- **Profil:** kunde, vogn, hænger, notifikationer og log ud.
+
+### Push
+- **Hændelser:** ny tildeling, besked fra planlægger, ændring, aflysning, og ny haster-tur til chauffører der har stemplet ind.
+- **Til og fra:** slået til som standard, og chaufføren slår det fra under Profil.
+- **iPhone og iPad:** kræver at appen er lagt på hjemmeskærmen (guide vises).
+- **Kode:** `_push_driver`, `_push_new_haster`, `/api/push/*`, `/api/driver/push-settings` og `frontend/src/lib/push.js`.

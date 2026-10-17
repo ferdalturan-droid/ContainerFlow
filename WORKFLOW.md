@@ -49,6 +49,13 @@ All test users share one password: `LOCAL_TEST_PASSWORD` in `.env.local`.
 
 ---
 
+## 4b. Push-notifikationer til chauffører (én gang)
+Chauffører får besked på telefonen (ny tur, haster, ændring, aflysning, besked). Det kræver et VAPID-nøglepar på serveren:
+1. Lav nøglerne: `docker run --rm containerflow:test python /app/scripts/gen-vapid.py`. Scriptet ligger i image, når det er bygget fra `main`. Eller kør `python3 scripts/gen-vapid.py`.
+2. Læg de to linjer ind som secrets i Scaleway (Container › Environment): `VAPID_PUBLIC_KEY` og `VAPID_PRIVATE_KEY`.
+3. Deploy. Skift ikke nøglerne senere uden grund, for så skal alle chauffører slå notifikationer til igen.
+Lokalt ligger nøglerne allerede i `.env.local`.
+
 ## 5. Back up to GitHub
 | When | Command |
 |---|---|
