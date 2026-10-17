@@ -19,6 +19,10 @@ Data must be strictly isolated per company.
   and `/api/health` bypass tenant filtering so the QR-code customer flow continues to work.
 
 ## What's been implemented (2026-02-15)
+## What's new in 2026-10-17 (Prisaftaler, afslut tur v2)
+- **Prisaftaler:** grundpris og flere tillæg i én formular (`/pricing/bundles`). Dette retter fejlen, hvor grundpris og tillæg overskrev hinanden. Tillæg får automatisk deres betingelse. Derudover: prissimulator (`/pricing/simulate`), 409 ved identiske betingelser, danske tal (`_parse_dk_number`/`parseDk`), "Fritaget", "Opret pris" fra Rapport og "Ret prisaftale" i Kunder & priser. Se PRICING_SPEC 3e.
+- **Afslut tur v2:** `capture` {quantity, photo} vælges i Ny tur. `FinishSheet` spørger i linjens enhed, tager billeder (`tour_photos`), og hængerantallet gemmes som `trailer_count_actual` (bruges i prisen). Chaufføren kan også sende ventetid og afvigelser. Valideringen er blød. Se TURE_REDESIGN.
+
 ## What's new in 2026-10-17 (Gods/container, Ny tur v2, chauffør v2, push)
 - **Én opgave = én tur:** flere afhentninger og afleveringer gemmes som `stops` på én tur; chaufføren krydser stop af. "Opret som separate ture" er et frivilligt valg. Før blev det til én tur pr. adresse, med dobbelt gods og dobbelt pris.
 - **Turtyper:** `tour_kind` er "container" eller "goods". Gods findes kun på premium-firmaets egne lokationer; B2B og partner er altid container (`_normalize_tour_doc`).

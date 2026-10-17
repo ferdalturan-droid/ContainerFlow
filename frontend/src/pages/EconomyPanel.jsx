@@ -181,6 +181,7 @@ const fmtTs = (iso) => {
 export default function EconomyPanel({ canEdit = true }) {
   const [view, setView] = useState("report");
   const [rulesFilter, setRulesFilter] = useState("all");
+  const [draftBundle, setDraftBundle] = useState(null);
   const [options, setOptions] = useState(null);
   const [pendingCount, setPendingCount] = useState(0);
 
@@ -227,7 +228,15 @@ export default function EconomyPanel({ canEdit = true }) {
         <div className={`${card} p-10 flex justify-center`}><Loader2 className="w-6 h-6 animate-spin text-slate-400" /></div>
       ) : (
         <>
-          {view === "report" && <ReportView options={options} onChanged={loadPending} goRules={() => setView("rules")} goApprovals={() => setView("approvals")} />}
+          {view === "report" && <ReportView options={options} onChanged={loadPending} goRules={() => setView("rules")} goApprovals={() => setView("approvals")}
+            onCreatePrice={canEdit ? (row) => setDraftBundle(newBundle({
+              // Turen uden pris: kunde + lokation + opgave + materiale er udfyldt på forhånd.
+              customer_ids: row.customer_id ? [row.customer_id] : [],
+              location_codes: row.location_code ? [row.location_code] : [],
+              task_types: row.task_type ? [row.task_type] : [],
+              materials: row.material && options.materials.includes(row.material) ? [row.material] : [],
+            }, `${row.customer_name || "Kunde"}${row.location_name ? ` - ${row.location_name}` : ""}`)) : undefined} />}
+          {draftBundle && <BundleEditor bundle={draftBundle} options={options} onClose={() => setDraftBundle(null)} onSaved={() => { setDraftBundle(null); setView("rules"); }} />}
           {!canEdit && (
             <div className="flex gap-2 p-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 text-sm text-amber-900 dark:text-amber-100">
               <Info className="w-4 h-4 mt-0.5 shrink-0" /> Du kan se priser, men ikke ændre dem. Spørg din administrator under Team &amp; rettigheder.
@@ -259,7 +268,7 @@ function periodRange(p) {
   return null;
 }
 
-function ReportView({ options, onChanged, goRules, goApprovals }) {
+function ReportView({ options, onChanged, goRules, goApprovals, onCreatePrice }) {
   const [period, setPeriod] = useState("this_month");
   const [range, setRange] = useState(periodRange("this_month"));
   const [customer, setCustomer] = useState("");
@@ -491,6 +500,10 @@ function ReportView({ options, onChanged, goRules, goApprovals }) {
                         <div className="font-bold">{fmtKr(r.price.total)}</div>
                         <div className="flex justify-end gap-1 mt-0.5">
                           {st && <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${st.cls}`}>{st.text}</span>}
+                          {r.price.status === "missing_rule" && onCreatePrice && (
+                            <button className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-600 text-white" data-testid={`create-price-${r.tour_id}`}
+                              onClick={(e) => { e.stopPropagation(); onCreatePrice(r); }}>Opret pris</button>
+                          )}
                           {r.price.locked && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200">Faktureret</span>}
                           {r.has_override && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">Tilpasset</span>}
                           {r.pending_requests > 0 && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-700">Afventer</span>}
@@ -752,6 +765,20 @@ function conditionChips(c, options) {
   return out;
 }
 
+/** 2026-10-17: Tillæg hvis type ikke matcher betingelserne gælder ALLE ture
+    (fx et "weekendtillæg" uden lør/søn). Vises som advarsel på reglen. */
+function riskWarning(r) {
+  if (r.kind !== "surcharge") return "";
+  const c = r.conditions || {};
+  const has = (k, v) => (c[k] || []).includes(v);
+  if (r.category === "weekend" && !(has("day_types", "saturday") || has("day_types", "sunday"))) return "Gælder alle dage - mangler dagtype lørdag/søndag";
+  if (r.category === "holiday" && !has("day_types", "holiday")) return "Gælder alle dage - mangler dagtype helligdag";
+  if (r.category === "haster" && !has("priorities", "haster")) return "Gælder alle ture - mangler prioritet Haster";
+  if (r.category === "trailer" && !(c.trailer === "with" || (c.trailer_counts || []).length)) return "Gælder også ture uden hænger";
+  if (r.category === "evening" && !(c.time_from && c.time_to)) return "Gælder hele døgnet - mangler tidsrum";
+  return "";
+}
+
 function RulesView({ options, reloadOptions, canEdit = true, initialFilter = "all" }) {
   const [rules, setRules] = useState(null);
   const [history, setHistory] = useState({});
@@ -803,8 +830,62 @@ function RulesView({ options, reloadOptions, canEdit = true, initialFilter = "al
     }
     return (r.conditions?.customer_ids || []).includes(filter);
   });
-  const base = visible.filter(r => r.kind === "base");
-  const sur = visible.filter(r => r.kind === "surcharge");
+  // Prisaftaler (grundpris + tillæg) vises samlet; ældre enkeltregler for sig.
+  const bundles = Object.values(visible.filter(r => r.bundle_id).reduce((m, r) => {
+    (m[r.bundle_id] = m[r.bundle_id] || []).push(r); return m;
+  }, {})).sort((a, b) => (a[0].bundle_name || "").localeCompare(b[0].bundle_name || "", "da"));
+  const singles = visible.filter(r => !r.bundle_id);
+  const base = singles.filter(r => r.kind === "base");
+  const sur = singles.filter(r => r.kind === "surcharge");
+  const removeBundle = async (bid, effective) => {
+    try {
+      await axios.delete(`${API}/pricing/bundles/${bid}`, { params: { effective } });
+      toast.success(effective === "all" ? "Prisaftalen er slettet helt" : "Prisaftalen gælder ikke for nye ture");
+      setConfirmDel(null); load();
+    } catch (e) { toast.error(formatApiError(e)); }
+  };
+  const BundleCard = ({ rs }) => {
+    const bb = bundleFromRules(rs);
+    const baseRule = rs.find(r => r.kind === "base");
+    const surs = rs.filter(r => r.kind === "surcharge");
+    const chips = conditionChips(bb.conditions, options);
+    const vf = (baseRule || rs[0]).version_from;
+    return (
+      <div className={`${card} p-4 flex flex-col sm:flex-row sm:items-start gap-3 ${bb.active ? "" : "opacity-60"}`} data-testid={`bundle-card-${bb.bundle_id}`}>
+        <div className="flex-1 min-w-0 space-y-1.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-bold">{bb.name}</span>
+            <InfoTip text="Prisaftale: grundpris og tillæg for de samme ture." own={bb.note} />
+            {!bb.active && <span className="px-2 py-0.5 rounded-full text-[11px] bg-slate-200 dark:bg-slate-700">Inaktiv</span>}
+            {vf && new Date(vf) > new Date() && <span className="px-2 py-0.5 rounded-full text-[11px] bg-violet-100 text-violet-800">Træder i kraft {fmtTs(vf)}</span>}
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {chips.map((x, i) => <span key={i} className="px-2 py-0.5 rounded-full text-[11px] bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200">{x}</span>)}
+            {chips.length === 0 && <span className="px-2 py-0.5 rounded-full text-[11px] bg-slate-100 dark:bg-slate-700 text-slate-500">Gælder alle ture</span>}
+          </div>
+          <div className="text-sm space-y-0.5">
+            {baseRule ? <div><span className="text-slate-500">Grundpris:</span> <b className="text-emerald-700 dark:text-emerald-300">{ruleSummary(baseRule, options)}</b></div>
+              : <div className="text-slate-500">Ingen grundpris (bruger den generelle)</div>}
+            {surs.map(r => (
+              <div key={r.id}><span className="text-slate-500">{options.categories[r.category]}:</span> <b>{Number(r.surcharge?.value) === 0 ? "Fritaget" : ruleSummary(r, options)}</b></div>
+            ))}
+          </div>
+          {vf && <div className="text-[11px] text-slate-500">Gælder for ture oprettet fra {fmtTs(vf)}</div>}
+        </div>
+        {canEdit && <div className="flex items-center gap-1 shrink-0">
+          <button title="Rediger" className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700" onClick={() => setEditing(bb)} data-testid="bundle-edit"><Edit2 className="w-4 h-4" /></button>
+          <button title="Kopiér (fx til en anden kunde)" className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700" onClick={() => setEditing(copyBundle(bb))}><Copy className="w-4 h-4" /></button>
+          {confirmDel === bb.bundle_id ? (
+            <div className="flex flex-col sm:flex-row gap-1">
+              <button className="px-2 py-1 rounded-lg bg-amber-600 text-white text-xs font-bold" onClick={() => removeBundle(bb.bundle_id, "now")}>Stop fra nu</button>
+              <button className="px-2 py-1 rounded-lg bg-red-600 text-white text-xs font-bold" onClick={() => removeBundle(bb.bundle_id, "all")}>Slet helt</button>
+              <button className="px-2 py-1 rounded-lg text-xs" onClick={() => setConfirmDel(null)}>Annuller</button>
+            </div>
+          ) : <button title="Slet" className="p-2 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/30 text-red-600" onClick={() => setConfirmDel(bb.bundle_id)}><Trash2 className="w-4 h-4" /></button>}
+        </div>}
+      </div>
+    );
+  };
 
   const RuleCard = ({ r }) => (
     <div className={`${card} p-4 flex flex-col sm:flex-row sm:items-start gap-3 ${r.active ? "" : "opacity-60"}`}>
@@ -816,6 +897,7 @@ function RulesView({ options, reloadOptions, canEdit = true, initialFilter = "al
           {(r.valid_from || r.valid_to) && <span className="px-2 py-0.5 rounded-full text-[11px] bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-200" title="Kørselsdato">Kørt {r.valid_from || "…"} → {r.valid_to || "…"}</span>}
           {r.version_from && new Date(r.version_from) > new Date() && <span className="px-2 py-0.5 rounded-full text-[11px] bg-violet-100 text-violet-800 dark:bg-violet-900/40 dark:text-violet-200">Træder i kraft {fmtTs(r.version_from)}</span>}
           {r.version_to && <span className="px-2 py-0.5 rounded-full text-[11px] bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">Ophører {fmtTs(r.version_to)}</span>}
+          {riskWarning(r) && <span className="px-2 py-0.5 rounded-full text-[11px] bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-200 inline-flex items-center gap-1" data-testid="rule-risk"><AlertTriangle className="w-3 h-3" />{riskWarning(r)}</span>}
         </div>
         {(r.version_from || r.versions > 1) && (
           <div className="text-[11px] text-slate-500 mt-0.5">
@@ -843,8 +925,8 @@ function RulesView({ options, reloadOptions, canEdit = true, initialFilter = "al
         <button title={r.active ? "Deaktivér" : "Aktivér"} onClick={() => toggleActive(r)} className={`w-10 h-6 rounded-full relative transition-colors ${r.active ? "bg-emerald-500" : "bg-slate-300 dark:bg-slate-600"}`}>
           <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all ${r.active ? "left-[18px]" : "left-0.5"}`} />
         </button>
-        <button title="Rediger" className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700" onClick={() => setEditing(r)}><Edit2 className="w-4 h-4" /></button>
-        <button title="Kopiér" className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700" onClick={() => setEditing({ ...r, id: undefined, name: `${r.name} (kopi)` })}><Copy className="w-4 h-4" /></button>
+        <button title="Rediger (åbner som prisaftale)" className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700" onClick={() => setEditing(bundleFromRules([r]))}><Edit2 className="w-4 h-4" /></button>
+        <button title="Kopiér" className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700" onClick={() => setEditing(copyBundle(bundleFromRules([r])))}><Copy className="w-4 h-4" /></button>
         {confirmDel === r.id ? (
           <div className="flex flex-col sm:flex-row gap-1">
             <button className="px-2 py-1 rounded-lg bg-amber-600 text-white text-xs font-bold" title="Eksisterende ture beholder prisen" onClick={() => remove(r.id, "now")}>Stop fra nu</button>
@@ -877,16 +959,16 @@ function RulesView({ options, reloadOptions, canEdit = true, initialFilter = "al
             )}
           </select>
         </div>
-        {canEdit && <button className={btnPrimary} onClick={() => setEditing({ kind: "base", name: "", conditions: { ...EMPTY_COND, customer_ids: !["all", "general", "own"].includes(filter) ? [filter] : [] }, pricing: { model: "fixed", amount: "" }, active: true })}>
-          <Plus className="w-4 h-4" /> Ny regel
+        {canEdit && <button className={btnPrimary} data-testid="bundle-new" onClick={() => setEditing(newBundle({ customer_ids: !["all", "general", "own"].includes(filter) ? [filter] : [] }))}>
+          <Plus className="w-4 h-4" /> Ny prisaftale
         </button>}
       </div>
 
       <div className="flex gap-2 p-3 rounded-xl bg-sky-50 dark:bg-sky-950/30 border border-sky-200 dark:border-sky-900 text-sm text-sky-900 dark:text-sky-100">
         <Info className="w-4 h-4 mt-0.5 shrink-0" />
         <div>
-          <b>Sådan virker det:</b> Hver tur får én <b>grundpris</b> - den mest specifikke regel der passer vinder (kunde &gt; lokation &gt; leveringsadresse &gt; opgavetype &gt; materiale).
-          Derefter lægges <b>tillæg</b> oveni - højst ét pr. type (fx ét weekendtillæg), igen det mest specifikke. Et kundespecifikt tillæg på 0 kr fritager altså kunden.
+          <b>Sådan virker det:</b> En <b>prisaftale</b> samler grundpris og tillæg for de samme ture (fx en kunde). Hver tur får én grundpris - den mest specifikke aftale vinder (kunde &gt; lokation &gt; leveringsadresse &gt; opgavetype &gt; materiale).
+          Tillæg lægges oveni - højst ét pr. type, igen det mest specifikke. "Fritaget" på en kundes aftale fjerner et generelt tillæg for den kunde. Brug <b>Prøv prisen</b> i editoren før du gemmer.
         </div>
       </div>
 
@@ -898,16 +980,18 @@ function RulesView({ options, reloadOptions, canEdit = true, initialFilter = "al
       )}
 
       <div className="space-y-2">
-        <h3 className="text-sm font-bold text-slate-600 dark:text-slate-300">Grundpriser ({base.length})</h3>
-        {base.length === 0 && <div className={`${card} p-6 text-sm text-slate-500 text-center`}>Ingen grundpriser endnu. Start med en generel regel uden betingelser - så har alle ture en pris.</div>}
-        {base.map(r => <RuleCard key={r.id} r={r} />)}
+        <h3 className="text-sm font-bold text-slate-600 dark:text-slate-300">Prisaftaler ({bundles.length})</h3>
+        {bundles.length === 0 && <div className={`${card} p-6 text-sm text-slate-500 text-center`}>Ingen prisaftaler endnu. Start med en generel aftale uden betingelser - så har alle ture en pris - og læg tillæg på samme sted.</div>}
+        {bundles.map(rs => <BundleCard key={rs[0].bundle_id} rs={rs} />)}
       </div>
-      <div className="space-y-2">
-        <h3 className="text-sm font-bold text-slate-600 dark:text-slate-300">Tillæg ({sur.length})</h3>
-        {sur.length === 0 && <div className={`${card} p-6 text-sm text-slate-500 text-center`}>Ingen tillæg endnu (fx weekend, helligdag, haster, hænger, aften eller ventetid).</div>}
-        {sur.map(r => <RuleCard key={r.id} r={r} />)}
-      </div>
-      {editing && <RuleEditor rule={editing} options={options} firstRule={rules.length === 0} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); }} />}
+      {singles.length > 0 && (
+        <div className="space-y-2">
+          <h3 className="text-sm font-bold text-slate-600 dark:text-slate-300">Enkeltregler ({singles.length})</h3>
+          <p className="text-xs text-slate-500">Regler oprettet før prisaftaler fandtes. Tryk ret for at gøre en regel til en prisaftale.</p>
+          {[...base, ...sur].map(r => <RuleCard key={r.id} r={r} />)}
+        </div>
+      )}
+      {editing && <BundleEditor bundle={editing} options={options} firstRule={rules.length === 0} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); }} />}
     </div>
   );
 }
@@ -1003,7 +1087,17 @@ function CustomersView({ options, reloadOptions, canEdit, goRules }) {
           </div>
           <div className="flex flex-wrap gap-2 shrink-0">
             {list.length > 0 && <button className={btnGhost} onClick={() => goRules(c.id)}><Tag className="w-4 h-4" /> Se priser</button>}
-            {canEdit && <button className={btnPrimary} onClick={() => setNewRuleFor(c)} data-testid={`customer-price-${c.name}`}><Plus className="w-4 h-4" /> {list.length ? "Tilføj pris" : "Sæt egen pris"}</button>}
+            {canEdit && (() => {
+              // Har kunden allerede en prisaftale, rettes den - ellers oprettes en ny.
+              const bid = (list.find(r => r.bundle_id && (r.conditions?.customer_ids || []).length === 1) || {}).bundle_id;
+              const existing = bid ? rules.filter(r => r.bundle_id === bid) : [];
+              return (
+                <button className={btnPrimary} data-testid={`customer-price-${c.name}`}
+                  onClick={() => setNewRuleFor(existing.length ? bundleFromRules(existing) : newBundle({ customer_ids: [c.id] }, `${c.name} - prisaftale`))}>
+                  {existing.length ? <><Edit2 className="w-4 h-4" /> Ret prisaftale</> : <><Plus className="w-4 h-4" /> Sæt egen pris</>}
+                </button>
+              );
+            })()}
             {reg && <button className={btnGhost} onClick={() => setEditingCust(reg)} title="Ret kundeoplysninger"><Edit2 className="w-4 h-4" /></button>}
             {reg && reg.active !== false && (
               <button className={btnGhost} title="Skjul kunden (ture og priser bevares)" onClick={async () => {
@@ -1066,8 +1160,8 @@ function CustomersView({ options, reloadOptions, canEdit, goRules }) {
       </section>
 
       {newRuleFor && (
-        <RuleEditor
-          rule={{ kind: "base", name: `${newRuleFor.name} - pris`, conditions: { ...EMPTY_COND, customer_ids: [newRuleFor.id] }, pricing: { model: "fixed", amount: "" }, active: true }}
+        <BundleEditor
+          bundle={newRuleFor}
           options={options} firstRule={rules.length === 0}
           onClose={() => setNewRuleFor(null)} onSaved={() => { setNewRuleFor(null); load(); }} />
       )}
@@ -1075,72 +1169,192 @@ function CustomersView({ options, reloadOptions, canEdit, goRules }) {
   );
 }
 
-function RuleEditor({ rule, options, onClose, onSaved, firstRule = false }) {
-  // 2026-10-17: Hvornår ændringen gælder. "now" = kun ture oprettet fra nu
-  // (eksisterende ture beholder prisen), "all" = også eksisterende ture der
-  // ikke er faktureret, eller en dato.
+/* ======================================================================
+   Prisaftale-editor (2026-10-17)
+   Én prisaftale = én grundpris + flere tillæg med SAMME betingelser.
+   Før kunne en regel kun være enten grundpris eller tillæg, og skiftede man
+   type, forsvandt det man havde tastet i den anden. Tillæg får automatisk
+   deres scenarie-betingelse (weekend = lør/søn osv.), så et "weekendtillæg"
+   aldrig ved en fejl gælder alle dage.
+   ====================================================================== */
+const CAT_AUTO_TEXT = {
+  weekend: "Lørdag og søndag", holiday: "Helligdage", haster: "Ture med prioritet Haster",
+  trailer: "Ture med hænger", evening: "Ture der starter i tidsrummet", waiting: "Kun når der er registreret ventetid", other: "Alle ture i aftalen",
+};
+const CAT_NAME = { weekend: "Weekendtillæg", holiday: "Helligdagstillæg", haster: "Hastetillæg", trailer: "Hængertillæg", evening: "Aften/nat-tillæg", waiting: "Ventetid", other: "Andet tillæg" };
+const AUTO_KEYS = { weekend: ["day_types"], holiday: ["day_types"], haster: ["priorities"], trailer: ["trailer", "trailer_counts"], evening: ["time_from", "time_to"] };
+const parseNum = (v) => {
+  if (v === "" || v == null) return NaN;
+  let s = String(v).replace(/\s|kr|%/g, "");
+  if (s.includes(",")) s = s.replace(/\./g, "").replace(",", ".");
+  else if (/^\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, "");
+  return Number(s);
+};
+const BLANK_PRICING = { model: "fixed", amount: "", hourly_rate: "", start_fee: "", min_minutes: "", min_amount: "", rounding_mode: "up", rounding_minutes: 15, deduct_pause: true };
+
+/** Lav en prisaftale ud fra én eller flere eksisterende regler. */
+function bundleFromRules(rules) {
+  const base = rules.find(r => r.kind === "base");
+  const first = base || rules[0] || {};
+  const cond = { ...EMPTY_COND, ...(first.conditions || {}) };
+  if (!base && first.kind === "surcharge") (AUTO_KEYS[first.category] || []).forEach(k => { cond[k] = EMPTY_COND[k]; });
+  return {
+    bundle_id: first.bundle_id || "",
+    adopt_ids: first.bundle_id ? [] : rules.map(r => r.id),
+    name: first.bundle_name || (base ? base.name : first.name) || "",
+    conditions: cond, valid_from: first.valid_from || "", valid_to: first.valid_to || "",
+    active: first.active !== false, note: first.note || "",
+    base: base ? { id: base.id, pricing: { ...BLANK_PRICING, ...base.pricing } } : null,
+    surcharges: rules.filter(r => r.kind === "surcharge").map(r => ({
+      id: r.id, category: r.category, unit: (r.surcharge || {}).unit || "kr", value: String((r.surcharge || {}).value ?? ""),
+      name: r.name && !r.name.startsWith(`${first.bundle_name || ""} - `) ? r.name : "",
+      time_from: (r.conditions || {}).time_from || "", time_to: (r.conditions || {}).time_to || "",
+      trailer_counts: (r.conditions || {}).trailer_counts || [],
+      exempt: Number((r.surcharge || {}).value) === 0,
+    })),
+  };
+}
+const newBundle = (conditions = {}, name = "") => ({
+  bundle_id: "", adopt_ids: [], name, conditions: { ...EMPTY_COND, ...conditions }, valid_from: "", valid_to: "",
+  active: true, note: "", base: { pricing: { ...BLANK_PRICING } }, surcharges: [],
+});
+
+const copyBundle = (b) => ({
+  ...b, bundle_id: "", adopt_ids: [], name: `${b.name} (kopi)`,
+  base: b.base ? { pricing: { ...b.base.pricing } } : null,
+  surcharges: b.surcharges.map(({ id, ...rest }) => rest),
+});
+
+function bundlePayload(b, effective) {
+  return {
+    bundle_id: b.bundle_id || undefined, adopt_ids: b.adopt_ids, name: b.name, conditions: b.conditions,
+    valid_from: b.valid_from, valid_to: b.valid_to, active: b.active, note: b.note, effective,
+    base: b.base ? { id: b.base.id, pricing: b.base.pricing } : null,
+    surcharges: b.surcharges.map(x => ({
+      id: x.id, category: x.category, unit: x.exempt ? "kr" : x.unit, value: x.exempt ? 0 : x.value,
+      name: x.exempt ? `Fritaget for ${(CAT_NAME[x.category] || "tillæg").toLowerCase()}` : x.name,
+      time_from: x.time_from, time_to: x.time_to, trailer_counts: x.trailer_counts,
+    })),
+  };
+}
+
+/** Viser hvordan et indtastet beløb forstås (fx "1.000" = 1.000,00 kr). */
+function ReadBack({ v, unit }) {
+  if (v === "" || v == null) return null;
+  const n = parseNum(v);
+  if (!Number.isFinite(n)) return <p className="text-[11px] text-red-600 mt-0.5">Ugyldigt tal</p>;
+  return <p className="text-[11px] text-emerald-700 mt-0.5">= {n.toLocaleString("da-DK", { minimumFractionDigits: unit === "%" ? 0 : 2, maximumFractionDigits: 2 })} {unit}</p>;
+}
+
+/** "Prøv prisen": beregn et tænkt scenarie med aftalen som den står i editoren. */
+function PriceTester({ bundle, options }) {
+  const [sc, setSc] = useState({ day_type: "weekday", priority: "normal", trailer_count: 0, start_time: "08:00", minutes: 60, waiting_min: 0, containers: 1 });
+  const [res, setRes] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const run = async () => {
+    setBusy(true);
+    try {
+      const c = bundle.conditions || {};
+      const scenario = {
+        ...sc, customer_id: (c.customer_ids || [])[0] || "", location_code: (c.location_codes || [])[0] || "",
+        material: (c.materials || [])[0] || "", task_type: (c.task_types || [])[0] || "normal",
+      };
+      const { data } = await axios.post(`${API}/pricing/simulate`, { scenario, draft: bundlePayload(bundle, "now") });
+      setRes(data);
+    } catch (e) { setRes({ error: formatApiError(e) }); }
+    setBusy(false);
+  };
+  const set = (k, v) => setSc(x => ({ ...x, [k]: v }));
+  return (
+    <div className="rounded-xl border border-sky-200 dark:border-sky-900 bg-sky-50/60 dark:bg-sky-950/20 p-4 space-y-3" data-testid="price-tester">
+      <div className="flex items-center justify-between gap-2">
+        <h4 className="text-sm font-bold">Prøv prisen</h4>
+        <span className="text-[11px] text-slate-500">Bruger aftalen som den står her + jeres øvrige regler</span>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <div><span className={label}>Dag</span>
+          <select className={input} value={sc.day_type} onChange={e => set("day_type", e.target.value)}>{Object.entries(options.day_types).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></div>
+        <div><span className={label}>Prioritet</span>
+          <select className={input} value={sc.priority} onChange={e => set("priority", e.target.value)}>{Object.entries(options.priorities).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></div>
+        <div><span className={label}>Hængere</span>
+          <select className={input} value={sc.trailer_count} onChange={e => set("trailer_count", Number(e.target.value))}>{[0, 1, 2, 3].map(n => <option key={n} value={n}>{n === 0 ? "Ingen" : n}</option>)}</select></div>
+        <div><span className={label}>Start</span><input type="time" className={input} value={sc.start_time} onChange={e => set("start_time", e.target.value)} /></div>
+        <div><span className={label}>Varighed (min)</span><input inputMode="numeric" className={input} value={sc.minutes} onChange={e => set("minutes", e.target.value)} /></div>
+        <div><span className={label}>Ventetid (min)</span><input inputMode="numeric" className={input} value={sc.waiting_min} onChange={e => set("waiting_min", e.target.value)} /></div>
+        <div><span className={label}>Containere</span><input inputMode="numeric" className={input} value={sc.containers} onChange={e => set("containers", e.target.value)} /></div>
+        <div className="flex items-end"><button type="button" className={`${btnPrimary} w-full justify-center`} onClick={run} disabled={busy} data-testid="price-tester-run">{busy ? <Loader2 className="w-4 h-4 animate-spin" /> : "Beregn"}</button></div>
+      </div>
+      {res?.error && <p className="text-sm text-red-600">{res.error}</p>}
+      {res && !res.error && (
+        <div className="rounded-lg bg-white dark:bg-slate-900 p-3 text-sm space-y-1">
+          {(res.lines || []).map((l, i) => (
+            <div key={i} className="flex justify-between gap-3"><span className={l.from_draft ? "" : "text-slate-500"}>{l.label}{!l.from_draft && l.rule_name ? " (anden regel)" : ""}</span><span className="font-mono">{fmtKr(l.amount)}</span></div>
+          ))}
+          {res.status !== "ok" && <p className="text-red-600">{(res.flags || []).join(" · ") || "Ingen pris"}</p>}
+          <div className="flex justify-between border-t border-slate-100 dark:border-slate-700 pt-1 font-bold"><span>I alt (ekskl. moms)</span><span className="font-mono">{fmtKr(res.total)}</span></div>
+          {(res.matching_base || []).length > 1 && <p className="text-[11px] text-amber-700">{res.matching_base.length} grundpriser passer på dette scenarie. Den der bruges: {res.matching_base[0]} (den mest specifikke, ved lighed den nyeste).</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BundleEditor({ bundle: initial, options, onClose, onSaved, firstRule = false }) {
   const [effective, setEffective] = useState(firstRule ? "all" : "now");
   const [effDate, setEffDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [r, setR] = useState(() => ({
-    kind: rule.kind || "base", name: rule.name || "", category: rule.category || "weekend",
-    conditions: { ...EMPTY_COND, ...(rule.conditions || {}) },
-    pricing: { model: "fixed", amount: "", hourly_rate: "", start_fee: "", min_minutes: "", min_amount: "", rounding_mode: "up", rounding_minutes: 15, deduct_pause: true, ...(rule.pricing || {}) },
-    surcharge: { unit: "kr", value: "", ...(rule.surcharge || {}) },
-    valid_from: rule.valid_from || "", valid_to: rule.valid_to || "", active: rule.active !== false, note: rule.note || "",
-  }));
+  const [b, setB] = useState(() => JSON.parse(JSON.stringify(initial)));
   const [more, setMore] = useState(() => {
-    const c = rule.conditions || {};
-    return !!(c.delivery_labels?.length || c.priorities?.length || c.trailer || c.trailer_counts?.length || c.container_labels?.length || c.time_from || (c.outcome && c.outcome !== "completed") || rule.valid_from || rule.valid_to);
+    const c = initial.conditions || {};
+    return !!(c.delivery_labels?.length || c.priorities?.length || c.trailer || c.trailer_counts?.length || c.container_labels?.length || c.time_from || (c.outcome && c.outcome !== "completed") || initial.valid_from || initial.valid_to);
   });
   const [saving, setSaving] = useState(false);
-  const setC = (k, v) => setR(x => ({ ...x, conditions: { ...x.conditions, [k]: v } }));
-  const setP = (k, v) => setR(x => ({ ...x, pricing: { ...x.pricing, [k]: v } }));
-  const c = r.conditions;
-
+  const [conflicts, setConflicts] = useState(null);
+  const editing = !!(initial.bundle_id || (initial.adopt_ids || []).length);
+  const c = b.conditions;
+  const setC = (k, v) => setB(x => ({ ...x, conditions: { ...x.conditions, [k]: v } }));
+  const setP = (k, v) => setB(x => ({ ...x, base: { ...x.base, pricing: { ...x.base.pricing, [k]: v } } }));
+  const setS = (i, patch) => setB(x => ({ ...x, surcharges: x.surcharges.map((s, j) => (j === i ? { ...s, ...patch } : s)) }));
   const locs = options.locations.filter(l => !c.customer_ids.length || c.customer_ids.includes(l.customer_id));
-  const customRounding = ![15, 30, 60].includes(Number(r.pricing.rounding_minutes));
+  const p = b.base?.pricing || BLANK_PRICING;
+  const customRounding = ![15, 30, 60].includes(Number(p.rounding_minutes));
+  const usedCats = new Set(b.surcharges.map(x => x.category));
 
-  const save = async () => {
+  // Fejl vises ved feltet før der gemmes - intet forsvinder i stilhed.
+  const problems = [];
+  if (!b.name.trim()) problems.push("Giv aftalen et navn");
+  if (!b.base && !b.surcharges.length) problems.push("Tilføj en grundpris og/eller mindst ét tillæg");
+  if (b.base) {
+    if (p.model === "hourly" && !(parseNum(p.hourly_rate) >= 0)) problems.push("Timepris mangler");
+    if (p.model !== "hourly" && !(parseNum(p.amount) >= 0)) problems.push("Grundprisens beløb mangler");
+  }
+  b.surcharges.forEach((x, i) => { if (!x.exempt && !(parseNum(x.value) >= 0)) problems.push(`Tillæg ${i + 1} (${options.categories[x.category]}) mangler beløb`); });
+
+  const save = async (force = false) => {
+    if (problems.length) { toast.error(problems[0]); return; }
     setSaving(true);
     try {
-      const body = { ...r, effective: effective === "date" ? effDate : effective };
-      if (rule.id) await axios.put(`${API}/pricing/rules/${rule.id}`, body);
-      else await axios.post(`${API}/pricing/rules`, body);
-      toast.success("Regel gemt");
+      await axios.post(`${API}/pricing/bundles`, { ...bundlePayload(b, effective === "date" ? effDate : effective), force });
+      toast.success("Prisaftalen er gemt");
       onSaved();
-    } catch (e) { toast.error(formatApiError(e)); }
-    finally { setSaving(false); }
+    } catch (e) {
+      const d = e?.response?.data?.detail;
+      if (e?.response?.status === 409 && d?.conflicts) setConflicts(d.conflicts);
+      else toast.error(formatApiError(e));
+    } finally { setSaving(false); }
   };
-
-  const preview = (() => {
-    const chips = conditionChips(c, options);
-    const what = r.kind === "base" ? ruleSummary({ kind: "base", pricing: r.pricing }, options) : ruleSummary({ kind: "surcharge", category: r.category, surcharge: r.surcharge }, options);
-    return `${chips.length ? chips.join(" · ") : "Alle ture"}: ${what}`;
-  })();
 
   return (
     <div className="fixed inset-0 z-50 flex items-start sm:items-center justify-center bg-black/40 p-0 sm:p-4" onClick={onClose}>
-      <div className="w-full sm:max-w-2xl max-h-[100dvh] sm:max-h-[92vh] overflow-y-auto bg-white dark:bg-slate-800 sm:rounded-2xl shadow-2xl" onClick={e => e.stopPropagation()} data-testid="rule-editor">
+      <div className="w-full sm:max-w-3xl max-h-[100dvh] sm:max-h-[94vh] overflow-y-auto bg-white dark:bg-slate-800 sm:rounded-2xl shadow-2xl" onClick={e => e.stopPropagation()} data-testid="rule-editor">
         <div className="sticky top-0 z-10 bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 px-5 py-4 flex items-center justify-between">
-          <h3 className="font-bold text-lg">{rule.id ? "Rediger regel" : "Ny prisregel"}</h3>
+          <div>
+            <h3 className="font-bold text-lg">{editing ? "Ret prisaftale" : "Ny prisaftale"}</h3>
+            <p className="text-xs text-slate-500">Grundpris og tillæg for de samme ture - alt på ét sted.</p>
+          </div>
           <button onClick={onClose} className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700"><X className="w-5 h-5" /></button>
         </div>
         <div className="p-5 space-y-5">
-          <div className="space-y-3">
-            <Segmented value={r.kind} onChange={v => setR({ ...r, kind: v })} options={[{ value: "base", label: "Grundpris" }, { value: "surcharge", label: "Tillæg" }]} />
-            <p className="text-xs text-slate-500">{r.kind === "base" ? HELP.base : HELP.surcharge}</p>
-            {r.kind === "surcharge" && (
-              <>
-                <div className="flex flex-wrap gap-1.5">
-                  {Object.entries(options.categories).map(([k, v]) => (
-                    <button key={k} type="button" className={`${chipBase} ${r.category === k ? chipOn : chipOff}`} onClick={() => setR({ ...r, category: k })}>{v}</button>
-                  ))}
-                </div>
-                {HELP.category[r.category] && <p className="text-xs text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-slate-900 rounded-lg px-3 py-2">{HELP.category[r.category]}</p>}
-              </>
-            )}
-            <div><span className={label}>Navn</span><input className={input} value={r.name} onChange={e => setR({ ...r, name: e.target.value })} placeholder={r.kind === "base" ? "Fx ARGO Roskilde - afhentning" : "Fx Weekendtillæg"} /></div>
-          </div>
+          <div><span className={label}>Navn på aftalen</span><input className={input} value={b.name} onChange={e => setB({ ...b, name: e.target.value })} placeholder="Fx ARGO Roskilde 2026" data-testid="bundle-name" /></div>
 
           <div className="space-y-3">
             <h4 className="text-sm font-bold">Gælder for <span className="font-normal text-slate-500">(tomt = alle)</span></h4>
@@ -1149,16 +1363,13 @@ function RuleEditor({ rule, options, onClose, onSaved, firstRule = false }) {
               <MultiPick title="Lokationer" items={locs.map(x => ({ value: x.code, label: x.name }))} value={c.location_codes} onChange={v => setC("location_codes", v)} allLabel="Alle lokationer" />
               <MultiPick title="Opgavetype" items={Object.entries(options.task_types).map(([k, v]) => ({ value: k, label: v }))} value={c.task_types} onChange={v => setC("task_types", v)} />
               <MultiPick title="Materiale" items={options.materials.map(m => ({ value: m, label: m }))} value={c.materials} onChange={v => setC("materials", v)} allLabel="Alle materialer" />
-              <MultiPick title="Dagtype" items={Object.entries(options.day_types).map(([k, v]) => ({ value: k, label: v }))} value={c.day_types} onChange={v => setC("day_types", v)} allLabel="Alle dage" />
             </div>
-            <button type="button" className="text-sm font-semibold text-emerald-700 dark:text-emerald-300" onClick={() => setMore(m => !m)}>{more ? "− Færre betingelser" : "+ Flere betingelser (leveringsadresse, prioritet, hænger, tidsrum, ...)"}</button>
+            <button type="button" className="text-sm font-semibold text-emerald-700 dark:text-emerald-300" onClick={() => setMore(m => !m)}>{more ? "− Færre betingelser" : "+ Flere betingelser (dag, leveringsadresse, container, hængere, udfald, periode ...)"}</button>
             {more && (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <MultiPick title="Dagtype" items={Object.entries(options.day_types).map(([k, v]) => ({ value: k, label: v }))} value={c.day_types} onChange={v => setC("day_types", v)} allLabel="Alle dage" />
                 <MultiPick title="Leveringsadresse" items={options.delivery_labels.map(m => ({ value: m, label: m }))} value={c.delivery_labels} onChange={v => setC("delivery_labels", v)} />
-                <MultiPick title="Prioritet" items={Object.entries(options.priorities).map(([k, v]) => ({ value: k, label: v }))} value={c.priorities} onChange={v => setC("priorities", v)} />
                 <MultiPick title="Containerstørrelse" items={options.container_labels.map(m => ({ value: m, label: m }))} value={c.container_labels} onChange={v => setC("container_labels", v)} />
-                <div><span className={label}>Hænger</span>
-                  <Segmented value={c.trailer} onChange={v => setC("trailer", v)} options={[{ value: "", label: "Ligegyldigt" }, { value: "with", label: "Med" }, { value: "without", label: "Uden" }]} /></div>
                 <div><span className={label}>Antal hængere</span>
                   <div className="flex flex-wrap gap-1.5">
                     {[1, 2, 3].map(n => {
@@ -1167,82 +1378,128 @@ function RuleEditor({ rule, options, onClose, onSaved, firstRule = false }) {
                         onClick={() => setC("trailer_counts", on ? (c.trailer_counts || []).filter(x => Number(x) !== n) : [...(c.trailer_counts || []), n])}>{n === 3 ? "3+" : n}</button>;
                     })}
                   </div>
-                  <span className="text-[11px] text-slate-500">Fx 1 hænger = 700 kr og 2 hængere = 1.100 kr som to regler. Tomt = ligegyldigt.</span></div>
-                <div><span className={label}>Turen starter i tidsrummet</span>
-                  <div className="flex items-center gap-2">
-                    <input type="time" className={input} value={c.time_from} onChange={e => setC("time_from", e.target.value)} />
-                    <span>–</span>
-                    <input type="time" className={input} value={c.time_to} onChange={e => setC("time_to", e.target.value)} />
-                  </div>
-                  <span className="text-[11px] text-slate-500">Fx 18:00–06:00 for aften/nat</span></div>
+                  <span className="text-[11px] text-slate-500">Fx én aftale for 1 hænger (700 kr) og én for 2 hængere (1.100 kr).</span></div>
                 <div><span className={label}>Udfald</span>
                   <Segmented value={c.outcome} onChange={v => setC("outcome", v)} options={[{ value: "completed", label: "Gennemført" }, { value: "not_completed", label: "Forgæves" }, { value: "any", label: "Begge" }]} /></div>
-                <div><span className={label}>Kørselsdato fra</span><input type="date" className={input} value={r.valid_from} onChange={e => setR({ ...r, valid_from: e.target.value })} /></div>
-                <div><span className={label}>Kørselsdato til</span><input type="date" className={input} value={r.valid_to} onChange={e => setR({ ...r, valid_to: e.target.value })} /></div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div><span className={label}>Kørselsdato fra</span><input type="date" className={input} value={b.valid_from} onChange={e => setB({ ...b, valid_from: e.target.value })} /></div>
+                  <div><span className={label}>Kørselsdato til</span><input type="date" className={input} value={b.valid_to} onChange={e => setB({ ...b, valid_to: e.target.value })} /></div>
+                </div>
               </div>
             )}
           </div>
 
-          <div className="space-y-3">
-            <h4 className="text-sm font-bold">Pris</h4>
-            {r.kind === "base" ? (
+          <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <h4 className="text-sm font-bold">Grundpris</h4>
+              <label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" className="accent-emerald-600 w-4 h-4" checked={!!b.base} data-testid="bundle-has-base"
+                  onChange={e => setB({ ...b, base: e.target.checked ? (b.base || { pricing: { ...BLANK_PRICING } }) : null })} />
+                Aftalen har en grundpris
+              </label>
+            </div>
+            {!b.base && <p className="text-xs text-slate-500">Kun tillæg - grundprisen kommer fra en anden regel (fx den generelle).</p>}
+            {b.base && (
               <>
-                <Segmented value={r.pricing.model} onChange={v => setP("model", v)} options={Object.entries(options.models).map(([k, v]) => ({ value: k, label: v }))} />
-                {HELP.model[r.pricing.model] && <p className="text-xs text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-slate-900 rounded-lg px-3 py-2">{HELP.model[r.pricing.model]}</p>}
-                {r.pricing.model !== "hourly" ? (
-                  <div className="max-w-xs"><span className={label}>{r.pricing.model === "per_container" ? "Pris pr. container (kr)" : "Pris pr. tur (kr)"}</span>
-                    <input type="number" min="0" className={input} value={r.pricing.amount} onChange={e => setP("amount", e.target.value)} /></div>
+                <Segmented value={p.model} onChange={v => setP("model", v)} options={Object.entries(options.models).map(([k, v]) => ({ value: k, label: v }))} />
+                {HELP.model[p.model] && <p className="text-xs text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-slate-900 rounded-lg px-3 py-2">{HELP.model[p.model]}</p>}
+                {p.model !== "hourly" ? (
+                  <div className="max-w-xs"><span className={label}>{p.model === "per_container" ? "Pris pr. container (kr)" : "Pris pr. tur (kr)"}</span>
+                    <input inputMode="decimal" className={input} value={p.amount} onChange={e => setP("amount", e.target.value)} placeholder="Fx 1.100" data-testid="bundle-base-amount" />
+                    <ReadBack v={p.amount} unit="kr" /></div>
                 ) : (
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                    <div><span className={label}>Timepris (kr)</span><input type="number" min="0" className={input} value={r.pricing.hourly_rate} onChange={e => setP("hourly_rate", e.target.value)} /></div>
-                    <div><span className={label}>Startgebyr</span><input type="number" min="0" className={input} placeholder="Valgfri" value={r.pricing.start_fee || ""} onChange={e => setP("start_fee", e.target.value)} /></div>
-                    <div><span className={label}>Min. minutter</span><input type="number" min="0" className={input} placeholder="Valgfri" value={r.pricing.min_minutes || ""} onChange={e => setP("min_minutes", e.target.value)} /></div>
-                    <div><span className={label}>Min. beløb</span><input type="number" min="0" className={input} placeholder="Valgfri" value={r.pricing.min_amount || ""} onChange={e => setP("min_amount", e.target.value)} /></div>
+                    <div><span className={label}>Timepris (kr)</span><input inputMode="decimal" className={input} value={p.hourly_rate} onChange={e => setP("hourly_rate", e.target.value)} /></div>
+                    <div><span className={label}>Startgebyr</span><input inputMode="decimal" className={input} placeholder="Valgfri" value={p.start_fee || ""} onChange={e => setP("start_fee", e.target.value)} /></div>
+                    <div><span className={label}>Min. minutter</span><input inputMode="numeric" className={input} placeholder="Valgfri" value={p.min_minutes || ""} onChange={e => setP("min_minutes", e.target.value)} /></div>
+                    <div><span className={label}>Min. beløb</span><input inputMode="decimal" className={input} placeholder="Valgfri" value={p.min_amount || ""} onChange={e => setP("min_amount", e.target.value)} /></div>
                     <div className="col-span-2 md:col-span-4">
                       <span className={label}>Afrunding af tiden</span>
                       <div className="flex flex-wrap items-center gap-2">
-                        <Segmented value={r.pricing.rounding_mode} onChange={v => setP("rounding_mode", v)} options={[{ value: "none", label: "Ingen" }, { value: "up", label: "Op" }, { value: "nearest", label: "Nærmeste" }, { value: "down", label: "Ned" }]} />
-                        {r.pricing.rounding_mode !== "none" && (
+                        <Segmented value={p.rounding_mode} onChange={v => setP("rounding_mode", v)} options={[{ value: "none", label: "Ingen" }, { value: "up", label: "Op" }, { value: "nearest", label: "Nærmeste" }, { value: "down", label: "Ned" }]} />
+                        {p.rounding_mode !== "none" && (
                           <>
-                            {[15, 30, 60].map(m => <button key={m} type="button" className={`${chipBase} ${Number(r.pricing.rounding_minutes) === m ? chipOn : chipOff}`} onClick={() => setP("rounding_minutes", m)}>{m} min</button>)}
-                            <input type="number" min="1" max="240" className={`${input} w-24 ${customRounding ? "ring-2 ring-emerald-500/40" : ""}`} value={r.pricing.rounding_minutes} onChange={e => setP("rounding_minutes", e.target.value)} />
+                            {[15, 30, 60].map(m => <button key={m} type="button" className={`${chipBase} ${Number(p.rounding_minutes) === m ? chipOn : chipOff}`} onClick={() => setP("rounding_minutes", m)}>{m} min</button>)}
+                            <input inputMode="numeric" className={`${input} w-24 ${customRounding ? "ring-2 ring-emerald-500/40" : ""}`} value={p.rounding_minutes} onChange={e => setP("rounding_minutes", e.target.value)} />
                             <span className="text-xs text-slate-500">min</span>
                           </>
                         )}
                       </div>
                     </div>
                     <label className="col-span-2 md:col-span-4 flex items-center gap-2 text-sm">
-                      <input type="checkbox" className="accent-emerald-600 w-4 h-4" checked={!!r.pricing.deduct_pause} onChange={e => setP("deduct_pause", e.target.checked)} />
+                      <input type="checkbox" className="accent-emerald-600 w-4 h-4" checked={!!p.deduct_pause} onChange={e => setP("deduct_pause", e.target.checked)} />
                       Træk pauser fra (pauser chaufføren starter under "Tid" mens turen kører)
                     </label>
                   </div>
                 )}
               </>
-            ) : (
-              <div className="flex flex-wrap items-end gap-3">
-                <Segmented value={r.surcharge.unit} onChange={v => setR({ ...r, surcharge: { ...r.surcharge, unit: v } })} options={[{ value: "kr", label: "kr pr. tur" }, { value: "percent", label: "% af grundpris" }, { value: "per_hour", label: "kr pr. time" }]} />
-                <div className="w-36"><span className={label}>Værdi</span><input type="number" min="0" className={input} value={r.surcharge.value} onChange={e => setR({ ...r, surcharge: { ...r.surcharge, value: e.target.value } })} /></div>
-                {r.category === "waiting" && <span className="text-xs text-slate-500">Ventetid afregnes pr. påbegyndt kvarter ud fra minutter registreret på turen.</span>}
-              </div>
             )}
           </div>
 
+          <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4 space-y-3" data-testid="bundle-surcharges">
+            <div className="flex items-center justify-between gap-2">
+              <h4 className="text-sm font-bold">Tillæg <span className="font-normal text-slate-500">({b.surcharges.length})</span></h4>
+              <span className="text-[11px] text-slate-500">Lægges oveni grundprisen i de nævnte situationer</span>
+            </div>
+            {b.surcharges.map((x, i) => (
+              <div key={x.id || i} className="rounded-lg bg-slate-50 dark:bg-slate-900 p-3 space-y-2" data-testid={`bundle-surcharge-${i}`}>
+                <div className="flex flex-wrap items-center gap-2">
+                  <select className={`${input} w-auto`} value={x.category} onChange={e => setS(i, { category: e.target.value })}>
+                    {Object.entries(options.categories).map(([k, v]) => <option key={k} value={k} disabled={k !== x.category && usedCats.has(k) && !["evening", "trailer", "other"].includes(k)}>{v}</option>)}
+                  </select>
+                  <InfoTip text={HELP.category[x.category]} />
+                  <span className="text-xs text-slate-500 flex-1 min-w-[140px]">Gælder: {CAT_AUTO_TEXT[x.category]}</span>
+                  <button type="button" className="p-1.5 text-slate-400 hover:text-red-600" aria-label="Fjern tillæg" onClick={() => setB({ ...b, surcharges: b.surcharges.filter((_, j) => j !== i) })}><X className="w-4 h-4" /></button>
+                </div>
+                {x.category === "evening" && (
+                  <div className="flex items-center gap-2 max-w-xs">
+                    <input type="time" className={input} value={x.time_from || "18:00"} onChange={e => setS(i, { time_from: e.target.value })} />
+                    <span>–</span>
+                    <input type="time" className={input} value={x.time_to || "06:00"} onChange={e => setS(i, { time_to: e.target.value })} />
+                  </div>
+                )}
+                {x.category === "trailer" && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-xs text-slate-500">Kun ved antal hængere:</span>
+                    {[1, 2, 3].map(n => {
+                      const on = (x.trailer_counts || []).map(Number).includes(n);
+                      return <button key={n} type="button" className={`${chipBase} ${on ? chipOn : chipOff}`}
+                        onClick={() => setS(i, { trailer_counts: on ? (x.trailer_counts || []).filter(v => Number(v) !== n) : [...(x.trailer_counts || []), n] })}>{n === 3 ? "3+" : n}</button>;
+                    })}
+                    <span className="text-[11px] text-slate-400">(tomt = med hænger)</span>
+                  </div>
+                )}
+                <div className="flex flex-wrap items-end gap-2">
+                  <Segmented value={x.exempt ? "exempt" : x.unit} onChange={v => setS(i, v === "exempt" ? { exempt: true } : { exempt: false, unit: v })}
+                    options={[{ value: "kr", label: "kr pr. tur" }, { value: "percent", label: "% af grundpris" }, { value: "per_hour", label: "kr pr. time" }, { value: "exempt", label: "Fritaget" }]} />
+                  {!x.exempt && <div className="w-36"><input inputMode="decimal" className={input} value={x.value} onChange={e => setS(i, { value: e.target.value })} placeholder={x.unit === "percent" ? "Fx 25" : "Fx 500"} data-testid={`bundle-surcharge-value-${i}`} />
+                    <ReadBack v={x.value} unit={x.unit === "percent" ? "%" : x.unit === "per_hour" ? "kr/t" : "kr"} /></div>}
+                  {x.exempt && <span className="text-xs text-slate-500 pb-2">Kunden betaler ikke dette tillæg (overstyrer generelle tillæg).</span>}
+                </div>
+              </div>
+            ))}
+            <button type="button" className={btnGhost} data-testid="bundle-add-surcharge"
+              onClick={() => {
+                const next = ["weekend", "haster", "holiday", "trailer", "evening", "waiting", "other"].find(k => !usedCats.has(k)) || "other";
+                setB({ ...b, surcharges: [...b.surcharges, { category: next, unit: "kr", value: "", time_from: "", time_to: "", trailer_counts: [], exempt: false }] });
+              }}><Plus className="w-4 h-4" /> Tilføj tillæg</button>
+          </div>
+
+          <PriceTester bundle={b} options={options} />
+
           <div>
-            <span className={label}>Jeres forklaring (valgfri - vises ved ⓘ på reglen)</span>
-            <textarea rows={2} maxLength={1000} className={input} value={r.note} onChange={e => setR({ ...r, note: e.target.value })}
-              placeholder="Fx: Aftalt med ARGO i rammeaftale 2026. Gælder kun containere over 20 m³." data-testid="rule-note" />
+            <span className={label}>Jeres forklaring (valgfri - vises ved ⓘ)</span>
+            <textarea rows={2} maxLength={1000} className={input} value={b.note} onChange={e => setB({ ...b, note: e.target.value })}
+              placeholder="Fx: Rammeaftale 2026 med ARGO. Weekend aftalt pr. mail 3/1." data-testid="rule-note" />
           </div>
           <div className="flex items-center gap-2 text-sm">
-            <input type="checkbox" className="accent-emerald-600 w-4 h-4" checked={r.active} onChange={e => setR({ ...r, active: e.target.checked })} id="rule-active" />
+            <input type="checkbox" className="accent-emerald-600 w-4 h-4" checked={b.active} onChange={e => setB({ ...b, active: e.target.checked })} id="rule-active" />
             <label htmlFor="rule-active">Aktiv</label>
           </div>
-          <div className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900 text-sm"><b>Opsummering:</b> {preview}</div>
           <div className="space-y-2" data-testid="rule-effective">
-            <h4 className="text-sm font-bold">Hvornår gælder {rule.id ? "ændringen" : "reglen"}?</h4>
+            <h4 className="text-sm font-bold">Hvornår gælder {editing ? "ændringen" : "aftalen"}?</h4>
             <Segmented value={effective} onChange={setEffective} options={[
-              { value: "now", label: "Nye ture fra nu" },
-              { value: "date", label: "Fra en dato" },
-              { value: "all", label: "Også eksisterende ture" },
+              { value: "now", label: "Nye ture fra nu" }, { value: "date", label: "Fra en dato" }, { value: "all", label: "Også eksisterende ture" },
             ]} />
             {effective === "date" && (
               <div className="max-w-xs"><span className={label}>Ture oprettet fra</span><input type="date" className={input} value={effDate} onChange={e => setEffDate(e.target.value)} /></div>
@@ -1253,12 +1510,30 @@ function RuleEditor({ rule, options, onClose, onSaved, firstRule = false }) {
               {effective === "all" && "Ændrer også prisen på eksisterende ture der ikke er markeret som faktureret. Fakturerede ture ændres aldrig."}
             </p>
           </div>
+          {problems.length > 0 && (
+            <div className="rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 px-3 py-2 text-sm text-amber-900 dark:text-amber-100" data-testid="bundle-problems">
+              {problems.map(x => <div key={x}>• {x}</div>)}
+            </div>
+          )}
         </div>
         <div className="sticky bottom-0 bg-white dark:bg-slate-800 border-t border-slate-200 dark:border-slate-700 px-5 py-3 flex justify-end gap-2">
           <button className={btnGhost} onClick={onClose}>Annuller</button>
-          <button className={btnPrimary} disabled={saving} onClick={save}>{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />} Gem regel</button>
+          <button className={btnPrimary} disabled={saving} onClick={() => save(false)} data-testid="bundle-save">{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />} Gem prisaftale</button>
         </div>
       </div>
+      {conflicts && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4" onClick={(e) => { e.stopPropagation(); setConflicts(null); }}>
+          <div className="w-full max-w-md bg-white dark:bg-slate-800 rounded-2xl p-5 space-y-3" onClick={e => e.stopPropagation()} data-testid="bundle-conflicts">
+            <h3 className="font-bold">Der findes allerede regler for præcis de samme ture</h3>
+            <ul className="text-sm list-disc pl-5">{conflicts.map(x => <li key={x.id}>{x.name}{x.category ? ` (${options.categories[x.category] || x.category})` : " (grundpris)"}</li>)}</ul>
+            <p className="text-sm text-slate-600 dark:text-slate-300">Hvis du gemmer alligevel, vinder den nyeste. Overvej i stedet at rette den eksisterende aftale.</p>
+            <div className="flex justify-end gap-2">
+              <button className={btnGhost} onClick={() => setConflicts(null)}>Tilbage</button>
+              <button className={btnPrimary} onClick={() => { setConflicts(null); save(true); }}>Gem alligevel</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

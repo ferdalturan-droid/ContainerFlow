@@ -97,6 +97,7 @@ export default function DriverTourCard({ tour, index, routeInfo, unread = 0, min
         {done && (
           <p className="mt-2 text-[13px] font-bold text-emerald-700 inline-flex items-center gap-1.5">
             <CheckCircle2 className="w-4 h-4" /> Færdig{tour.time ? ` kl. ${tour.time}` : ""}{tour.weight ? ` · ${Number(tour.weight).toLocaleString("da-DK")} kg` : ""}
+            {lines.filter(l => l.actual_qty != null && !["kg", "ton"].includes((l.unit || "").toLowerCase())).map((l, i) => <span key={i}>{` · ${Number(l.actual_qty).toLocaleString("da-DK")} ${l.unit}`}</span>)}
             <span className="text-slate-400 font-semibold">· tryk for at rette</span>
           </p>
         )}

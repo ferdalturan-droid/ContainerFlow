@@ -114,3 +114,12 @@ export const mapsUrl = (address) =>
 /** Stop på turen (2026-10-17). Tom liste = almindelig tur med én adresse. */
 export const stopsOf = (t) => (Array.isArray(t?.stops) ? t.stops : []);
 export const stopsDone = (t) => stopsOf(t).filter(s => s.done_at).length;
+
+/** Dansk talformat: "1.100", "1.100,50", "1100,5" og "1100.5" -> tal. NaN hvis tomt/ugyldigt. */
+export const parseDk = (v) => {
+  if (v === "" || v == null) return NaN;
+  let s = String(v).replace(/\s|kr|%/g, "");
+  if (s.includes(",")) s = s.replace(/\./g, "").replace(",", ".");
+  else if (/^\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, "");
+  return Number(s);
+};

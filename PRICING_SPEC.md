@@ -129,6 +129,20 @@ Ud for hver kunde står, om den følger de generelle priser eller har en egen pr
 - Betingelsen **Antal hængere** (1, 2, 3+) på prisregler gør det muligt at sætte fx 1 hænger = 700 kr og 2 hængere = 1.100 kr (ikke nødvendigvis det dobbelte). Antallet kommer fra turens `trailer_count` (planlagt i Ny tur). Hvis det mangler, bruges 1, hvis chaufføren kørte med hænger.
 - **Aftalt pris** (fast pris pr. tur) erstatter reglerne, og weekend-, haster- og andre tillæg er indregnet. Ventetid kan lægges oveni (`add_waiting`), fordi den ikke kendes, når prisen aftales. Valget bevares, når prisen rettes i Økonomi.
 
+## 3e. Prisaftaler: grundpris og flere tillæg i én regel (2026-10-17)
+- **Fejlen:** den gamle regel-editor havde én vippeknap mellem "grundpris" og "tillæg". En regel kunne kun være den ene slags, så når man skrev 500 kr i tillæg og derefter 1.000 kr i grundpris (eller omvendt), gemte backend kun det sidste.
+- **Nu:** en **prisaftale** (`bundle_id`/`bundle_name`) er én formular med fælles betingelser (kunde, lokation, opgavetype, materiale), én grundpris og en liste af tillæg. Den gemmes som flere regler med samme `bundle_id` (`POST /api/pricing/bundles`). Hver regel versioneres som før (3b).
+- **Tillæg får deres scenarie automatisk** (`_CAT_AUTO`): weekend → lørdag/søndag, helligdag → helligdage, haster → prioritet haster, hænger → med hænger (+ evt. antal), aften → tidsvindue (standard 18–06). Samme type tillæg to gange i én aftale afvises. Gamle enkeltregler, hvor tillægget mangler sin betingelse, får en advarsel ("gælder altid").
+- **Prøv prisen** (`POST /api/pricing/simulate`): vælg dag, prioritet, hængere, ventetid m.m. og se den præcise pris med linjer, også for en aftale der ikke er gemt endnu. Viser hvilken grundpris der vinder, hvis flere matcher.
+- **Konfliktadvarsel:** findes der allerede regler med præcis de samme betingelser, svarer backend 409 med en liste; man kan gå tilbage eller "Gem alligevel".
+- **Danske tal:** "1.000", "1.000,50" og "1000,5" læses korrekt overalt (backend `_parse_dk_number`, frontend `parseDk`), og feltet viser read-back "= 1.000,00 kr". Før blev "1.000" til 1 kr.
+- **Fritaget** er et eksplicit valg på et tillæg (i stedet for at skrive 0 kr).
+- **Kunder & priser** åbner kundens eksisterende aftale ("Ret prisaftale") i stedet for at oprette en dublet.
+- **Rapport:** ture uden pris har knappen "Opret pris", der åbner en ny aftale udfyldt med turens kunde, lokation, opgavetype og materiale.
+- Gamle enkeltregler vises under "Enkeltregler" og kan åbnes som en aftale (`adopt_ids`).
+- Slet en aftale: "Stop fra nu" (bevarer historikken) eller "Slet helt" (`DELETE /api/pricing/bundles/{id}?effective=`).
+- Hængertillæg afregnes ud fra det antal hængere chaufføren faktisk kørte med (`trailer_count_actual`), hvis det er indberettet; ellers det planlagte.
+
 ## 4. Sider (logistik admin → "Økonomi")
 
 Rapport · Kunder & priser · Prisregler · Godkendelser · Helligdage · Indstillinger

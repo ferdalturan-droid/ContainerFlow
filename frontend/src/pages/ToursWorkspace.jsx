@@ -12,7 +12,7 @@ import { ArchiveTab } from "./LocationAdminPage";
 import TourChat from "../components/TourChat";
 import AddressField, { formatAddress, parseAddress } from "../components/AddressField";
 import {
-  TOUR_TYPES, GOODS_TYPES, TOUR_TYPE_LABEL, SOURCE_LABEL, cargoSummary, isGoods, stopsOf, stopsDone, todayStr, addDays, fmtDayLong, fmtClock,
+  TOUR_TYPES, GOODS_TYPES, TOUR_TYPE_LABEL, SOURCE_LABEL, cargoSummary, isGoods, stopsOf, stopsDone, parseDk, todayStr, addDays, fmtDayLong, fmtClock,
   isHaster, openHours, capacityText, assigneeName, tourStatus, daysLate, mapsUrl,
 } from "../lib/tourHelpers";
 
@@ -186,7 +186,7 @@ const blankForm = (date, plads) => ({
   lines: [{ text: "", trailer: "", qty: "", unit: "stk" }], container: "", capacity_label: "", loose_count: "",
   stops: [{ street: "", postal: "", city: "" }], deliveries: [{ street: "", postal: "", city: "" }], separate: false,
   open_from: "", open_to: "", priority: "normal", driver_id: "", remark: "", trailer_count: 0,
-  agreed_price: "", agreed_add_waiting: true,
+  agreed_price: "", agreed_add_waiting: true, capture_qty: null, capture_photo: false,
   repeat: "none", repeat_days: ["1", "2", "3", "4", "5"], repeat_until: addDays(date, 28),
 });
 
@@ -235,6 +235,10 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
   const separate = f.separate && stops.length > 1;
   const total = dates.length * (separate ? stops.length : 1);
   const lines = f.lines.filter(l => (l.text || "").trim());
+  // Ved afslutning: standard = mængde (vægt) ved containerafhentning, ellers ikke.
+  const qtyDefault = !goods && (f.tour_type === "normal" || f.tour_type === "loes_afhentning");
+  const captureQty = f.capture_qty === null ? qtyDefault : f.capture_qty;
+  const unitsInUse = Array.from(new Set(lines.map(l => (goods ? (l.unit || "stk") : "kg"))));
 
   const setKind = (k) => {
     try { localStorage.setItem(KIND_KEY, k); } catch (_) { /* ignore */ }
@@ -258,7 +262,8 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
     ];
     const cargo = (multiLines || tc >= 1) ? lines.map(l => ({
       text: l.text.trim(), trailer: tc >= 2 && l.trailer ? Number(l.trailer) : (tc === 1 ? 1 : null),
-      ...(goods && l.qty ? { qty: Number(String(l.qty).replace(",", ".")), unit: l.unit } : {}),
+      ...(goods ? { unit: l.unit || "stk" } : { unit: "kg" }),
+      ...(goods && l.qty && !isNaN(parseDk(l.qty)) ? { qty: parseDk(l.qty) } : {}),
     })) : [];
     const body = [];
     const groups = separate ? stops.map(st => [st]) : [stops];
@@ -272,8 +277,9 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
       open_from: f.open_from, open_to: f.open_to, priority: f.priority, remark: f.remark.trim(),
       is_private: !!firma, private_company: firma, sort_order: i,
       loose_estimated_count: f.tour_type === "loes_afhentning" ? (parseInt(f.loose_count, 10) || 0) : 0,
-      ...(canPrice && f.agreed_price !== "" && !isNaN(parseFloat(f.agreed_price))
-        ? { agreed_price: parseFloat(String(f.agreed_price).replace(",", ".")), agreed_add_waiting: !!f.agreed_add_waiting } : {}),
+      capture: { quantity: captureQty, photo: !!f.capture_photo },
+      ...(canPrice && f.agreed_price !== "" && !isNaN(parseDk(f.agreed_price))
+        ? { agreed_price: parseDk(f.agreed_price), agreed_add_waiting: !!f.agreed_add_waiting } : {}),
     })));
     setSaving(true);
     try {
@@ -407,6 +413,28 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
             <input type="number" min="1" inputMode="numeric" className={inputCls} value={f.loose_count} onChange={(e) => set("loose_count", e.target.value)} />
           </div>
         )}
+        <div className="rounded-xl bg-slate-50 dark:bg-slate-900 p-3 space-y-3" data-testid="tf-capture">
+          <div className="text-[11px] font-bold uppercase tracking-wide text-slate-500">Ved afslutning</div>
+          {[
+            ["capture_qty", "Skal chaufføren registrere mængde?", captureQty,
+              goods ? `I linjens enhed${unitsInUse.length ? ` (${unitsInUse.join(", ")})` : ""} - fx hvor mange paller der faktisk blev kørt.` : "Vægt i kg (fx fra vejesedlen)."],
+            ["capture_photo", "Skal chaufføren tage billede?", !!f.capture_photo, "Fx af læsset, containeren eller afleveringen."],
+          ].map(([key, q, val, hint]) => (
+            <div key={key} className="flex flex-wrap items-center justify-between gap-2">
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-semibold text-slate-800 dark:text-slate-100">{q}</div>
+                <div className="text-[11px] text-slate-500">{hint}</div>
+              </div>
+              <div className="inline-flex p-0.5 rounded-lg bg-slate-200 dark:bg-slate-800" role="radiogroup" aria-label={q}>
+                {[[true, "Ja"], [false, "Nej"]].map(([v, l]) => (
+                  <button key={l} type="button" role="radio" aria-checked={val === v} onClick={() => set(key, v)} data-testid={`${key}-${v ? "yes" : "no"}`}
+                    className={`px-4 py-1.5 rounded-md text-sm font-bold ${val === v ? "bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-sm" : "text-slate-500"}`}>{l}</button>
+                ))}
+              </div>
+            </div>
+          ))}
+          <p className="text-[11px] text-slate-400">Chaufføren får en påmindelse hvis det mangler, men kan altid afslutte.</p>
+        </div>
       </section>
 
       <section className={`${card} p-4 space-y-4`}>
@@ -497,6 +525,9 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
               <div className="space-y-2">
                 <label className={labelCls}>Aftalt pris pr. tur (kr, ekskl. moms)</label>
                 <input type="text" inputMode="decimal" className={`${inputCls} max-w-[220px]`} value={f.agreed_price} onChange={(e) => set("agreed_price", e.target.value)} placeholder="Tom = prisreglerne" data-testid="tf-price" />
+                {f.agreed_price !== "" && (isNaN(parseDk(f.agreed_price))
+                  ? <p className="text-[11px] text-red-600">Ugyldigt beløb - skriv fx 1.100 eller 1100,50</p>
+                  : <p className="text-[11px] text-emerald-700">= {parseDk(f.agreed_price).toLocaleString("da-DK", { minimumFractionDigits: 2 })} kr</p>)}
                 <p className="text-[11px] text-slate-500">
                   Erstatter prisreglerne for {total > 1 ? "hver af de oprettede ture" : "hele turen"}{tc >= 2 ? ` (samlet for alle ${tc} hængere)` : ""}{!separate && stops.length + deliveries.length > 2 ? " inkl. alle stop" : ""}.
                   Tillæg som weekend og haster er indregnet. Senere ændringer af prisreglerne påvirker den ikke.
@@ -572,6 +603,63 @@ function Timeline({ tour, audit }) {
   );
 }
 
+/** Hvad chaufføren skulle registrere og hvad der blev registreret (2026-10-17). */
+function Registration({ tour }) {
+  const [photos, setPhotos] = useState(null);
+  const [big, setBig] = useState(null);
+  const cap = tour.capture || {};
+  const lines = Array.isArray(tour.cargo_lines) ? tour.cargo_lines : [];
+  const planned = Number(tour.trailer_count || 0);
+  const actual = tour.trailer_count_actual;
+  useEffect(() => {
+    setPhotos(null);
+    if (!(tour.photo_count > 0)) return;
+    axios.get(`${API}/tours/${tour.id}/photos`).then(r => setPhotos(r.data || [])).catch(() => setPhotos([]));
+  }, [tour.id, tour.photo_count]);
+  const anyActual = lines.some(l => l.actual_qty != null);
+  if (!cap.quantity && !cap.photo && !anyActual && !(tour.photo_count > 0) && actual == null) return null;
+  return (
+    <div className="mt-4 rounded-xl bg-slate-50 dark:bg-slate-900 p-3 space-y-2" data-testid="panel-registration">
+      <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400">Registrering</div>
+      {(cap.quantity || cap.photo) && (
+        <div className="text-xs text-slate-500">Chaufføren skal registrere: {[cap.quantity && "mængde", cap.photo && "billede"].filter(Boolean).join(" og ")}</div>
+      )}
+      {lines.length > 0 && (cap.quantity || anyActual) && (
+        <table className="w-full text-sm">
+          <thead><tr className="text-[11px] text-slate-400"><th className="text-left font-semibold">Linje</th><th className="text-right font-semibold">Planlagt</th><th className="text-right font-semibold">Registreret</th></tr></thead>
+          <tbody>
+            {lines.map((l, i) => (
+              <tr key={i}>
+                <td className="py-0.5">{l.trailer ? `H${l.trailer} · ` : ""}{l.text}</td>
+                <td className="text-right text-slate-500">{l.qty != null ? `${Number(l.qty).toLocaleString("da-DK")} ${l.unit || ""}` : "-"}</td>
+                <td className={`text-right font-semibold ${l.actual_qty == null ? "text-slate-400" : (l.qty != null && Number(l.actual_qty) !== Number(l.qty) ? "text-amber-700" : "text-emerald-700")}`}>
+                  {l.actual_qty == null ? (tour.completed ? "Ikke registreret" : "-") : `${Number(l.actual_qty).toLocaleString("da-DK")} ${l.unit || ""}`}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {!lines.length && cap.quantity && <div className="text-sm">Vægt: <b>{tour.weight ? `${tour.weight} kg` : (tour.completed ? "ikke registreret" : "-")}</b></div>}
+      {actual != null && <div className="text-sm">Hængere: planlagt {planned} · <b className={actual !== planned ? "text-amber-700" : ""}>kørt {actual}</b></div>}
+      {cap.photo && !(tour.photo_count > 0) && tour.completed && <div className="text-sm text-amber-700">Intet billede taget</div>}
+      {photos && photos.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {photos.map(p => (
+            <button key={p.id} type="button" onClick={() => setBig(p.url)} className="w-20 h-20 rounded-lg overflow-hidden border border-slate-200">
+              <img src={p.url} alt="Billede fra chaufføren" className="w-full h-full object-cover" />
+            </button>
+          ))}
+        </div>
+      )}
+      {big && createPortal(
+        <div className="fixed inset-0 z-[90] bg-black/80 flex items-center justify-center p-4" onClick={() => setBig(null)}>
+          <img src={big} alt="Billede fra chaufføren" className="max-w-full max-h-full rounded-lg" />
+        </div>, document.body)}
+    </div>
+  );
+}
+
 function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnreadChanged, ownName, siteWord, askConfirm, can = () => true, isPremium = false }) {
   const [audit, setAudit] = useState(null);
   const [edit, setEdit] = useState(null);
@@ -604,6 +692,9 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
           address: formatAddress(addr), address_parts: addr,
           facility: delivFilled ? formatAddress(deliv) : (tour.plads || ""), facility_parts: delivFilled ? deliv : {},
         };
+      // Ældre ture/bestillinger uden "Ved afslutning"-valg beholder deres
+      // oprindelige regler (fx vægt påkrævet), medmindre der vælges noget.
+      if (!Object.keys(tour.capture || {}).length && !body.capture?.quantity && !body.capture?.photo) delete body.capture;
       if (lines) {
         body.cargo_lines = lines.filter(l => (l.text || "").trim());
         body.fraction = body.cargo_lines.map(l => l.text.trim()).join(" + ");
@@ -658,6 +749,7 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
           {fact("Bestilt af", tour.created_by_name)}
           {fact("Vægt", tour.weight ? `${tour.weight} kg` : "")}
         </div>
+        <Registration tour={tour} />
         {stopsOf(tour).length > 0 && (
           <div className="mt-4" data-testid="panel-stops">
             <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-1.5">Stop ({stopsDone(tour)}/{stopsOf(tour).length} udført)</div>
@@ -790,6 +882,10 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
                 </select>
               </div>
               <div className="sm:col-span-2"><label className={labelCls}>Note til chaufføren</label><textarea rows={2} className={inputCls} value={edit.remark} onChange={(e) => setEdit({ ...edit, remark: e.target.value })} /></div>
+              <div className="sm:col-span-2 flex flex-wrap gap-4 text-sm">
+                <label className="flex items-center gap-2"><input type="checkbox" className="w-4 h-4 accent-emerald-600" checked={!!edit.capture?.quantity} onChange={(e) => setEdit({ ...edit, capture: { ...edit.capture, quantity: e.target.checked } })} /> Chaufføren registrerer mængde</label>
+                <label className="flex items-center gap-2"><input type="checkbox" className="w-4 h-4 accent-emerald-600" checked={!!edit.capture?.photo} onChange={(e) => setEdit({ ...edit, capture: { ...edit.capture, photo: e.target.checked } })} /> Chaufføren tager billede</label>
+              </div>
             </div>
             <div className="flex gap-2 justify-end">
               <button className={btnGhost} onClick={() => setEdit(null)}>Annuller</button>
@@ -804,6 +900,7 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
               deliv: Object.keys(tour.facility_parts || {}).length ? tour.facility_parts : parseAddress(tour.facility === tour.plads ? "" : tour.facility),
               lines: (tour.cargo_lines || []).length ? tour.cargo_lines.map(l => ({ text: l.text, trailer: l.trailer })) : null,
               stops: stopsOf(tour).length ? stopsOf(tour).map(x => ({ ...x })) : null,
+              capture: { quantity: !!(tour.capture || {}).quantity, photo: !!(tour.capture || {}).photo },
               trailer_count: Number(tour.trailer_count || 0),
               container: tour.container || "", capacity_label: tour.capacity_label || "", open_from: oh.from || "", open_to: oh.to || "",
               tour_type: tour.tour_type || "normal", priority: isHaster(tour) ? "urgent" : (tour.priority || "normal"), remark: tour.remark || "",

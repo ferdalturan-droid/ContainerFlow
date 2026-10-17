@@ -99,3 +99,14 @@ Begge dele er rettet. Desuden:
 - **"Opret som separate ture"** kan stadig vælges, fx ved flere containere hos forskellige kunder, der kan køres af forskellige chauffører.
 - **Gentag** opretter fortsat én tur pr. dag. Materialer er linjer på turen og opretter aldrig ekstra ture.
 - **B2B-bestillinger** har én adresse og påvirkes ikke.
+
+### Afslut tur: hvad chaufføren registrerer (2026-10-17)
+- **Ny tur → "Ved afslutning":** to Ja/Nej-valg, "Skal chaufføren registrere mængde?" og "Skal chaufføren tage billede?". Gemmes som `capture: {quantity, photo}` og kan rettes bagefter. Standard: mængde = ja for container (afhent) og løs afhentning, ellers nej; billede = nej.
+- **Mængde i linjens egen enhed:** "Køkkenelementer, 12 paller" spørger om antal paller, ikke kg. Hver linje har en "Som planlagt"-knap. Svarene gemmes i `cargo_lines[i].actual_qty`, og `weight` beregnes kun af kg- og ton-linjer.
+- **Billede:** taget med kameraet, komprimeret på telefonen og gemt i `tour_photos` (`/api/tours/{id}/photos`). Planlæggeren ser billederne under "Registrering" i tur-panelet.
+- **Blød validering:** mangler noget, der er slået til, får chaufføren en liste og kan vælge "Afslut alligevel". Ture med capture har ikke længere et hårdt vægtkrav. B2B-bestillinger uden capture beholder det gamle krav.
+- **Hængere:** forklares nu ("Bruges til afregningen af turen"). Chaufføren bekræfter eller retter antallet; det gemmes i `trailer_count_actual` og bruges i prisen.
+- **Driver self-service** i samme ark: ventetid (sendes til godkendelse), afvigelse eller besked med hurtigvalg (fx "Mindre end planlagt", "Kunden var ikke til stede", "Skade/mangler"), som lander i turens beskedtråd. En afsluttet tur kan rettes via "Ret registrering".
+- **Planlæggeren** ser planlagt mod registreret pr. linje (orange, når de afviger), "Hængere: planlagt X · kørt Y" og billederne.
+- **Kode:** `frontend/src/components/FinishSheet.jsx` og `Registration` i `pages/ToursWorkspace.jsx`; backend `cargo_actuals` i `PUT /api/tours/{id}` og `trailer_count` i `PUT /api/driver/tours/{id}/trailer`.
+

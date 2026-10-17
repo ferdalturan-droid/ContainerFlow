@@ -28,6 +28,7 @@ import AdminTabNav from "@/components/AdminTabNav";
 import TeamPanel from "@/pages/TeamPanel";
 import { DriverChatSheet, CallPlannerButton } from "@/components/DriverTourCard";
 import DriverTodayView from "@/components/DriverTodayView";
+import FinishSheet from "@/components/FinishSheet";
 import { enablePush, disablePush, syncPush, pushSupported, isIOS, isStandalone, permission as pushPermission } from "@/lib/push";
 import EconomyPanel from "@/pages/EconomyPanel";
 import LogisticsLocations from "@/pages/LogisticsLocations";
@@ -13023,9 +13024,9 @@ const TourBillingBox = ({ tour }) => {
           <Clock className="w-3.5 h-3.5 shrink-0" /> <span><b>Afregning:</b> {modelText}</span>
         </div>
       )}
-      {tour.on_way && !tour.completed && (
+      {tour.on_way && !tour.completed && !(Object.keys(tour.capture || {}).length && tour.tour_type !== "loes_afhentning") && (
         <div className="flex items-center justify-between gap-2">
-          <span className="text-xs font-semibold text-slate-600 dark:text-slate-300">Bruger du hænger på denne tur?</span>
+          <span className="text-xs font-semibold text-slate-600 dark:text-slate-300">Bruger du hænger på denne tur?<span className="block font-normal text-[11px] text-slate-500">Bruges til afregningen (hængertillæg).</span></span>
           <div className="inline-flex p-0.5 rounded-lg bg-slate-200 dark:bg-slate-900" data-testid="tour-trailer-toggle">
             {[[false, "Uden"], [true, "Med hænger"]].map(([v, l]) => (
               <button key={l} type="button" onClick={() => setTrailer(v)}
@@ -13074,7 +13075,7 @@ const TourBillingBox = ({ tour }) => {
   );
 };
 
-const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onToggleComplete, currentDriverName, onChat, onRefresh }) => {
+const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onToggleComplete, currentDriverName, onChat, onRefresh, onOpenFinish }) => {
   const [weightInput, setWeightInput] = useState("");
   const [askingWeight, setAskingWeight] = useState(false);
   // Fase 15.52 (2026-02-22): "Kan ikke gennemføres"-dialog state.
@@ -13280,7 +13281,8 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
     // 2026-10-17: Flere læs (løs afhentning ELLER flere indholdslinjer, fx
     // hænger 1: Beton, hænger 2: Træ) vejes hver for sig med samme UI.
     const _cargoN = Array.isArray(tour?.cargo_lines) ? tour.cargo_lines.length : 0;
-    const isLoesActive = (tour?.tour_type === "loes_afhentning" || _cargoN > 1) && !tour?.completed;
+    const _hasCapture = Object.keys(tour?.capture || {}).length > 0 && tour?.tour_type !== "loes_afhentning";
+    const isLoesActive = (tour?.tour_type === "loes_afhentning" || _cargoN > 1) && !tour?.completed && !_hasCapture;
     setAskingWeight(isLoesActive);
     setEditingWeight(false);
     setEditWeightVal(tour?.weight != null && tour?.weight !== "" ? String(tour.weight) : "");
@@ -13301,7 +13303,8 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
   if (!tour) return null;
   const isClaimedByOther = tour.claimed_by && tour.claimed_by !== currentDriverName;
   const cargoLines = Array.isArray(tour.cargo_lines) ? tour.cargo_lines : [];
-  const isMultiLoadTour = tour.tour_type === "loes_afhentning" || cargoLines.length > 1;
+  const hasCapture = Object.keys(tour.capture || {}).length > 0 && tour.tour_type !== "loes_afhentning";
+  const isMultiLoadTour = !hasCapture && (tour.tour_type === "loes_afhentning" || cargoLines.length > 1);
   const isGoodsTour = tour.tour_kind === "goods";
   const multiTitle = tour.tour_type === "loes_afhentning" ? "LØS AFHENTNING" : "turen";
   const tourStops = localStops || (Array.isArray(tour.stops) ? tour.stops : []);
@@ -14056,7 +14059,13 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
                 <CheckCircle2 className="w-4 h-4 mt-0.5 flex-shrink-0" />
                 <span>Turen er afsluttet. Forkert tid, hænger eller ventetid? Brug "Ret" ovenfor.</span>
               </div>
-              {((tour.tour_type || "normal") === "normal" || isMultiLoadTour || isGoodsTour) && !editingWeight && (
+              {hasCapture && onOpenFinish && (
+                <button onClick={() => onOpenFinish(tour)} data-testid="mobile-tour-panel-edit-registration"
+                  className="w-full px-3 py-2.5 rounded-lg font-semibold text-sm bg-slate-100 text-slate-700 flex items-center justify-center gap-2">
+                  <Edit2 className="w-4 h-4" /> Ret registrering
+                </button>
+              )}
+              {!hasCapture && ((tour.tour_type || "normal") === "normal" || isMultiLoadTour || isGoodsTour) && !editingWeight && (
                 <button
                   onClick={() => {
                     setEditWeightVal(tour.weight != null ? String(tour.weight) : "");
@@ -14174,6 +14183,7 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
               <button
                 onClick={() => {
                   if (tour.completed) return;
+                  if (hasCapture && onOpenFinish) { onOpenFinish(tour); return; }
                   const tt = (tour.tour_type || "normal");
                   if ((tt === "loes_afhentning" || isMultiLoadTour) && askingWeight) {
                     // UI er åben - afslut hvis valid
@@ -14764,6 +14774,8 @@ function App() {
   // 2026-10-16: Tur-beskeder (planlægger <-> chauffør) - ulæste pr. tur + åben tråd.
   const [driverTourUnread, setDriverTourUnread] = useState({});
   const [chatTour, setChatTour] = useState(null);
+  // 2026-10-17: "Afslut tur"-ark for ture med "Ved afslutning"-valg (capture).
+  const [finishTour, setFinishTour] = useState(null);
   const driverUnreadTotalRef = useRef(null);
   const [inlineWeightTourId, setInlineWeightTourId] = useState(null);
   const [showInlineScanner, setShowInlineScanner] = useState(false);
@@ -17046,8 +17058,9 @@ function App() {
           onMessages={() => setShowChat(true)}
           onStart={(t) => handleToggleOnWay(t.id)}
           onFinish={(t) => {
-            // Vægt (eller flere vægte) indtastes i tur-panelet. Opgaver uden
-            // vægt (fx byt container, værksted) afsluttes direkte med bekræftelse.
+            // Ture med "Ved afslutning"-valg (nye manuelle ture) bruger det samlede
+            // afslutnings-ark. Ældre ture/bestillinger: vægt i tur-panelet.
+            if (Object.keys(t.capture || {}).length && t.tour_type !== "loes_afhentning") { setFinishTour(t); return; }
             const tt = t.tour_type || "normal";
             const multi = tt === "loes_afhentning" || (t.cargo_lines || []).length > 1;
             if (tt === "normal" || multi || t.tour_kind === "goods") setSelectedTourForPanel(t);
@@ -18132,10 +18145,16 @@ function App() {
             currentDriverName={driverName}
             onChat={() => { const t = selectedTourForPanel; setSelectedTourForPanel(null); setChatTour(t); }}
             onRefresh={fetchTours}
+            onOpenFinish={(t) => setFinishTour(t)}
           />
         )}
 
         <DriverChatSheet tour={chatTour} onClose={() => setChatTour(null)} onChanged={fetchDriverTourUnread} />
+        {finishTour && (
+          <FinishSheet tour={finishTour} onClose={() => setFinishTour(null)}
+            onDone={() => { fetchTours(); setSelectedTourForPanel(null); }}
+            driverName={driverName} myId={selectedDriver?.id || authUser?.id || ""} />
+        )}
 
         {pushPrompt && authUser?.role === "driver" && (
           <div className="fixed inset-x-0 z-[85] px-3" style={{ bottom: "calc(84px + env(safe-area-inset-bottom))" }} data-testid="push-prompt">
