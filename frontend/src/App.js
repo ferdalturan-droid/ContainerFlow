@@ -13074,7 +13074,7 @@ const TourBillingBox = ({ tour }) => {
   );
 };
 
-const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onToggleComplete, currentDriverName, onChat }) => {
+const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onToggleComplete, currentDriverName, onChat, onRefresh }) => {
   const [weightInput, setWeightInput] = useState("");
   const [askingWeight, setAskingWeight] = useState(false);
   // Fase 15.52 (2026-02-22): "Kan ikke gennemføres"-dialog state.
@@ -13295,12 +13295,23 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
   // Fase 17.7 (2026-02-27): Lock mod dobbeltklik på OK. Skal være FØR
   // `if (!tour) return null` for at overholde rules-of-hooks.
   const [isSubmittingWeight, setIsSubmittingWeight] = useState(false);
+  // 2026-10-17: Stop på turen krydses af her (lokal kopi for straks-visning).
+  const [localStops, setLocalStops] = useState(null);
+  useEffect(() => { setLocalStops(null); }, [tour?.id, JSON.stringify(tour?.stops || [])]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!tour) return null;
   const isClaimedByOther = tour.claimed_by && tour.claimed_by !== currentDriverName;
   const cargoLines = Array.isArray(tour.cargo_lines) ? tour.cargo_lines : [];
   const isMultiLoadTour = tour.tour_type === "loes_afhentning" || cargoLines.length > 1;
   const isGoodsTour = tour.tour_kind === "goods";
   const multiTitle = tour.tour_type === "loes_afhentning" ? "LØS AFHENTNING" : "turen";
+  const tourStops = localStops || (Array.isArray(tour.stops) ? tour.stops : []);
+  const toggleStop = async (st) => {
+    try {
+      const { data } = await axios.post(`${API}/tours/${tour.id}/stops/${st.id}/done`, { done: !st.done_at });
+      setLocalStops(data.stops || []);
+      onRefresh?.();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Kunne ikke opdatere stoppet"); }
+  };
   const loadLabel = (idx) => (cargoLines.length > 1
     ? `${cargoLines[idx]?.trailer ? `H${cargoLines[idx].trailer} ` : ""}${cargoLines[idx]?.text || `Læs ${idx + 1}`}`
     : `#${idx + 1}`);
@@ -13359,6 +13370,8 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
     const askConfirm = (msg) => {
       try { return window.confirm(msg); } catch (_) { return true; }
     };
+    const openStops = tourStops.filter(x => !x.done_at).length;
+    if (openStops && !askConfirm(`${openStops} stop er ikke krydset af. Afslut turen alligevel?`)) return;
     if (isMultiLoadTour) {
       const existing = Array.isArray(tour.container_weights) ? tour.container_weights : [];
       const hasAtLeastOne = existing.some(w => parseFloat(w) > 0);
@@ -13675,13 +13688,13 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
 
         {/* Details */}
         <div className="p-4 space-y-3 text-sm">
-          {tour.facility && (
+          {tour.facility && tourStops.length === 0 && (
             <div>
               <div className="text-xs uppercase tracking-wide text-slate-500 mb-0.5">{isGoodsTour ? "Aflevering" : "Modtageanlæg"}</div>
               <div className="text-slate-800 dark:text-slate-200">{tour.facility}</div>
             </div>
           )}
-          {tour.address && (
+          {tour.address && tourStops.length === 0 && (
             <div>
               <div className="text-xs uppercase tracking-wide text-slate-500 mb-0.5">Adresse</div>
               <a
@@ -13695,6 +13708,32 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
                 {tour.address}
                 <ExternalLink className="w-3 h-3" />
               </a>
+            </div>
+          )}
+          {tourStops.length > 0 && (
+            <div data-testid="mobile-tour-panel-stops">
+              <div className="text-xs uppercase tracking-wide text-slate-500 mb-1.5">Stop ({tourStops.filter(x => x.done_at).length}/{tourStops.length} udført)</div>
+              <div className="space-y-2">
+                {tourStops.map((st, i) => {
+                  const canTick = !tour.completed && !isClaimedByOther && (tour.on_way || tour.claimed_by);
+                  return (
+                    <div key={st.id || i} className={`flex items-center gap-2 rounded-xl border px-3 py-2.5 ${st.done_at ? "border-emerald-200 bg-emerald-50" : "border-slate-200 bg-white"}`}>
+                      <button type="button" disabled={!canTick} onClick={() => toggleStop(st)} data-testid={`stop-toggle-${i}`}
+                        aria-label={st.done_at ? "Fortryd stop" : "Marker stop som udført"}
+                        className={`w-9 h-9 shrink-0 rounded-full border-2 flex items-center justify-center ${st.done_at ? "bg-emerald-500 border-emerald-500 text-white" : "border-slate-300 text-slate-400"} disabled:opacity-40`}>
+                        {st.done_at ? <Check className="w-5 h-5" /> : <span className="text-xs font-bold">{i + 1}</span>}
+                      </button>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-[11px] font-semibold text-slate-500">{st.kind === "delivery" ? "Aflevering" : "Afhentning"}{st.done_at ? ` · udført ${st.done_at}` : ""}</div>
+                        <div className="text-sm font-semibold text-slate-800 break-words">{st.address}</div>
+                      </div>
+                      <a href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(st.address)}&travelmode=driving`} target="_blank" rel="noopener noreferrer"
+                        className="w-9 h-9 shrink-0 rounded-lg border border-slate-200 flex items-center justify-center text-slate-600" aria-label="Navigér"><Navigation className="w-4 h-4" /></a>
+                    </div>
+                  );
+                })}
+              </div>
+              {!tour.on_way && !tour.completed && <p className="text-[11px] text-slate-400 mt-1.5">Start turen for at krydse stop af.</p>}
             </div>
           )}
           {(tour.open_from || tour.open_to) && (
@@ -15303,6 +15342,7 @@ function App() {
           fresh.completed === prev.completed &&
           fresh.on_way === prev.on_way &&
           fresh.claimed_by === prev.claimed_by &&
+          JSON.stringify(fresh.stops || []) === JSON.stringify(prev.stops || []) &&
           (fresh.container_weights || []).join(",") === (prev.container_weights || []).join(",")
         ) {
           return prev;
@@ -18091,6 +18131,7 @@ function App() {
             onToggleComplete={handleToggleComplete}
             currentDriverName={driverName}
             onChat={() => { const t = selectedTourForPanel; setSelectedTourForPanel(null); setChatTour(t); }}
+            onRefresh={fetchTours}
           />
         )}
 

@@ -12,7 +12,7 @@ import { ArchiveTab } from "./LocationAdminPage";
 import TourChat from "../components/TourChat";
 import AddressField, { formatAddress, parseAddress } from "../components/AddressField";
 import {
-  TOUR_TYPES, GOODS_TYPES, TOUR_TYPE_LABEL, SOURCE_LABEL, cargoSummary, isGoods, todayStr, addDays, fmtDayLong, fmtClock,
+  TOUR_TYPES, GOODS_TYPES, TOUR_TYPE_LABEL, SOURCE_LABEL, cargoSummary, isGoods, stopsOf, stopsDone, todayStr, addDays, fmtDayLong, fmtClock,
   isHaster, openHours, capacityText, assigneeName, tourStatus, daysLate, mapsUrl,
 } from "../lib/tourHelpers";
 
@@ -184,7 +184,7 @@ const readKind = () => { try { return localStorage.getItem(KIND_KEY) === "goods"
 const blankForm = (date, plads) => ({
   date, plads: plads || "", firma: "", kind: readKind(), tour_type: readKind() === "goods" ? "afhentning" : "normal",
   lines: [{ text: "", trailer: "", qty: "", unit: "stk" }], container: "", capacity_label: "", loose_count: "",
-  stops: [{ street: "", postal: "", city: "" }], delivery: { street: "", postal: "", city: "" },
+  stops: [{ street: "", postal: "", city: "" }], deliveries: [{ street: "", postal: "", city: "" }], separate: false,
   open_from: "", open_to: "", priority: "normal", driver_id: "", remark: "", trailer_count: 0,
   agreed_price: "", agreed_add_waiting: true,
   repeat: "none", repeat_days: ["1", "2", "3", "4", "5"], repeat_until: addDays(date, 28),
@@ -230,7 +230,10 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
   const multiLines = goods || tc >= 2;
   const dates = repeatDates(f);
   const stops = f.stops.filter(addrFilled);
-  const total = dates.length * Math.max(stops.length, 1);
+  const deliveries = f.deliveries.filter(addrFilled);
+  // Én opgave = én tur. Kun hvis brugeren beder om det, laves én tur pr. afhentningsadresse.
+  const separate = f.separate && stops.length > 1;
+  const total = dates.length * (separate ? stops.length : 1);
   const lines = f.lines.filter(l => (l.text || "").trim());
 
   const setKind = (k) => {
@@ -247,17 +250,24 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
     if (dates.length === 0) { toast.error("Gentagelsen giver ingen datoer"); return; }
     if (total > 200) { toast.error("Højst 200 ture ad gangen"); return; }
     const firma = f.firma.trim();
-    const facility = addrFilled(f.delivery) ? formatAddress(f.delivery) : f.plads;
+    const lastDel = deliveries[deliveries.length - 1];
+    const facility = lastDel ? formatAddress(lastDel) : f.plads;
+    const stopList = (pickups) => [
+      ...pickups.map(a => ({ kind: "pickup", ...a })),
+      ...deliveries.map(a => ({ kind: "delivery", ...a })),
+    ];
     const cargo = (multiLines || tc >= 1) ? lines.map(l => ({
       text: l.text.trim(), trailer: tc >= 2 && l.trailer ? Number(l.trailer) : (tc === 1 ? 1 : null),
       ...(goods && l.qty ? { qty: Number(String(l.qty).replace(",", ".")), unit: l.unit } : {}),
     })) : [];
     const body = [];
-    dates.forEach(date => stops.forEach((st, i) => body.push({
+    const groups = separate ? stops.map(st => [st]) : [stops];
+    dates.forEach(date => groups.forEach((pickups, i) => body.push({
       date, plads: f.plads, tour_kind: kind, tour_type: f.tour_type,
       fraction: cargo.length ? "" : lines[0].text.trim(), cargo_lines: cargo, trailer_count: tc,
-      address: formatAddress(st), address_parts: st,
-      facility, facility_parts: addrFilled(f.delivery) ? f.delivery : {},
+      address: formatAddress(pickups[0]), address_parts: pickups[0],
+      facility, facility_parts: lastDel || {},
+      stops: stopList(pickups),
       container: goods ? "" : f.container.trim(), capacity_label: goods ? "" : f.capacity_label.trim(),
       open_from: f.open_from, open_to: f.open_to, priority: f.priority, remark: f.remark.trim(),
       is_private: !!firma, private_company: firma, sort_order: i,
@@ -299,7 +309,7 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
   const chip = (on, extra = "") => `px-3 py-2 rounded-lg text-sm font-semibold border ${on ? "bg-emerald-600 border-emerald-600 text-white" : "border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300"} ${extra}`;
 
   return (
-    <Sheet open={open} onClose={onClose} title="Ny tur" subtitle="Udfyld det chaufføren skal bruge. Flere afhentningsadresser giver én tur pr. adresse." testid="tour-form"
+    <Sheet open={open} onClose={onClose} title="Ny tur" subtitle="Én opgave er én tur - også med flere stop. Gentagelse giver én tur pr. dag." testid="tour-form"
       footer={
         <div className="flex items-center gap-2">
           <div className="text-xs text-slate-500 flex-1">{total > 0 ? `${total} tur${total === 1 ? "" : "e"} oprettes` : ""}</div>
@@ -400,26 +410,32 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
       </section>
 
       <section className={`${card} p-4 space-y-4`}>
-        <div className="space-y-3">
-          <span className={labelCls}>Afhentning</span>
-          {f.stops.map((st, i) => (
-            <div key={i} className="relative rounded-xl border border-slate-100 dark:border-slate-700 p-3">
-              {f.stops.length > 1 && (
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs font-bold text-slate-500">Stop {i + 1}</span>
-                  <button type="button" className="p-1 text-slate-400 hover:text-rose-500" aria-label="Fjern stop" onClick={() => set("stops", f.stops.filter((_, j) => j !== i))}><X className="w-4 h-4" /></button>
-                </div>
-              )}
-              <AddressField value={st} onChange={(v) => set("stops", f.stops.map((x, j) => (j === i ? v : x)))} testid={`tf-stop-${i}`} inputCls={inputCls} />
-            </div>
-          ))}
-          <button type="button" className="text-sm font-semibold text-emerald-700 dark:text-emerald-400 inline-flex items-center gap-1"
-            onClick={() => set("stops", [...f.stops, { street: "", postal: "", city: "" }])}><Plus className="w-4 h-4" /> Tilføj stop (giver en tur mere)</button>
-        </div>
-        <div className="space-y-2">
-          <span className={labelCls}>Aflevering</span>
-          <AddressField value={f.delivery} onChange={(v) => set("delivery", v)} placeholder={f.plads ? `Tom = ${f.plads}` : "Hvor skal det hen?"} testid="tf-delivery" inputCls={inputCls} />
-        </div>
+        {[["stops", "Afhentning", "Tilføj afhentning"], ["deliveries", "Aflevering", "Tilføj aflevering"]].map(([key, title, addLabel]) => (
+          <div key={key} className="space-y-3">
+            <span className={labelCls}>{title}{f[key].length > 1 ? ` (${f[key].length} stop)` : ""}</span>
+            {f[key].map((st, i) => (
+              <div key={i} className="relative rounded-xl border border-slate-100 dark:border-slate-700 p-3">
+                {f[key].length > 1 && (
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-bold text-slate-500">{title} {i + 1}</span>
+                    <button type="button" className="p-1 text-slate-400 hover:text-rose-500" aria-label="Fjern" onClick={() => set(key, f[key].filter((_, j) => j !== i))}><X className="w-4 h-4" /></button>
+                  </div>
+                )}
+                <AddressField value={st} onChange={(v) => set(key, f[key].map((x, j) => (j === i ? v : x)))}
+                  placeholder={key === "deliveries" && f.plads ? `Tom = ${f.plads}` : "Vej og nr."}
+                  testid={key === "stops" ? `tf-stop-${i}` : `tf-delivery-${i}`} inputCls={inputCls} />
+              </div>
+            ))}
+            <button type="button" className="text-sm font-semibold text-emerald-700 dark:text-emerald-400 inline-flex items-center gap-1"
+              onClick={() => set(key, [...f[key], { street: "", postal: "", city: "" }])}><Plus className="w-4 h-4" /> {addLabel}</button>
+          </div>
+        ))}
+        {stops.length > 1 && (
+          <label className="flex items-start gap-2 text-sm text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-slate-900 rounded-lg px-3 py-2.5">
+            <input type="checkbox" className="w-4 h-4 mt-0.5 accent-emerald-600" checked={!!f.separate} onChange={(e) => set("separate", e.target.checked)} data-testid="tf-separate" />
+            <span><b>Opret som separate ture</b> - én tur pr. afhentningsadresse (fx flere containere hos forskellige kunder, der kan køres af forskellige chauffører). Ellers er det <b>én tur med {stops.length + deliveries.length} stop</b>, som chaufføren krydser af undervejs.</span>
+          </label>
+        )}
       </section>
 
       <section className={`${card} p-4 space-y-3`}>
@@ -482,7 +498,7 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
                 <label className={labelCls}>Aftalt pris pr. tur (kr, ekskl. moms)</label>
                 <input type="text" inputMode="decimal" className={`${inputCls} max-w-[220px]`} value={f.agreed_price} onChange={(e) => set("agreed_price", e.target.value)} placeholder="Tom = prisreglerne" data-testid="tf-price" />
                 <p className="text-[11px] text-slate-500">
-                  Erstatter prisreglerne for netop {total > 1 ? "hver af disse ture" : "denne tur"}{tc >= 2 ? ` (samlet for alle ${tc} hængere)` : ""}.
+                  Erstatter prisreglerne for {total > 1 ? "hver af de oprettede ture" : "hele turen"}{tc >= 2 ? ` (samlet for alle ${tc} hængere)` : ""}{!separate && stops.length + deliveries.length > 2 ? " inkl. alle stop" : ""}.
                   Tillæg som weekend og haster er indregnet. Senere ændringer af prisreglerne påvirker den ikke.
                 </p>
                 {f.agreed_price !== "" && (
@@ -579,13 +595,15 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
   const saveEdit = async () => {
     setSaving(true);
     try {
-      const { addr, deliv, lines, ...rest } = edit;
+      const { addr, deliv, lines, stops, ...rest } = edit;
       const delivFilled = (deliv?.street || deliv?.city || "").trim();
-      const body = {
-        ...rest,
-        address: formatAddress(addr), address_parts: addr,
-        facility: delivFilled ? formatAddress(deliv) : (tour.plads || ""), facility_parts: delivFilled ? deliv : {},
-      };
+      const body = stops
+        ? { ...rest, stops: stops.map(x => ({ ...x, address: x.address || formatAddress(x) })).filter(x => (x.address || "").trim()) }
+        : {
+          ...rest,
+          address: formatAddress(addr), address_parts: addr,
+          facility: delivFilled ? formatAddress(deliv) : (tour.plads || ""), facility_parts: delivFilled ? deliv : {},
+        };
       if (lines) {
         body.cargo_lines = lines.filter(l => (l.text || "").trim());
         body.fraction = body.cargo_lines.map(l => l.text.trim()).join(" + ");
@@ -640,6 +658,23 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
           {fact("Bestilt af", tour.created_by_name)}
           {fact("Vægt", tour.weight ? `${tour.weight} kg` : "")}
         </div>
+        {stopsOf(tour).length > 0 && (
+          <div className="mt-4" data-testid="panel-stops">
+            <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-1.5">Stop ({stopsDone(tour)}/{stopsOf(tour).length} udført)</div>
+            <ol className="space-y-1.5">
+              {stopsOf(tour).map((st, i) => (
+                <li key={st.id || i} className="flex items-start gap-2 text-sm">
+                  <span className={`mt-0.5 w-5 h-5 rounded-full text-[11px] font-bold flex items-center justify-center shrink-0 ${st.done_at ? "bg-emerald-500 text-white" : "bg-slate-100 text-slate-600"}`}>{st.done_at ? <Check className="w-3 h-3" /> : i + 1}</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="text-[11px] font-semibold text-slate-500 mr-1">{st.kind === "delivery" ? "Aflevering" : "Afhentning"}</span>
+                    <span className="text-slate-800 dark:text-slate-100 break-words">{st.address}</span>
+                    {st.done_at && <span className="block text-[11px] text-emerald-700">Udført kl. {st.done_at}{st.done_by ? ` · ${st.done_by}` : ""}</span>}
+                  </span>
+                </li>
+              ))}
+            </ol>
+          </div>
+        )}
         {oh.note && <div className="mt-3 text-sm bg-amber-50 dark:bg-amber-950/30 text-amber-900 dark:text-amber-200 rounded-lg px-3 py-2">{oh.note}</div>}
         {tour.not_completed && (
           <div className="mt-3 text-sm bg-rose-50 dark:bg-rose-950/30 text-rose-800 dark:text-rose-200 rounded-lg px-3 py-2">
@@ -716,8 +751,34 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
                   </select>
                 </div>
               )}
-              <div className="sm:col-span-2"><AddressField label="Afhentning" value={edit.addr} onChange={(v) => setEdit({ ...edit, addr: v })} inputCls={inputCls} /></div>
-              <div className="sm:col-span-2"><AddressField label="Aflevering" value={edit.deliv} onChange={(v) => setEdit({ ...edit, deliv: v })} inputCls={inputCls} /></div>
+              {edit.stops ? (
+                <div className="sm:col-span-2 space-y-3">
+                  <label className={labelCls}>Stop</label>
+                  {edit.stops.map((st, i) => (
+                    <div key={st.id || i} className="rounded-xl border border-slate-100 dark:border-slate-700 p-3">
+                      <div className="flex items-center justify-between mb-2">
+                        <select className="text-xs font-bold bg-transparent" value={st.kind} onChange={(e) => setEdit({ ...edit, stops: edit.stops.map((x, j) => (j === i ? { ...x, kind: e.target.value } : x)) })}>
+                          <option value="pickup">Afhentning</option><option value="delivery">Aflevering</option>
+                        </select>
+                        {edit.stops.length > 1 && <button type="button" className="p-1 text-slate-400" onClick={() => setEdit({ ...edit, stops: edit.stops.filter((_, j) => j !== i) })}><X className="w-4 h-4" /></button>}
+                      </div>
+                      <AddressField value={st.street || st.city ? st : parseAddress(st.address)} onChange={(v) => setEdit({ ...edit, stops: edit.stops.map((x, j) => (j === i ? { ...x, ...v, address: formatAddress(v) } : x)) })} inputCls={inputCls} />
+                    </div>
+                  ))}
+                  <div className="flex gap-3">
+                    <button type="button" className="text-sm font-semibold text-emerald-700 inline-flex items-center gap-1" onClick={() => setEdit({ ...edit, stops: [...edit.stops, { kind: "pickup", street: "", postal: "", city: "" }] })}><Plus className="w-4 h-4" /> Afhentning</button>
+                    <button type="button" className="text-sm font-semibold text-emerald-700 inline-flex items-center gap-1" onClick={() => setEdit({ ...edit, stops: [...edit.stops, { kind: "delivery", street: "", postal: "", city: "" }] })}><Plus className="w-4 h-4" /> Aflevering</button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="sm:col-span-2"><AddressField label="Afhentning" value={edit.addr} onChange={(v) => setEdit({ ...edit, addr: v })} inputCls={inputCls} /></div>
+                  <div className="sm:col-span-2"><AddressField label="Aflevering" value={edit.deliv} onChange={(v) => setEdit({ ...edit, deliv: v })} inputCls={inputCls} /></div>
+                  <button type="button" className="sm:col-span-2 text-left text-sm font-semibold text-emerald-700 inline-flex items-center gap-1"
+                    onClick={() => setEdit({ ...edit, stops: [{ kind: "pickup", ...edit.addr }, ...((edit.deliv?.street || edit.deliv?.city) ? [{ kind: "delivery", ...edit.deliv }] : []), { kind: "pickup", street: "", postal: "", city: "" }] })}>
+                    <Plus className="w-4 h-4" /> Tilføj et stop mere på turen</button>
+                </>
+              )}
               {!isGoods(tour) && <div><label className={labelCls}>Container nr.</label><input className={inputCls} value={edit.container} onChange={(e) => setEdit({ ...edit, container: e.target.value })} /></div>}
               {!isGoods(tour) && <div><label className={labelCls}>Kapacitet</label><input className={inputCls} value={edit.capacity_label} onChange={(e) => setEdit({ ...edit, capacity_label: e.target.value })} /></div>}
               <div><label className={labelCls}>Tidligst</label><input type="time" className={inputCls} value={edit.open_from} onChange={(e) => setEdit({ ...edit, open_from: e.target.value })} /></div>
@@ -742,6 +803,7 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
               addr: Object.keys(tour.address_parts || {}).length ? tour.address_parts : parseAddress(tour.address),
               deliv: Object.keys(tour.facility_parts || {}).length ? tour.facility_parts : parseAddress(tour.facility === tour.plads ? "" : tour.facility),
               lines: (tour.cargo_lines || []).length ? tour.cargo_lines.map(l => ({ text: l.text, trailer: l.trailer })) : null,
+              stops: stopsOf(tour).length ? stopsOf(tour).map(x => ({ ...x })) : null,
               trailer_count: Number(tour.trailer_count || 0),
               container: tour.container || "", capacity_label: tour.capacity_label || "", open_from: oh.from || "", open_to: oh.to || "",
               tour_type: tour.tour_type || "normal", priority: isHaster(tour) ? "urgent" : (tour.priority || "normal"), remark: tour.remark || "",
@@ -776,6 +838,7 @@ const copyBody = (t, date) => ({
   customer_code: t.customer_code || "", loose_estimated_count: t.loose_estimated_count || 0,
   tour_kind: t.tour_kind || "container", address_parts: t.address_parts || {}, facility_parts: t.facility_parts || {},
   trailer_count: t.trailer_count || 0, cargo_lines: t.cargo_lines || [],
+  stops: (t.stops || []).map(({ done_at, done_by, ...rest }) => rest),
 });
 
 // ─────────────────────────── Arbejdsfladen ───────────────────────────
@@ -1231,6 +1294,7 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
                                   {!showOverdue && late > 0 && <span className="text-[11px] font-semibold text-amber-700">{late} d. forsinket</span>}
                                 </div>
                                 <div className="text-sm text-slate-600 dark:text-slate-300 truncate">{t.address || "Ingen adresse"}{t.facility && t.facility !== t.plads ? <span className="text-slate-400"> → {t.facility}</span> : null}</div>
+                                {stopsOf(t).length > 0 && <div className="text-[11px] font-semibold text-slate-500">{stopsOf(t).length} stop · {stopsDone(t)} udført</div>}
                                 <div className="md:hidden mt-1 flex items-center gap-3 text-[11px] text-slate-500">
                                   {oh.from && <span className="inline-flex items-center gap-1"><Clock className="w-3 h-3" />{oh.from}–{oh.to}</span>}
                                   <span className={`px-1.5 py-0.5 rounded border ${st.chip}`}>{st.label}{t.on_way_time && !t.completed ? ` ${t.on_way_time}` : ""}{t.completed && t.time ? ` ${t.time}` : ""}</span>

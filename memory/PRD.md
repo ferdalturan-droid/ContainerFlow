@@ -20,6 +20,7 @@ Data must be strictly isolated per company.
 
 ## What's been implemented (2026-02-15)
 ## What's new in 2026-10-17 (Gods/container, Ny tur v2, chauffør v2, push)
+- **Én opgave = én tur:** flere afhentninger og afleveringer gemmes som `stops` på én tur; chaufføren krydser stop af. "Opret som separate ture" er et frivilligt valg. Før blev det til én tur pr. adresse, med dobbelt gods og dobbelt pris.
 - **Turtyper:** `tour_kind` er "container" eller "goods". Gods findes kun på premium-firmaets egne lokationer; B2B og partner er altid container (`_normalize_tour_doc`).
 - **Nye felter:** strukturerede adresser (`address_parts`/`facility_parts`), `trailer_count` og `cargo_lines` (indhold pr. hænger). Vægt pr. læs gemmes i `container_weights` og summeres.
 - **Ny tur v2:** Flere detaljer, by og postnummer (Datafordeler-liste i `frontend/src/data/postnumre.json`), kunderegister, aftalt pris med ventetid oveni.

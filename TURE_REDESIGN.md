@@ -89,3 +89,13 @@ Begge dele er rettet. Desuden:
 - **Til og fra:** slået til som standard, og chaufføren slår det fra under Profil.
 - **iPhone og iPad:** kræver at appen er lagt på hjemmeskærmen (guide vises).
 - **Kode:** `_push_driver`, `_push_new_haster`, `/api/push/*`, `/api/driver/push-settings` og `frontend/src/lib/push.js`.
+
+### Én opgave er én tur, også med flere stop (2026-10-17)
+- **Før:** flere afhentningsadresser i "Ny tur" gav én tur pr. adresse (arvet fra "Firma tur"). Hver tur fik alle materialer og den fulde aftalte pris, så gods og pris blev dobbelte. Chaufføren skulle starte og afslutte hver tur, og Rapportering talte dem som flere ture.
+- **Nu:** afhentninger og afleveringer gemmes som `stops` på én tur.
+  - `address` og `facility` spejler første afhentning og sidste aflevering, så kort, rute, rapporter og PDF virker uændret.
+  - Chaufføren krydser hvert stop af i tur-panelet (`POST /api/tours/{id}/stops/{stop_id}/done`) og bliver advaret, hvis turen afsluttes med stop der ikke er krydset af.
+  - Planlæggeren kan rette eller tilføje stop; stop der allerede er krydset af, bevares.
+- **"Opret som separate ture"** kan stadig vælges, fx ved flere containere hos forskellige kunder, der kan køres af forskellige chauffører.
+- **Gentag** opretter fortsat én tur pr. dag. Materialer er linjer på turen og opretter aldrig ekstra ture.
+- **B2B-bestillinger** har én adresse og påvirkes ikke.

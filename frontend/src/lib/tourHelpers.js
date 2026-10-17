@@ -110,3 +110,7 @@ export const daysLate = (t) => {
 
 export const mapsUrl = (address) =>
   `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${address}, Denmark`)}`;
+
+/** Stop på turen (2026-10-17). Tom liste = almindelig tur med én adresse. */
+export const stopsOf = (t) => (Array.isArray(t?.stops) ? t.stops : []);
+export const stopsDone = (t) => stopsOf(t).filter(s => s.done_at).length;

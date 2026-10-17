@@ -415,6 +415,11 @@ class Tour(BaseModel):
     facility_parts: Dict[str, str] = Field(default_factory=dict)
     trailer_count: int = 0
     cargo_lines: List[Dict[str, Any]] = Field(default_factory=list)
+    # 2026-10-17: Én opgave = én tur, også med flere stop. `stops` er den
+    # ordnede liste af afhentninger/afleveringer; `address`/`facility`
+    # spejler første afhentning/sidste aflevering, så alt eksisterende
+    # (kort, rute, rapporter) virker uændret. Chaufføren krydser stop af.
+    stops: List[Dict[str, Any]] = Field(default_factory=list)
 
 class TourCreate(BaseModel):
     date: str = Field(default_factory=get_dk_date_str)
@@ -455,6 +460,7 @@ class TourCreate(BaseModel):
     facility_parts: Dict[str, str] = Field(default_factory=dict)
     trailer_count: int = 0
     cargo_lines: List[Dict[str, Any]] = Field(default_factory=list)
+    stops: List[Dict[str, Any]] = Field(default_factory=list)
 
 class TourUpdate(BaseModel):
     weight: Optional[float] = None
@@ -503,6 +509,7 @@ class TourUpdate(BaseModel):
     trailer_count: Optional[int] = None
     cargo_lines: Optional[List[Dict[str, Any]]] = None
     loose_estimated_count: Optional[int] = None
+    stops: Optional[List[Dict[str, Any]]] = None
 
 class Report(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -1475,6 +1482,49 @@ def _clean_cargo_lines(lines: Any, trailer_count: int) -> List[dict]:
     return out
 
 
+def _fmt_addr(parts: dict) -> str:
+    tail = " ".join(x for x in [parts.get("postal") or "", parts.get("city") or ""] if x)
+    return ", ".join(x for x in [parts.get("street") or "", tail] if x)
+
+
+def _clean_stops(stops: Any, previous: Optional[List[dict]] = None) -> List[dict]:
+    """Rens stop-listen. Bevarer "udført" for stop der allerede fandtes."""
+    prev = {s.get("id"): s for s in (previous or []) if isinstance(s, dict)}
+    out = []
+    for st in (stops or [])[:20]:
+        if not isinstance(st, dict):
+            continue
+        parts = {k: str(st.get(k) or "").strip()[:120] for k in ("street", "postal", "city")}
+        addr = str(st.get("address") or "").strip()[:200] or _fmt_addr(parts)
+        if not addr:
+            continue
+        sid = str(st.get("id") or "") or str(uuid.uuid4())
+        old = prev.get(sid) or {}
+        out.append({
+            "id": sid, "kind": "delivery" if st.get("kind") == "delivery" else "pickup",
+            **{k: v for k, v in parts.items() if v}, "address": addr,
+            "note": str(st.get("note") or "").strip()[:200],
+            "done_at": old.get("done_at") or "", "done_by": old.get("done_by") or "",
+        })
+    return out
+
+
+def _apply_stops(td: dict) -> None:
+    """address/facility (+ parts) spejler første afhentning og sidste aflevering."""
+    stops = td.get("stops") or []
+    if not stops:
+        return
+    picks = [s for s in stops if s["kind"] == "pickup"] or stops[:1]
+    dels = [s for s in stops if s["kind"] == "delivery"]
+    first = picks[0]
+    td["address"] = first["address"]
+    td["address_parts"] = {k: first[k] for k in ("street", "postal", "city") if first.get(k)}
+    if dels:
+        last = dels[-1]
+        td["facility"] = last["address"]
+        td["facility_parts"] = {k: last[k] for k in ("street", "postal", "city") if last.get(k)}
+
+
 async def _normalize_tour_doc(td: dict, payload: Optional[dict], profile_cache: dict) -> dict:
     """2026-10-17: Ensretter en ny tur efter hvor den hører til.
     - Tur på en genbrugsplads-kundes plads (B2B) eller hos et partner-firma
@@ -1520,6 +1570,11 @@ async def _normalize_tour_doc(td: dict, payload: Optional[dict], profile_cache: 
     for key in ("address_parts", "facility_parts"):
         parts = td.get(key) or {}
         td[key] = {k: str(parts.get(k) or "").strip()[:120] for k in ("street", "postal", "city") if parts.get(k)}
+    td["stops"] = _clean_stops(td.get("stops"))
+    # Én stop er ikke en stop-liste - så er address/facility nok.
+    if len(td["stops"]) <= 1:
+        td["stops"] = []
+    _apply_stops(td)
     return td
 
 
@@ -2652,6 +2707,12 @@ async def update_tour(tour_id: str, update: TourUpdate, payload: dict = Depends(
         raise HTTPException(status_code=400, detail="No update data provided")
     if "date" in update_data:
         update_data["date"] = normalize_date(update_data["date"])
+    if "stops" in update_data:
+        _prev_stops = (await _raw_db.tours.find_one({"id": tour_id}, {"_id": 0, "stops": 1}) or {}).get("stops") or []
+        update_data["stops"] = _clean_stops(update_data["stops"], _prev_stops)
+        if len(update_data["stops"]) <= 1:
+            update_data["stops"] = []
+        _apply_stops(update_data)
     if "cargo_lines" in update_data:
         update_data["cargo_lines"] = _clean_cargo_lines(update_data["cargo_lines"], int(update_data.get("trailer_count") or 9))
         if update_data["cargo_lines"] and "fraction" not in update_data:
@@ -2694,7 +2755,7 @@ async def update_tour(tour_id: str, update: TourUpdate, payload: dict = Depends(
         update_data.pop("driver_id", None)
         update_data.pop("driver_name", None)
         for _k in ("date", "fraction", "address", "facility", "plads", "capacity_label",
-                   "address_parts", "facility_parts", "trailer_count", "cargo_lines", "loose_estimated_count"):
+                   "address_parts", "facility_parts", "trailer_count", "cargo_lines", "loose_estimated_count", "stops"):
             update_data.pop(_k, None)
         if not update_data:
             raise HTTPException(status_code=400, detail="No update data provided")
@@ -3002,7 +3063,7 @@ async def update_tour(tour_id: str, update: TourUpdate, payload: dict = Depends(
     if payload.get("role") in ("logistics_admin", "super_admin") and not assignment_changed:
         _watched = {"date": "dato", "address": "adresse", "facility": "aflevering", "fraction": "indhold",
                     "open_from": "tidsrum", "open_to": "tidsrum", "remark": "note", "priority": "prioritet",
-                    "cargo_lines": "indhold", "trailer_count": "hængere"}
+                    "cargo_lines": "indhold", "trailer_count": "hængere", "stops": "stop"}
         changed = sorted({lbl for k, lbl in _watched.items() if k in update_data and update_data[k] != existing_tour.get(k)})
         holder = (tour.get("driver_id") or tour.get("claimed_by_id") or "").strip()
         if changed and holder and not tour.get("completed"):
@@ -3166,6 +3227,40 @@ async def mark_tour_not_completed(
         }},
     )
     return {"success": True, "not_completed_at": now_iso}
+
+
+class StopDoneIn(BaseModel):
+    done: bool = True
+
+
+@api_router.post("/tours/{tour_id}/stops/{stop_id}/done")
+async def tour_stop_done(tour_id: str, stop_id: str, body: StopDoneIn,
+                         payload: dict = Depends(get_current_user_payload)):
+    """2026-10-17: Chaufføren krydser et stop af (eller fjerner krydset).
+    Kun chaufføren der har turen, eller firmaets planlægger."""
+    t = await _raw_db.tours.find_one({"id": tour_id}, {"_id": 0})
+    if not t:
+        raise HTTPException(status_code=404, detail="Tur ikke fundet")
+    role, cid, uid = payload.get("role"), payload.get("company_id") or "", payload.get("sub") or ""
+    if role not in ("driver", "logistics_admin", "super_admin"):
+        raise HTTPException(status_code=403, detail="Adgang nægtet")
+    if role != "super_admin" and t.get("company_id") != cid and cid not in (t.get("assigned_logistics_company_ids") or []):
+        raise HTTPException(status_code=403, detail="Adgang nægtet")
+    if role == "driver" and uid not in ((t.get("driver_id") or ""), (t.get("claimed_by_id") or "")):
+        raise HTTPException(status_code=403, detail="Tag turen først")
+    if role == "logistics_admin" and not await _require_tour_scope(payload, [tour_id]):
+        raise HTTPException(status_code=403, detail="Turen hører til en kunde du ikke har adgang til")
+    stops = list(t.get("stops") or [])
+    if not any(s.get("id") == stop_id for s in stops):
+        raise HTTPException(status_code=404, detail="Stop ikke fundet")
+    me = await _raw_db.users.find_one({"id": uid}, {"_id": 0, "name": 1}) or {}
+    now = datetime.now(DK_TZ).strftime("%H:%M")
+    for s in stops:
+        if s.get("id") == stop_id:
+            s["done_at"] = now if body.done else ""
+            s["done_by"] = (me.get("name") or "") if body.done else ""
+    await _raw_db.tours.update_one({"id": tour_id}, {"$set": {"stops": stops}})
+    return {"stops": stops}
 
 
 @api_router.post("/tours/{tour_id}/reactivate")

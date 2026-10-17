@@ -25,6 +25,8 @@ export default function DriverTourCard({ tour, index, routeInfo, unread = 0, min
   const street = ap.street || (tour.address || "").split(",")[0] || tour.facility || "Ingen adresse";
   const town = ap.street ? [ap.postal, ap.city].filter(Boolean).join(" ") : (tour.address || "").split(",").slice(1).join(",").trim();
   const delivery = tour.facility && tour.facility !== tour.plads ? tour.facility : "";
+  const stops = Array.isArray(tour.stops) ? tour.stops : [];
+  const stopsDoneN = stops.filter(x => x.done_at).length;
   const cap = tour.tour_type === "loes_afhentning"
     ? (tour.loose_estimated_count ? `${tour.loose_estimated_count} containere` : "")
     : capacityText(tour);
@@ -62,7 +64,9 @@ export default function DriverTourCard({ tour, index, routeInfo, unread = 0, min
           <div className="min-w-0 flex-1">
             <p className="text-[17px] leading-snug font-extrabold text-slate-900 break-words">{street}</p>
             {town && <p className="text-[13px] text-slate-500">{town}</p>}
-            {delivery && <p className="text-[13px] text-slate-600 mt-1">→ {delivery}</p>}
+            {stops.length > 0 ? (
+              <p className="text-[13px] font-semibold text-slate-600 mt-1">{stops.length} stop{onWay || done ? ` · ${stopsDoneN} udført` : ""} · slut: {stops[stops.length - 1]?.address}</p>
+            ) : delivery && <p className="text-[13px] text-slate-600 mt-1">→ {delivery}</p>}
           </div>
           <ChevronRight className="w-5 h-5 text-slate-300 shrink-0 mt-1" />
         </div>
