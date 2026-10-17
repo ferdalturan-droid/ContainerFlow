@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import axios from "axios";
 import { toast } from "sonner";
-import { MapPin, Plus, Edit2, X, Check, Loader2, Building2, CheckCircle2, PowerOff, Info } from "lucide-react";
+import { MapPin, Plus, Edit2, X, Check, Loader2, Building2, CheckCircle2, PowerOff, Info, LocateFixed, ExternalLink } from "lucide-react";
 import { API, formatApiError } from "../auth/api";
 
 /**
@@ -23,12 +23,32 @@ const EMPTY = { name: "", address: "", city: "", lat: "", lng: "" };
 function LocationForm({ initial, onCancel, onSaved }) {
   const [f, setF] = useState({ ...EMPTY, ...initial, lat: initial?.lat ?? "", lng: initial?.lng ?? "" });
   const [saving, setSaving] = useState(false);
+  const [gpsTouched, setGpsTouched] = useState(false);
+  const [finding, setFinding] = useState(false);
+  const [gpsNote, setGpsNote] = useState("");
+  const addrChanged = (f.address || "") !== (initial?.address || "") || (f.city || "") !== (initial?.city || "");
+  const findGps = async () => {
+    const q = [f.address, f.city].map(x => (x || "").trim()).filter(Boolean).join(", ");
+    if (!q) { toast.error("Skriv adresse og by først"); return; }
+    setFinding(true);
+    try {
+      const { data } = await axios.get(`${API}/geocode`, { params: { q } });
+      setF(x => ({ ...x, lat: Number(data.lat).toFixed(6), lng: Number(data.lng).toFixed(6) }));
+      setGpsTouched(true);
+      setGpsNote(data.source === "postnr" ? "Omtrentlig placering (byens midte) - ret gerne præcist" : (data.label || "Fundet"));
+    } catch (e) { toast.error(formatApiError(e)); }
+    setFinding(false);
+  };
   const save = async () => {
     if (!f.name.trim()) { toast.error("Skriv et navn"); return; }
     setSaving(true);
+    // Ændres adressen uden at GPS er rettet, sendes GPS tomt, så serveren
+    // finder den nye placering automatisk.
+    const resetGps = addrChanged && !gpsTouched;
     const body = {
       name: f.name.trim(), address: f.address.trim(), city: f.city.trim(),
-      lat: f.lat === "" ? null : Number(f.lat), lng: f.lng === "" ? null : Number(f.lng),
+      lat: resetGps || f.lat === "" ? null : Number(String(f.lat).replace(",", ".")),
+      lng: resetGps || f.lng === "" ? null : Number(String(f.lng).replace(",", ".")),
     };
     try {
       if (initial?.id) await axios.put(`${API}/plads/${initial.id}`, body);
@@ -47,11 +67,30 @@ function LocationForm({ initial, onCancel, onSaved }) {
           <input className={input} value={f.address} onChange={e => setF({ ...f, address: e.target.value })} placeholder="Vej og nr." /></div>
         <div><span className={label}>By</span>
           <input className={input} value={f.city} onChange={e => setF({ ...f, city: e.target.value })} /></div>
-        <div><span className={label}>GPS breddegrad (valgfri)</span>
-          <input className={input} inputMode="decimal" value={f.lat} onChange={e => setF({ ...f, lat: e.target.value })} placeholder="55.46" /></div>
-        <div><span className={label}>GPS længdegrad (valgfri)</span>
-          <input className={input} inputMode="decimal" value={f.lng} onChange={e => setF({ ...f, lng: e.target.value })} placeholder="12.18" /></div>
-        <div className="flex items-end text-xs text-slate-500">GPS bruges til ruteoptimering.</div>
+      </div>
+      <div className="rounded-lg bg-white/70 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-700 p-3 space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="text-sm font-semibold flex items-center gap-1.5"><LocateFixed className="w-4 h-4 text-slate-400" /> GPS-placering</div>
+          <div className="flex gap-2">
+            <button type="button" className={btnGhost} onClick={findGps} disabled={finding}>{finding ? <Loader2 className="w-4 h-4 animate-spin" /> : <LocateFixed className="w-4 h-4" />} Find fra adressen</button>
+            {f.lat !== "" && f.lng !== "" && (
+              <a className={btnGhost} href={`https://www.google.com/maps/search/?api=1&query=${String(f.lat).replace(",", ".")},${String(f.lng).replace(",", ".")}`} target="_blank" rel="noreferrer"><ExternalLink className="w-4 h-4" /> Vis på kort</a>
+            )}
+          </div>
+        </div>
+        <p className="text-xs text-slate-500">
+          Bruges som startpunkt, når chaufføren trykker "Optimer rute": turene sorteres efter afstand fra lokationen, og der vises km pr. tur.
+          Lader du felterne stå tomme, finder systemet placeringen automatisk ud fra adressen, når du gemmer.
+          Skriv kun tal selv, hvis stedet ikke har en rigtig adresse (fx en byggeplads) - kopiér dem fra Google Maps (højreklik på stedet).
+        </p>
+        <div className="grid grid-cols-2 gap-3 max-w-md">
+          <div><span className={label}>Breddegrad</span>
+            <input className={input} inputMode="decimal" value={f.lat} onChange={e => { setGpsTouched(true); setF({ ...f, lat: e.target.value }); }} placeholder="Fx 55.4565" /></div>
+          <div><span className={label}>Længdegrad</span>
+            <input className={input} inputMode="decimal" value={f.lng} onChange={e => { setGpsTouched(true); setF({ ...f, lng: e.target.value }); }} placeholder="Fx 12.1820" /></div>
+        </div>
+        {gpsNote && <p className="text-[11px] text-emerald-700 dark:text-emerald-400">{gpsNote}</p>}
+        {addrChanged && !gpsTouched && initial?.id && f.lat !== "" && <p className="text-[11px] text-amber-700">Adressen er ændret - GPS findes igen automatisk, når du gemmer.</p>}
       </div>
       <div className="flex justify-end gap-2">
         <button className={btnGhost} onClick={onCancel}><X className="w-4 h-4" /> Annuller</button>

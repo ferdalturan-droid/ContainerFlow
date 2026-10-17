@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { createPortal } from "react-dom";
 import axios from "axios";
 import { toast } from "sonner";
 import {
   BarChart3, Tag, CheckCircle2, CalendarDays, Settings, Plus, X, Loader2, Search,
   Edit2, Copy, Trash2, AlertTriangle, Clock, Lock, Unlock, FileSpreadsheet, ChevronLeft,
-  ChevronRight, Truck, Info, Check, Ban,
+  ChevronRight, Truck, Info, Check, Ban, Users, Building2, PowerOff,
 } from "lucide-react";
 import { API, formatApiError } from "../auth/api";
 
@@ -42,6 +43,66 @@ const STATUS_META = {
   missing_rule: { text: "Mangler pris", cls: "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300" },
   missing_time: { text: "Mangler tid", cls: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300" },
 };
+
+/* 2026-10-17: Hjælpetekster (vises ved ⓘ). Brugerens egen forklaring på en
+   regel gemmes i `note` og vises sammen med standardteksten. */
+const HELP = {
+  base: "Grundpris: hver tur får præcis én grundpris. Passer flere regler, vinder den mest specifikke (kunde > lokation > leveringsadresse > opgavetype > materiale).",
+  surcharge: "Tillæg: lægges oveni grundprisen. Højst ét tillæg af hver type pr. tur - igen vinder det mest specifikke. Et kundespecifikt tillæg på 0 kr fritager altså den kunde.",
+  model: {
+    fixed: "Fast pris: samme beløb pr. tur, uanset hvor lang tid den tager.",
+    hourly: "Timepris: tiden fra chaufføren trykker \"På vej\" til turen afsluttes × timeprisen. Startgebyr, minimum og afrunding kan tilføjes, og pauser kan trækkes fra. Kører chaufføren flere ture samtidig, deles tiden mellem dem.",
+    per_container: "Pris pr. container: beløbet × antal containere på turen (fx ved løs afhentning, hvor chaufføren vejer flere containere).",
+  },
+  category: {
+    weekend: "Weekend: lægges på ture der køres lørdag eller søndag.",
+    holiday: "Helligdag: lægges på ture på helligdage - ud fra dansk kalender eller kundens egen kalender (se fanen Helligdage).",
+    haster: "Haster: lægges på ture med prioritet Haster.",
+    trailer: "Hænger: lægges på ture hvor chaufføren har kørt med hænger (chaufføren vælger Med/Uden hænger på turen).",
+    evening: "Aften/nat: lægges på ture der starter i et bestemt tidsrum, fx 18:00-06:00. Tidsrummet sættes under \"Flere betingelser\".",
+    waiting: "Ventetid: betaling for tid chaufføren venter på adressen, fx når containeren er blokeret eller kunden ikke er klar. Afregnes pr. påbegyndt kvarter ud fra de ventetidsminutter der er registreret på turen. Chaufføren beder om ventetid efter turen (godkendes under Godkendelser), eller du skriver den på turen i Rapport. Ture uden ventetid får intet tillæg. Typisk som kr pr. time.",
+    other: "Andet: alt det der ikke passer i de andre typer, fx miljøtillæg eller bro/færge. Brug betingelserne til at styre hvilke ture det gælder.",
+  },
+};
+const ruleHelp = (r) => r.kind === "base"
+  ? (HELP.model[(r.pricing || {}).model || "fixed"] || HELP.base)
+  : (HELP.category[r.category] || HELP.surcharge);
+
+/** ⓘ med forklaring. Klik/tryk åbner (virker også på telefon og iPad). */
+function InfoTip({ text, own, className = "" }) {
+  const [open, setOpen] = useState(false);
+  const [rect, setRect] = useState(null);
+  const btn = useRef(null);
+  const pop = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e) => { if (!btn.current?.contains(e.target) && !pop.current?.contains(e.target)) setOpen(false); };
+    const onScroll = () => setOpen(false);
+    document.addEventListener("mousedown", close);
+    document.addEventListener("touchstart", close);
+    window.addEventListener("scroll", onScroll, true);
+    return () => { document.removeEventListener("mousedown", close); document.removeEventListener("touchstart", close); window.removeEventListener("scroll", onScroll, true); };
+  }, [open]);
+  if (!text && !own) return null;
+  const width = Math.min(320, window.innerWidth - 24);
+  return (
+    <>
+      <button ref={btn} type="button" aria-label="Forklaring"
+        onClick={(e) => { e.stopPropagation(); setRect(btn.current.getBoundingClientRect()); setOpen(v => !v); }}
+        className={`inline-flex items-center justify-center w-6 h-6 rounded-full text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 ${own ? "text-emerald-600" : ""} ${className}`}>
+        <Info className="w-4 h-4" />
+      </button>
+      {open && rect && createPortal(
+        <div ref={pop} role="tooltip" className="fixed z-[1000] rounded-xl bg-slate-900 text-white text-xs leading-relaxed shadow-2xl p-3 space-y-2"
+          style={{ width, top: Math.min(rect.bottom + 6, window.innerHeight - 200), left: Math.max(12, Math.min(rect.left - width / 2 + 12, window.innerWidth - width - 12)) }}>
+          {text && <p>{text}</p>}
+          {own && <div className="border-t border-white/15 pt-2"><div className="font-bold text-emerald-300 mb-0.5">Jeres forklaring</div><p className="whitespace-pre-wrap">{own}</p></div>}
+        </div>,
+        document.body
+      )}
+    </>
+  );
+}
 
 function Segmented({ value, onChange, options }) {
   return (
@@ -108,8 +169,18 @@ function MultiPick({ title, items, value, onChange, allLabel = "Alle" }) {
 /* ======================================================================
    Hovedkomponent
    ====================================================================== */
-export default function EconomyPanel() {
+const fmtTs = (iso) => {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  const date = d.toLocaleDateString("da-DK", { day: "2-digit", month: "2-digit", year: "numeric" });
+  const time = d.toLocaleTimeString("da-DK", { hour: "2-digit", minute: "2-digit" });
+  return time === "00.00" || time === "00:00" ? date : `${date} kl. ${time}`;
+};
+
+export default function EconomyPanel({ canEdit = true }) {
   const [view, setView] = useState("report");
+  const [rulesFilter, setRulesFilter] = useState("all");
   const [options, setOptions] = useState(null);
   const [pendingCount, setPendingCount] = useState(0);
 
@@ -125,11 +196,12 @@ export default function EconomyPanel() {
 
   const VIEWS = [
     { id: "report", label: "Rapport", icon: BarChart3 },
+    { id: "customers", label: "Kunder & priser", icon: Users },
     { id: "rules", label: "Prisregler", icon: Tag },
-    { id: "approvals", label: "Godkendelser", icon: CheckCircle2, badge: pendingCount },
+    canEdit && { id: "approvals", label: "Godkendelser", icon: CheckCircle2, badge: pendingCount },
     { id: "holidays", label: "Helligdage", icon: CalendarDays },
-    { id: "settings", label: "Indstillinger", icon: Settings },
-  ];
+    canEdit && { id: "settings", label: "Indstillinger", icon: Settings },
+  ].filter(Boolean);
 
   return (
     <section className="space-y-4" data-testid="economy-panel">
@@ -156,7 +228,13 @@ export default function EconomyPanel() {
       ) : (
         <>
           {view === "report" && <ReportView options={options} onChanged={loadPending} goRules={() => setView("rules")} goApprovals={() => setView("approvals")} />}
-          {view === "rules" && <RulesView options={options} reloadOptions={loadOptions} />}
+          {!canEdit && (
+            <div className="flex gap-2 p-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 text-sm text-amber-900 dark:text-amber-100">
+              <Info className="w-4 h-4 mt-0.5 shrink-0" /> Du kan se priser, men ikke ændre dem. Spørg din administrator under Team &amp; rettigheder.
+            </div>
+          )}
+          {view === "customers" && <CustomersView options={options} reloadOptions={loadOptions} canEdit={canEdit} goRules={(f) => { setRulesFilter(f); setView("rules"); }} />}
+          {view === "rules" && <RulesView key={rulesFilter} initialFilter={rulesFilter} options={options} reloadOptions={loadOptions} canEdit={canEdit} />}
           {view === "approvals" && <ApprovalsView onChanged={loadPending} />}
           {view === "holidays" && <HolidaysView profile={options.profile} />}
           {view === "settings" && <SettingsView />}
@@ -664,9 +742,10 @@ function conditionChips(c, options) {
   return out;
 }
 
-function RulesView({ options, reloadOptions }) {
+function RulesView({ options, reloadOptions, canEdit = true, initialFilter = "all" }) {
   const [rules, setRules] = useState(null);
-  const [filter, setFilter] = useState("all");
+  const [history, setHistory] = useState({});
+  const [filter, setFilter] = useState(initialFilter);
   const [editing, setEditing] = useState(null);
   const [confirmDel, setConfirmDel] = useState(null);
 
@@ -683,8 +762,19 @@ function RulesView({ options, reloadOptions }) {
       load(); reloadOptions();
     } catch (e) { toast.error(formatApiError(e)); }
   };
-  const remove = async (id) => {
-    try { await axios.delete(`${API}/pricing/rules/${id}`); toast.success("Regel slettet"); setConfirmDel(null); load(); }
+  // 2026-10-17: Standard er at reglen ophører fra nu - eksisterende ture
+  // beholder deres pris. "Slet helt" fjerner den også bagudrettet.
+  const remove = async (id, effective = "now") => {
+    try {
+      await axios.delete(`${API}/pricing/rules/${id}`, { params: { effective } });
+      toast.success(effective === "all" ? "Regel slettet helt" : "Reglen gælder ikke for nye ture");
+      setConfirmDel(null); load();
+    }
+    catch (e) { toast.error(formatApiError(e)); }
+  };
+  const toggleHistory = async (r) => {
+    if (history[r.id]) { setHistory(h => ({ ...h, [r.id]: null })); return; }
+    try { const { data } = await axios.get(`${API}/pricing/rules/${r.id}/history`); setHistory(h => ({ ...h, [r.id]: data })); }
     catch (e) { toast.error(formatApiError(e)); }
   };
   const toggleActive = async (r) => {
@@ -711,43 +801,75 @@ function RulesView({ options, reloadOptions }) {
       <div className="flex-1 min-w-0">
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-bold">{r.name}</span>
+          <InfoTip text={ruleHelp(r)} own={r.note} />
           {!r.active && <span className="px-2 py-0.5 rounded-full text-[11px] bg-slate-200 dark:bg-slate-700">Inaktiv</span>}
-          {(r.valid_from || r.valid_to) && <span className="px-2 py-0.5 rounded-full text-[11px] bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-200">{r.valid_from || "…"} → {r.valid_to || "…"}</span>}
+          {(r.valid_from || r.valid_to) && <span className="px-2 py-0.5 rounded-full text-[11px] bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-200" title="Kørselsdato">Kørt {r.valid_from || "…"} → {r.valid_to || "…"}</span>}
+          {r.version_from && new Date(r.version_from) > new Date() && <span className="px-2 py-0.5 rounded-full text-[11px] bg-violet-100 text-violet-800 dark:bg-violet-900/40 dark:text-violet-200">Træder i kraft {fmtTs(r.version_from)}</span>}
+          {r.version_to && <span className="px-2 py-0.5 rounded-full text-[11px] bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">Ophører {fmtTs(r.version_to)}</span>}
         </div>
+        {(r.version_from || r.versions > 1) && (
+          <div className="text-[11px] text-slate-500 mt-0.5">
+            {r.version_from ? `Gælder for ture oprettet fra ${fmtTs(r.version_from)}` : "Gælder for alle ture"}
+            {r.versions > 1 && <> · <button className="underline" onClick={() => toggleHistory(r)}>{history[r.id] ? "Skjul" : "Vis"} {r.versions - 1} tidligere version{r.versions - 1 === 1 ? "" : "er"}</button></>}
+          </div>
+        )}
+        {history[r.id] && (
+          <ul className="mt-2 space-y-1 border-l-2 border-slate-200 dark:border-slate-700 pl-3">
+            {history[r.id].filter(v => v.id !== r.id).map(v => (
+              <li key={v.id} className="text-xs text-slate-600 dark:text-slate-300">
+                <span className="font-semibold">{ruleSummary(v, options)}</span>
+                <span className="text-slate-400"> · ture oprettet {v.version_from ? `fra ${fmtTs(v.version_from)}` : "før"} {v.version_to ? `til ${fmtTs(v.version_to)}` : ""}{v.updated_by ? ` · ${v.updated_by}` : ""}</span>
+              </li>
+            ))}
+          </ul>
+        )}
         <div className="text-sm text-emerald-700 dark:text-emerald-300 font-semibold mt-0.5">{ruleSummary(r, options)}</div>
         <div className="flex flex-wrap gap-1 mt-2">
           {conditionChips(r.conditions || {}, options).map((c, i) => <span key={i} className="px-2 py-0.5 rounded-full text-[11px] bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200">{c}</span>)}
           {conditionChips(r.conditions || {}, options).length === 0 && <span className="px-2 py-0.5 rounded-full text-[11px] bg-slate-100 dark:bg-slate-700 text-slate-500">Gælder alle ture</span>}
         </div>
       </div>
-      <div className="flex items-center gap-1 shrink-0">
+      {canEdit && <div className="flex items-center gap-1 shrink-0">
         <button title={r.active ? "Deaktivér" : "Aktivér"} onClick={() => toggleActive(r)} className={`w-10 h-6 rounded-full relative transition-colors ${r.active ? "bg-emerald-500" : "bg-slate-300 dark:bg-slate-600"}`}>
           <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all ${r.active ? "left-[18px]" : "left-0.5"}`} />
         </button>
         <button title="Rediger" className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700" onClick={() => setEditing(r)}><Edit2 className="w-4 h-4" /></button>
         <button title="Kopiér" className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700" onClick={() => setEditing({ ...r, id: undefined, name: `${r.name} (kopi)` })}><Copy className="w-4 h-4" /></button>
         {confirmDel === r.id ? (
-          <>
-            <button className="px-2 py-1 rounded-lg bg-red-600 text-white text-xs font-bold" onClick={() => remove(r.id)}>Slet</button>
-            <button className="px-2 py-1 rounded-lg text-xs" onClick={() => setConfirmDel(null)}>Nej</button>
-          </>
+          <div className="flex flex-col sm:flex-row gap-1">
+            <button className="px-2 py-1 rounded-lg bg-amber-600 text-white text-xs font-bold" title="Eksisterende ture beholder prisen" onClick={() => remove(r.id, "now")}>Stop fra nu</button>
+            <button className="px-2 py-1 rounded-lg bg-red-600 text-white text-xs font-bold" title="Fjernes også fra eksisterende ture der ikke er faktureret" onClick={() => remove(r.id, "all")}>Slet helt</button>
+            <button className="px-2 py-1 rounded-lg text-xs" onClick={() => setConfirmDel(null)}>Annuller</button>
+          </div>
         ) : <button title="Slet" className="p-2 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/30 text-red-600" onClick={() => setConfirmDel(r.id)}><Trash2 className="w-4 h-4" /></button>}
-      </div>
+      </div>}
     </div>
   );
 
   return (
     <div className="space-y-4">
       <div className={`${card} p-4 flex flex-wrap items-center justify-between gap-3`}>
-        <div className="flex flex-wrap gap-1.5">
-          <button className={`${chipBase} ${filter === "all" ? chipOn : chipOff}`} onClick={() => setFilter("all")}>Alle regler</button>
-          <button className={`${chipBase} ${filter === "general" ? chipOn : chipOff}`} onClick={() => setFilter("general")}>Generelle</button>
-          {options.customers.some(c => c.own) && <button className={`${chipBase} ${filter === "own" ? chipOn : chipOff}`} onClick={() => setFilter("own")}>Egne kunder</button>}
-          {options.customers.filter(c => !c.own).map(c => <button key={c.id} className={`${chipBase} ${filter === c.id ? chipOn : chipOff}`} onClick={() => setFilter(c.id)}>{c.name}</button>)}
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm font-semibold text-slate-600 dark:text-slate-300">Vis regler for</span>
+          <select className={`${input} w-auto min-w-[220px]`} value={filter} onChange={e => setFilter(e.target.value)} data-testid="rules-filter">
+            <option value="all">Alle regler</option>
+            <option value="general">Generelle (gælder alle kunder)</option>
+            {options.customers.some(c => c.own) && <option value="own">Alle egne kunder</option>}
+            {options.customers.some(c => !c.own) && (
+              <optgroup label="Genbrugsplads-kunder">
+                {options.customers.filter(c => !c.own).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </optgroup>
+            )}
+            {options.customers.some(c => c.own) && (
+              <optgroup label="Egne kunder">
+                {options.customers.filter(c => c.own).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </optgroup>
+            )}
+          </select>
         </div>
-        <button className={btnPrimary} onClick={() => setEditing({ kind: "base", name: "", conditions: { ...EMPTY_COND, customer_ids: !["all", "general", "own"].includes(filter) ? [filter] : [] }, pricing: { model: "fixed", amount: "" }, active: true })}>
+        {canEdit && <button className={btnPrimary} onClick={() => setEditing({ kind: "base", name: "", conditions: { ...EMPTY_COND, customer_ids: !["all", "general", "own"].includes(filter) ? [filter] : [] }, pricing: { model: "fixed", amount: "" }, active: true })}>
           <Plus className="w-4 h-4" /> Ny regel
-        </button>
+        </button>}
       </div>
 
       <div className="flex gap-2 p-3 rounded-xl bg-sky-50 dark:bg-sky-950/30 border border-sky-200 dark:border-sky-900 text-sm text-sky-900 dark:text-sky-100">
@@ -775,12 +897,180 @@ function RulesView({ options, reloadOptions }) {
         {sur.length === 0 && <div className={`${card} p-6 text-sm text-slate-500 text-center`}>Ingen tillæg endnu (fx weekend, helligdag, haster, hænger, aften eller ventetid).</div>}
         {sur.map(r => <RuleCard key={r.id} r={r} />)}
       </div>
-      {editing && <RuleEditor rule={editing} options={options} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); }} />}
+      {editing && <RuleEditor rule={editing} options={options} firstRule={rules.length === 0} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); }} />}
     </div>
   );
 }
 
-function RuleEditor({ rule, options, onClose, onSaved }) {
+/* ======================================================================
+   Kunder & priser (2026-10-17): ét sted at se alle kunder - genbrugsplads-
+   kunder og logistikfirmaets egne kunder - og hvilke priser de har.
+   ====================================================================== */
+const EMPTY_CUST = { name: "", cvr: "", address: "", contact: "", phone: "", email: "", note: "" };
+
+function CustomerForm({ initial, onCancel, onSaved }) {
+  const [f, setF] = useState({ ...EMPTY_CUST, ...(initial || {}) });
+  const [busy, setBusy] = useState(false);
+  const save = async () => {
+    if (!f.name.trim()) { toast.error("Skriv kundens navn"); return; }
+    setBusy(true);
+    try {
+      if (initial?.id) await axios.put(`${API}/logistics/customers/${initial.id}`, f);
+      else await axios.post(`${API}/logistics/customers`, f);
+      toast.success(initial?.id ? "Kunden er opdateret" : "Kunden er oprettet");
+      onSaved();
+    } catch (e) { toast.error(formatApiError(e)); }
+    setBusy(false);
+  };
+  const fld = (k, l, ph, extra = {}) => (
+    <div><span className={label}>{l}</span><input className={input} value={f[k] || ""} placeholder={ph} onChange={e => setF({ ...f, [k]: e.target.value })} {...extra} /></div>
+  );
+  return (
+    <div className="p-4 rounded-xl border border-emerald-200 dark:border-emerald-900 bg-emerald-50/50 dark:bg-emerald-950/20 space-y-3" data-testid="customer-form">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        {fld("name", "Navn", "Fx Carlsberg Byen A/S", { autoFocus: true })}
+        {fld("cvr", "CVR (valgfri)", "12345678", { inputMode: "numeric" })}
+        {fld("address", "Adresse (valgfri)", "Vej, postnr. by")}
+        {fld("contact", "Kontaktperson", "Valgfri")}
+        {fld("phone", "Telefon", "Valgfri", { inputMode: "tel" })}
+        {fld("email", "E-mail", "Valgfri", { type: "email" })}
+      </div>
+      <div><span className={label}>Note (valgfri)</span><input className={input} value={f.note || ""} onChange={e => setF({ ...f, note: e.target.value })} placeholder="Fx faktureres månedligt" /></div>
+      {initial?.id && f.name.trim() !== initial.name && <p className="text-xs text-amber-700">Navnet ændres også på kundens ture og prisregler.</p>}
+      <div className="flex justify-end gap-2">
+        <button className={btnGhost} onClick={onCancel}>Annuller</button>
+        <button className={btnPrimary} disabled={busy} onClick={save}>{busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />} Gem</button>
+      </div>
+    </div>
+  );
+}
+
+function CustomersView({ options, reloadOptions, canEdit, goRules }) {
+  const [rules, setRules] = useState(null);
+  const [registered, setRegistered] = useState([]);
+  const [adding, setAdding] = useState(false);
+  const [editingCust, setEditingCust] = useState(null);
+  const [newRuleFor, setNewRuleFor] = useState(null);
+
+  const load = useCallback(async () => {
+    try {
+      const [r, c] = await Promise.all([axios.get(`${API}/pricing/rules`), axios.get(`${API}/logistics/customers`)]);
+      setRules(r.data); setRegistered(c.data || []);
+    } catch (e) { toast.error(formatApiError(e)); setRules([]); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  const reloadAll = () => { load(); reloadOptions(); };
+
+  if (!rules) return <div className={`${card} p-10 flex justify-center`}><Loader2 className="w-6 h-6 animate-spin text-slate-400" /></div>;
+
+  const countFor = (id) => rules.filter(r => (r.conditions?.customer_ids || []).includes(id));
+  const general = rules.filter(r => !(r.conditions?.customer_ids || []).length);
+  const regById = Object.fromEntries(registered.map(c => [c.id, c]));
+  const recycling = options.customers.filter(c => !c.own);
+  const own = options.customers.filter(c => c.own && c.id.startsWith("firma:"));
+  const noCustomer = options.customers.find(c => c.own && !c.id.startsWith("firma:"));
+
+  const Row = ({ c, kind }) => {
+    const list = countFor(c.id);
+    const base = list.filter(r => r.kind === "base").length;
+    const sur = list.length - base;
+    const reg = c.registered_id ? regById[c.registered_id] : null;
+    return (
+      <li className={`px-4 py-3 ${c.inactive ? "opacity-60" : ""}`} data-testid={`customer-row-${c.name}`}>
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="font-semibold text-slate-900 dark:text-white">{c.name}</span>
+              {kind === "own" && !reg && <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-700 text-slate-500" title="Fundet på egne ture - ikke oprettet i kunderegistret">Fra ture</span>}
+              {c.inactive && <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-500">Skjult</span>}
+            </div>
+            <div className="text-xs mt-0.5">
+              {list.length === 0
+                ? <span className="text-slate-500">Følger de generelle priser ({general.length} regler)</span>
+                : <span className="text-emerald-700 dark:text-emerald-300 font-semibold">Egen prisaftale: {base} grundpris{base === 1 ? "" : "er"}{sur ? `, ${sur} tillæg` : ""} - resten følger de generelle</span>}
+              {reg && (reg.cvr || reg.contact || reg.phone) && <span className="text-slate-400"> · {[reg.cvr && `CVR ${reg.cvr}`, reg.contact, reg.phone].filter(Boolean).join(" · ")}</span>}
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2 shrink-0">
+            {list.length > 0 && <button className={btnGhost} onClick={() => goRules(c.id)}><Tag className="w-4 h-4" /> Se priser</button>}
+            {canEdit && <button className={btnPrimary} onClick={() => setNewRuleFor(c)} data-testid={`customer-price-${c.name}`}><Plus className="w-4 h-4" /> {list.length ? "Tilføj pris" : "Sæt egen pris"}</button>}
+            {reg && <button className={btnGhost} onClick={() => setEditingCust(reg)} title="Ret kundeoplysninger"><Edit2 className="w-4 h-4" /></button>}
+            {reg && reg.active !== false && (
+              <button className={btnGhost} title="Skjul kunden (ture og priser bevares)" onClick={async () => {
+                if (!window.confirm(`Skjul ${reg.name}? Ture og priser bevares.`)) return;
+                try { await axios.delete(`${API}/logistics/customers/${reg.id}`); reloadAll(); } catch (e) { toast.error(formatApiError(e)); }
+              }}><PowerOff className="w-4 h-4" /></button>
+            )}
+          </div>
+        </div>
+        {editingCust && reg && editingCust.id === reg.id && (
+          <div className="mt-3"><CustomerForm initial={reg} onCancel={() => setEditingCust(null)} onSaved={() => { setEditingCust(null); reloadAll(); }} /></div>
+        )}
+      </li>
+    );
+  };
+
+  return (
+    <div className="space-y-4" data-testid="customers-view">
+      <div className="flex gap-2 p-3 rounded-xl bg-sky-50 dark:bg-sky-950/30 border border-sky-200 dark:border-sky-900 text-sm text-sky-900 dark:text-sky-100">
+        <Info className="w-4 h-4 mt-0.5 shrink-0" />
+        <div>
+          <b>Sådan sætter du priser pr. kunde:</b> De <b>generelle regler</b> gælder alle kunder. Tryk <b>"Sæt egen pris"</b> ud for en kunde for at lave en regel, der kun gælder den kunde -
+          den vinder altid over den generelle. Du kan lave én enkelt afvigelse (fx kun timeprisen) eller en hel prismodel for kunden (grundpris + tillæg).
+          Alle betingelser (lokation, materiale, opgavetype, dag, tid, hænger …) kan kombineres med kunden.
+        </div>
+      </div>
+
+      <section className={`${card} overflow-hidden`}>
+        <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-700 flex items-center justify-between gap-2">
+          <h3 className="font-bold flex items-center gap-2"><Tag className="w-4 h-4 text-slate-400" /> Generelle priser</h3>
+          <button className={btnGhost} onClick={() => goRules("general")}>Se {general.length} regler</button>
+        </div>
+        <p className="px-4 py-3 text-sm text-slate-500">Gælder alle kunder, der ikke har en egen regel for den samme slags tur.</p>
+      </section>
+
+      {recycling.length > 0 && (
+        <section className={`${card} overflow-hidden`}>
+          <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-700">
+            <h3 className="font-bold flex items-center gap-2"><Building2 className="w-4 h-4 text-slate-400" /> Genbrugsplads-kunder</h3>
+            <p className="text-xs text-slate-500">Kunder der har købt systemet og bruger jer som logistikpartner. Ture kommer fra deres bestillinger.</p>
+          </div>
+          <ul className="divide-y divide-slate-100 dark:divide-slate-700">{recycling.map(c => <Row key={c.id} c={c} kind="recycling" />)}</ul>
+        </section>
+      )}
+
+      <section className={`${card} overflow-hidden`}>
+        <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-700 flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 className="font-bold flex items-center gap-2"><Users className="w-4 h-4 text-slate-400" /> Egne kunder</h3>
+            <p className="text-xs text-slate-500">Jeres egne slutkunder på egne ture (fx byggefirmaer). Opret dem her, så kan de vælges under "Ny tur" og få egne priser - også før den første tur.</p>
+          </div>
+          {canEdit && !adding && <button className={btnPrimary} onClick={() => setAdding(true)} data-testid="customer-add"><Plus className="w-4 h-4" /> Ny kunde</button>}
+        </div>
+        {adding && <div className="p-4 border-b border-slate-100 dark:border-slate-700"><CustomerForm onCancel={() => setAdding(false)} onSaved={() => { setAdding(false); reloadAll(); }} /></div>}
+        {own.length === 0 && !adding && <p className="px-4 py-6 text-sm text-slate-500 text-center">Ingen egne kunder endnu.</p>}
+        <ul className="divide-y divide-slate-100 dark:divide-slate-700">
+          {own.map(c => <Row key={c.id} c={c} kind="own" />)}
+          {noCustomer && <Row c={{ ...noCustomer, name: "Egne ture uden kunde" }} kind="none" />}
+        </ul>
+      </section>
+
+      {newRuleFor && (
+        <RuleEditor
+          rule={{ kind: "base", name: `${newRuleFor.name} - pris`, conditions: { ...EMPTY_COND, customer_ids: [newRuleFor.id] }, pricing: { model: "fixed", amount: "" }, active: true }}
+          options={options} firstRule={rules.length === 0}
+          onClose={() => setNewRuleFor(null)} onSaved={() => { setNewRuleFor(null); load(); }} />
+      )}
+    </div>
+  );
+}
+
+function RuleEditor({ rule, options, onClose, onSaved, firstRule = false }) {
+  // 2026-10-17: Hvornår ændringen gælder. "now" = kun ture oprettet fra nu
+  // (eksisterende ture beholder prisen), "all" = også eksisterende ture der
+  // ikke er faktureret, eller en dato.
+  const [effective, setEffective] = useState(firstRule ? "all" : "now");
+  const [effDate, setEffDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [r, setR] = useState(() => ({
     kind: rule.kind || "base", name: rule.name || "", category: rule.category || "weekend",
     conditions: { ...EMPTY_COND, ...(rule.conditions || {}) },
@@ -803,7 +1093,7 @@ function RuleEditor({ rule, options, onClose, onSaved }) {
   const save = async () => {
     setSaving(true);
     try {
-      const body = { ...r };
+      const body = { ...r, effective: effective === "date" ? effDate : effective };
       if (rule.id) await axios.put(`${API}/pricing/rules/${rule.id}`, body);
       else await axios.post(`${API}/pricing/rules`, body);
       toast.success("Regel gemt");
@@ -828,12 +1118,16 @@ function RuleEditor({ rule, options, onClose, onSaved }) {
         <div className="p-5 space-y-5">
           <div className="space-y-3">
             <Segmented value={r.kind} onChange={v => setR({ ...r, kind: v })} options={[{ value: "base", label: "Grundpris" }, { value: "surcharge", label: "Tillæg" }]} />
+            <p className="text-xs text-slate-500">{r.kind === "base" ? HELP.base : HELP.surcharge}</p>
             {r.kind === "surcharge" && (
-              <div className="flex flex-wrap gap-1.5">
-                {Object.entries(options.categories).map(([k, v]) => (
-                  <button key={k} type="button" className={`${chipBase} ${r.category === k ? chipOn : chipOff}`} onClick={() => setR({ ...r, category: k })}>{v}</button>
-                ))}
-              </div>
+              <>
+                <div className="flex flex-wrap gap-1.5">
+                  {Object.entries(options.categories).map(([k, v]) => (
+                    <button key={k} type="button" className={`${chipBase} ${r.category === k ? chipOn : chipOff}`} onClick={() => setR({ ...r, category: k })}>{v}</button>
+                  ))}
+                </div>
+                {HELP.category[r.category] && <p className="text-xs text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-slate-900 rounded-lg px-3 py-2">{HELP.category[r.category]}</p>}
+              </>
             )}
             <div><span className={label}>Navn</span><input className={input} value={r.name} onChange={e => setR({ ...r, name: e.target.value })} placeholder={r.kind === "base" ? "Fx ARGO Roskilde - afhentning" : "Fx Weekendtillæg"} /></div>
           </div>
@@ -864,8 +1158,8 @@ function RuleEditor({ rule, options, onClose, onSaved }) {
                   <span className="text-[11px] text-slate-500">Fx 18:00–06:00 for aften/nat</span></div>
                 <div><span className={label}>Udfald</span>
                   <Segmented value={c.outcome} onChange={v => setC("outcome", v)} options={[{ value: "completed", label: "Gennemført" }, { value: "not_completed", label: "Forgæves" }, { value: "any", label: "Begge" }]} /></div>
-                <div><span className={label}>Gyldig fra</span><input type="date" className={input} value={r.valid_from} onChange={e => setR({ ...r, valid_from: e.target.value })} /></div>
-                <div><span className={label}>Gyldig til</span><input type="date" className={input} value={r.valid_to} onChange={e => setR({ ...r, valid_to: e.target.value })} /></div>
+                <div><span className={label}>Kørselsdato fra</span><input type="date" className={input} value={r.valid_from} onChange={e => setR({ ...r, valid_from: e.target.value })} /></div>
+                <div><span className={label}>Kørselsdato til</span><input type="date" className={input} value={r.valid_to} onChange={e => setR({ ...r, valid_to: e.target.value })} /></div>
               </div>
             )}
           </div>
@@ -875,6 +1169,7 @@ function RuleEditor({ rule, options, onClose, onSaved }) {
             {r.kind === "base" ? (
               <>
                 <Segmented value={r.pricing.model} onChange={v => setP("model", v)} options={Object.entries(options.models).map(([k, v]) => ({ value: k, label: v }))} />
+                {HELP.model[r.pricing.model] && <p className="text-xs text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-slate-900 rounded-lg px-3 py-2">{HELP.model[r.pricing.model]}</p>}
                 {r.pricing.model !== "hourly" ? (
                   <div className="max-w-xs"><span className={label}>{r.pricing.model === "per_container" ? "Pris pr. container (kr)" : "Pris pr. tur (kr)"}</span>
                     <input type="number" min="0" className={input} value={r.pricing.amount} onChange={e => setP("amount", e.target.value)} /></div>
@@ -913,11 +1208,32 @@ function RuleEditor({ rule, options, onClose, onSaved }) {
             )}
           </div>
 
+          <div>
+            <span className={label}>Jeres forklaring (valgfri - vises ved ⓘ på reglen)</span>
+            <textarea rows={2} maxLength={1000} className={input} value={r.note} onChange={e => setR({ ...r, note: e.target.value })}
+              placeholder="Fx: Aftalt med ARGO i rammeaftale 2026. Gælder kun containere over 20 m³." data-testid="rule-note" />
+          </div>
           <div className="flex items-center gap-2 text-sm">
             <input type="checkbox" className="accent-emerald-600 w-4 h-4" checked={r.active} onChange={e => setR({ ...r, active: e.target.checked })} id="rule-active" />
             <label htmlFor="rule-active">Aktiv</label>
           </div>
           <div className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900 text-sm"><b>Opsummering:</b> {preview}</div>
+          <div className="space-y-2" data-testid="rule-effective">
+            <h4 className="text-sm font-bold">Hvornår gælder {rule.id ? "ændringen" : "reglen"}?</h4>
+            <Segmented value={effective} onChange={setEffective} options={[
+              { value: "now", label: "Nye ture fra nu" },
+              { value: "date", label: "Fra en dato" },
+              { value: "all", label: "Også eksisterende ture" },
+            ]} />
+            {effective === "date" && (
+              <div className="max-w-xs"><span className={label}>Ture oprettet fra</span><input type="date" className={input} value={effDate} onChange={e => setEffDate(e.target.value)} /></div>
+            )}
+            <p className="text-xs text-slate-500">
+              {effective === "now" && "Ture og bestillinger der allerede er oprettet beholder deres pris i rapporter og PDF. Den gamle pris gemmes som en tidligere version."}
+              {effective === "date" && "Gælder for ture oprettet fra den valgte dato. Ture fra før beholder den gamle pris."}
+              {effective === "all" && "Ændrer også prisen på eksisterende ture der ikke er markeret som faktureret. Fakturerede ture ændres aldrig."}
+            </p>
+          </div>
         </div>
         <div className="sticky bottom-0 bg-white dark:bg-slate-800 border-t border-slate-200 dark:border-slate-700 px-5 py-3 flex justify-end gap-2">
           <button className={btnGhost} onClick={onClose}>Annuller</button>

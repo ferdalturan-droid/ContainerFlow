@@ -25,7 +25,8 @@ import CustomerAdminPage from "@/pages/CustomerAdminPage";
 import LocationAdminPage from "@/pages/LocationAdminPage";
 import ToursWorkspace from "@/pages/ToursWorkspace";
 import AdminTabNav from "@/components/AdminTabNav";
-import DriverTourCard, { DriverChatSheet } from "@/components/DriverTourCard";
+import TeamPanel from "@/pages/TeamPanel";
+import DriverTourCard, { DriverChatSheet, CallPlannerButton } from "@/components/DriverTourCard";
 import EconomyPanel from "@/pages/EconomyPanel";
 import LogisticsLocations from "@/pages/LogisticsLocations";
 import { buildDayReportPdf, dayReportFileName } from "@/lib/dayReportPdf";
@@ -6724,7 +6725,21 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
   const [newPladsLng, setNewPladsLng] = useState("");
   const [editingPlads, setEditingPlads] = useState(null);
   const [reportHistory, setReportHistory] = useState([]);
-  const [activeTab, setActiveTab] = useState("tours"); // tours (default), schedule, drivers, statistics (Rapportering), priser | Mere: plads, archives, settings
+  const [activeTab, setActiveTab] = useState("tours"); // tours (default), schedule, drivers, statistics (Rapportering), priser | Mere: plads, archives, team, settings
+  // 2026-10-17: Koordinator-rettigheder. Administratorer (og ældre sessioner
+  // uden felt) har alt; backend håndhæver det samme.
+  const can = useMemo(() => {
+    const p = authUser?.permissions;
+    const all = ["tours_edit", "tours_assign", "tours_delete", "messages", "planning", "drivers", "reports",
+      "economy_view", "economy_edit", "locations", "archive", "settings", "team"];
+    if (!p || !Object.keys(p).length) return Object.fromEntries(all.map(k => [k, true]));
+    return Object.fromEntries(all.map(k => [k, !!p[k]]));
+  }, [authUser]);
+  useEffect(() => {
+    const need = { schedule: "planning", drivers: "drivers", statistics: "reports", priser: "economy_view",
+      plads: "locations", archives: "archive", settings: "settings", team: "team" }[activeTab];
+    if (need && !can[need]) setActiveTab("tours");
+  }, [activeTab, can]);
   const [archivesSubTab, setArchivesSubTab] = useState("pdf"); // pdf | receipts | tours - within "Arkiv" tab
   const [receiptsArchiveView, setReceiptsArchiveView] = useState("table"); // table | drivers - Fase 17 merged archive view mode
   
@@ -7822,18 +7837,19 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
           title={activeCompany ? activeCompany.name : "Logistik-administration"}
           tabs={[
             { id: "tours",      label: "Ture",          icon: Truck,      testid: "admin-tab-tours" },
-            { id: "schedule",   label: "Planlægning",   icon: Calendar },
-            { id: "drivers",    label: "Chauffører",    icon: Users },
-            { id: "statistics", label: "Rapportering",  icon: BarChart3,  testid: "admin-statistics-tab" },
-            { id: "priser",     label: "Økonomi",       icon: DollarSign },
-          ]}
+            can.planning     && { id: "schedule",   label: "Planlægning",   icon: Calendar },
+            can.drivers      && { id: "drivers",    label: "Chauffører",    icon: Users },
+            can.reports      && { id: "statistics", label: "Rapportering",  icon: BarChart3,  testid: "admin-statistics-tab" },
+            can.economy_view && { id: "priser",     label: "Økonomi",       icon: DollarSign },
+          ].filter(Boolean)}
           moreTabs={[
-            isPremiumLogistics
+            can.locations && (isPremiumLogistics
               ? { id: "plads",  label: "Lokationer",    icon: MapPin }
-              : { id: "plads",  label: "Genbrugspladser", icon: Building2 },
-            { id: "archives",   label: "Arkiv",         icon: Archive,    testid: "admin-archives-tab", hint: "PDF og kvitteringer" },
-            { id: "settings",   label: "Indstillinger", icon: Settings,   testid: "admin-settings-tab" },
-          ]}
+              : { id: "plads",  label: "Genbrugspladser", icon: Building2 }),
+            can.archive  && { id: "archives",   label: "Arkiv",         icon: Archive,    testid: "admin-archives-tab", hint: "PDF og kvitteringer" },
+            can.team     && { id: "team",       label: "Team & rettigheder", icon: Shield, testid: "admin-tab-team" },
+            can.settings && { id: "settings",   label: "Indstillinger", icon: Settings,   testid: "admin-settings-tab" },
+          ].filter(Boolean)}
         />
       </header>
 
@@ -9151,7 +9167,7 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
           <ToursWorkspace
             drivers={drivers}
             pladsList={pladsList}
-            profile={logisticsProfile}
+            perms={can}
             siteWord={isPremiumLogistics ? "Lokation" : "Genbrugsplads"}
           />
         )}
@@ -10666,12 +10682,14 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
         )}
 
         {activeTab === "priser" && (
-          <EconomyPanel />
+          <EconomyPanel canEdit={can.economy_edit} />
         )}
 
-        {activeTab === "settings" && (
+        {activeTab === "settings" && can.settings && (
           <AdminSettingsPanel onSettingsChanged={(s) => setPayrollSettings(s)} />
         )}
+
+        {activeTab === "team" && can.team && <TeamPanel />}
       </main>
 
       {adminAddressesFor && (
@@ -13599,13 +13617,14 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
         </div>
 
         {onChat && (
-          <div className="px-4 pt-3">
+          <div className="px-4 pt-3 grid grid-cols-1 min-[380px]:grid-cols-2 gap-2">
+            <CallPlannerButton tourId={tour.id} />
             <button
               onClick={onChat}
               className="w-full min-h-[44px] rounded-xl border border-emerald-200 bg-emerald-50 text-emerald-800 font-semibold text-sm inline-flex items-center justify-center gap-2"
               data-testid="mobile-tour-panel-chat"
             >
-              <MessageSquare className="w-4 h-4" /> Besked til planlæggeren om denne tur
+              <MessageSquare className="w-4 h-4" /> Skriv til planlæggeren
             </button>
           </div>
         )}

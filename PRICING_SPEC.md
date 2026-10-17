@@ -89,9 +89,45 @@ planlagt dato).
 * **Faktureret:** markerer man ture som faktureret, fryses prisen (snapshot), så
   senere regelændringer ikke ændrer allerede fakturerede beløb.
 
+## 3b. Prisændringer følger ikke gamle ture (2026-10-17)
+
+En prisregel har **versioner**. Når en regel rettes, vælger man hvornår ændringen gælder:
+
+| Valg | Effekt |
+|---|---|
+| **Nye ture fra nu** (standard) | Den gamle version lukkes nu (`version_to`), og en ny version starter (`version_from`). Ture der allerede er oprettet eller bestilt beholder den gamle pris i rapporter, PDF og fakturagrundlag |
+| **Fra en dato** | Det samme, men skiftet sker ved midnat (dansk tid) den valgte dato |
+| **Også eksisterende ture** | Versionen rettes direkte, bagudrettet. Fakturerede ture er stadig frosne |
+
+- Hvilken version en tur bruger, afgøres af turens `created_at` (hvornår den blev oprettet eller bestilt). Kørselsdatoen afgør det ikke.
+- At slette en regel betyder som standard **"Stop fra nu"**. "Slet helt" fjerner den også bagudrettet.
+- At slå en regel til eller fra laver også en ny version fra nu.
+- Første regel nogensinde gælder som standard alle ture (opstart).
+- Kode:
+  - `_rule_active_at`, `_PricingContext.rules_for`, `PUT /pricing/rules/{id}` (`effective`) og `GET /pricing/rules/{id}/history` (alle i `backend/server.py`).
+  - `valid_from`/`valid_to` er noget andet: reglens kørselsdato-periode ("Kørselsdato fra/til" i editoren).
+
+**Aftalt pris ved oprettelse:** I "Ny tur" kan man skrive en fast pris pr. tur. Den gemmes som `price_override` (fast) med historik, så den aldrig påvirkes af senere regelændringer. Kræver rettigheden "Ændre priser".
+
+## 3c. Kunder & priser (2026-10-17)
+
+Fanen **Kunder & priser** viser alle kunder ét sted:
+- **Genbrugsplads-kunder.** Kunder der har købt systemet og bruger firmaet som logistikpartner (B2B).
+- **Egne kunder.** Firmaets egne slutkunder på egne ture.
+  - De oprettes i kunderegistret (`logistics_customers`: navn, CVR, adresse, kontakt, telefon, e-mail, note), også før der findes ture.
+  - Navne der står på egne ture, men ikke er oprettet, vises som "Fra ture".
+  - Nøglen for priser er `firma:<navn>`, den samme som egne ture altid har brugt. Omdøbes en kunde, følger prisregler og ture med.
+- **Egne ture uden kunde.**
+
+Ud for hver kunde står, om den følger de generelle priser eller har en egen prisaftale, og knappen **"Sæt egen pris"** åbner regel-editoren med kunden valgt. En kunderegel vinder altid over en generel (kunde er den mest specifikke betingelse). Man kan derfor lave én afvigelse eller en hel prismodel pr. kunde og kombinere med alle andre betingelser.
+
+**Hjælpetekster:** ⓘ ved hver regel forklarer prismodellen eller tillægstypen på dansk. Feltet "Jeres forklaring" (`note`, op til 1000 tegn) vises også ved ⓘ.
+
+**Ventetid** (tillæg): betaling for tid chaufføren venter på adressen. Den afregnes pr. påbegyndt kvarter ud fra `waiting_min` på turen, som kommer fra chaufførens anmodning (godkendes under Godkendelser) eller fra admin i Rapport. Uden ventetid gives intet tillæg.
+
 ## 4. Sider (logistik admin → "Økonomi")
 
-Rapport · Prisregler · Godkendelser · Helligdage · Indstillinger
+Rapport · Kunder & priser · Prisregler · Godkendelser · Helligdage · Indstillinger
 
 ## 5. Bevidst udeladt (for nu)
 * Pris pr. ton (deponi-/modtagegebyrer er modtagerens, ikke transportørens).

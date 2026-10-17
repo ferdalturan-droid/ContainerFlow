@@ -19,6 +19,18 @@ Data must be strictly isolated per company.
   and `/api/health` bypass tenant filtering so the QR-code customer flow continues to work.
 
 ## What's been implemented (2026-02-15)
+## What's new in 2026-10-17 (Koordinatorer, prisversioner, Ring planlægger)
+
+Se `TEAM_RETTIGHEDER.md`, `PRICING_SPEC.md` §3b og `LOGISTICS_ROADMAP.md` (svar A–F).
+- **Koordinatorer**: logistik admin inviterer koordinatorer (role logistics_admin +
+  is_coordinator) med 13 rettigheder; håndhæves centralt i TenantContextMiddleware.
+  Ny side Mere › Team & rettigheder (`pages/TeamPanel.jsx`). Faner/knapper skjules.
+- **Prisversioner**: ændring af prisregel = ny version fra nu/dato (eller
+  bagudrettet). Ture prisberegnes med versionen gældende ved `created_at`.
+  "Stop fra nu" i stedet for slet. Historik pr. regel.
+- **Aftalt pris** i Ny tur (price_override fast, kræver "Ændre priser").
+- **Ring til planlæggeren** for chauffører (tildeler → disponent-telefon).
+
 ## What's new in 2026-10-16 (Ture-arbejdsflade, tur-beskeder, live Rapportering)
 
 Se `TURE_REDESIGN.md` og `LOGISTICS_ROADMAP.md`.
@@ -27,7 +39,8 @@ Se `TURE_REDESIGN.md` og `LOGISTICS_ROADMAP.md`.
   tildeling i rækken/massehandlinger, tur-panel med tidslinje og beskeder,
   ny tur med flere stop + gentagelse, kopiér/flyt dato, Historik og Excel-import.
 - **Tur-beskeder** (`tour_messages`, `/api/tour-messages/*`) mellem planlægger og
-  chauffør med ulæst-tællere, "Læst"-kvittering, hurtigsvar og web push.
+  chauffør med ulæst-tællere, "Læst"-kvittering og hurtigsvar (in-app; web push til
+  chauffører er fortsat slået fra jf. Fase 15.23b).
 - **Push ved tildeling** (PUT /tours og /tours/bulk-assign).
 - **Navigation**: Ture · Planlægning · Chauffører · Rapportering · Økonomi + "Mere"
   (Lokationer, Arkiv, Indstillinger); mobil-skuffe (`components/AdminTabNav.jsx`).

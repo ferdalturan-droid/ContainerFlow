@@ -1,7 +1,9 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useState } from "react";
+import axios from "axios";
+import { API } from "../auth/api";
 import { createPortal } from "react-dom";
 import {
-  Navigation, MessageSquare, Clock, Package2, Flag, Play, CheckCircle2, ChevronRight, X, UserCheck, Building2, AlertTriangle,
+  Navigation, MessageSquare, Clock, Package2, Flag, Play, CheckCircle2, ChevronRight, X, UserCheck, Building2, AlertTriangle, Phone,
 } from "lucide-react";
 import TourChat from "./TourChat";
 import { TOUR_TYPE_LABEL, isHaster, openHours, capacityText, daysLate, mapsUrl } from "../lib/tourHelpers";
@@ -117,6 +119,29 @@ export default function DriverTourCard({ tour, index, routeInfo, unread = 0, onS
   );
 }
 
+/**
+ * "Ring til planlæggeren" (2026-10-17). Research: chauffører ringer stadig
+ * oftest til disponenten - et opkald med ét tryk skal ligge lige ved siden af
+ * beskederne. Ringer til den der tildelte turen (hvis telefonnummer), ellers
+ * firmaets disponent-telefon (Team & rettigheder). Skjules hvis intet nummer.
+ */
+export function CallPlannerButton({ tourId, className = "" }) {
+  const [c, setC] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    axios.get(`${API}/driver/dispatch-contact`, { params: { tour_id: tourId || "" } })
+      .then(r => alive && setC(r.data)).catch(() => alive && setC({}));
+    return () => { alive = false; };
+  }, [tourId]);
+  if (!c?.phone) return null;
+  return (
+    <a href={`tel:${c.phone.replace(/[^\d+]/g, "")}`} data-testid="call-planner"
+      className={`min-h-[46px] rounded-xl bg-slate-900 active:bg-slate-700 text-white font-semibold text-sm inline-flex items-center justify-center gap-2 px-4 ${className}`}>
+      <Phone className="w-4 h-4" /> Ring til {c.name || "planlæggeren"}
+    </a>
+  );
+}
+
 /** Bundark med beskedtråden for én tur (chauffør-siden). */
 export function DriverChatSheet({ tour, onClose, onChanged }) {
   useEffect(() => {
@@ -139,8 +164,9 @@ export function DriverChatSheet({ tour, onClose, onChanged }) {
           </div>
           <button onClick={onClose} className="p-2 -mr-1 rounded-lg text-slate-500 active:bg-slate-100" aria-label="Luk"><X className="w-5 h-5" /></button>
         </div>
-        <div className="px-4 pt-3">
-          <TourChat tourId={tour.id} side="driver" onChanged={onChanged} maxHeight={"45vh"} />
+        <div className="px-4 pt-3 space-y-3">
+          <CallPlannerButton tourId={tour.id} className="w-full" />
+          <TourChat tourId={tour.id} side="driver" onChanged={onChanged} maxHeight={"40vh"} />
         </div>
       </div>
     </div>,

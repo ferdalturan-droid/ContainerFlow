@@ -44,3 +44,10 @@ Brug `logisticsProfile.is_premium` i frontend (AdminPage i `App.js`) og
 `(await _logistics_profile(cid))["is_premium"]` i backend. Funktioner der
 afhænger af en genbrugsplads-kunde skal tjekke `has_connections` og kun
 gælde for den konkrete kundes data.
+
+## GPS på egne lokationer (2026-10-17)
+GPS bruges som startpunkt for "Optimer rute" hos chaufføren (sortering efter afstand, km pr. tur).
+- **Udfyldes automatisk:** når en lokation gemmes uden GPS, slås adressen op i OpenStreetMap (Nominatim, gratis, kun Danmark).
+- **Fallback:** den indbyggede postnummer-tabel (omtrentlig: byens midte). Google Maps er slået fra.
+- **Knapper:** "Find fra adressen" og "Vis på kort".
+- **Begrænsning:** steder uden rigtig adresse (fx byggepladser) skal have koordinater skrevet ind manuelt.

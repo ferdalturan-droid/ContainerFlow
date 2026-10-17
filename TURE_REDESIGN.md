@@ -10,7 +10,7 @@ hos chaufføren.
 | Vælg plads først, så ture | Excel/ARGO-import var pr. plads | Planlæggeren kunne ikke se dagen samlet | Alle ture for dagen, grupperet pr. lokation, filtre for lokation/kunde/chauffør/kilde |
 | Kun `source=manual,argo` | Bestillinger blev håndteret i Planlægning | Halvdelen af dagen manglede | Alle kilder (Manuel, Bestilling, ARGO) |
 | "Firma tur"-modal | Private ture for slutkunder | Firmanavnet blev gemt i *fraktion*-feltet; ingen materiale, tidsvindue, prioritet eller chauffør | Én "Ny tur"-formular: lokation, firma, opgave, materiale, container, kapacitet, flere stop, aflevering, tidsvindue, prioritet, chauffør, note, gentagelse |
-| Tildel-kolonne (skrivebeskyttet: "brug Planlægning") | Tildeling lå ét sted | Ekstra fanehop for den hyppigste handling | Tildel direkte i rækken, i tur-panelet og som massehandling; chaufføren får push |
+| Tildel-kolonne (skrivebeskyttet: "brug Planlægning") | Tildeling lå ét sted | Ekstra fanehop for den hyppigste handling | Tildel direkte i rækken, i tur-panelet og som massehandling; vises straks i chaufførens app |
 | "Slet alle i plads" | Rydde en fejlimport | Én knap slettede alt på pladsen | Fjernet. Vælg ture → Slet (med bekræftelse; startede, færdige og kundebestillinger springes over) |
 | Pause-rækker (`is_pause`) | Gammel pausemodel | Pauser registreres nu i tidsregistreringen | Skjult i Ture |
 | HÆNGER/SOLO-optimering pr. plads | Admin så chaufførens rute | Chaufføren optimerer selv i appen | Fjernet fra admin |
@@ -34,7 +34,7 @@ ressourceplanlægning. Ture er stedet for dagens drift.
 `tour_messages` (backend/server.py, "TUR-BESKEDER").
 - `GET /api/tour-messages/unread` giver ulæste beskeder til den der spørger: chauffør → fra planlægger; admin → fra chauffører.
 - `GET /api/tour-messages/{tour_id}` åbner tråden og markerer modpartens beskeder som læst. Afsenderen ser "Læst".
-- `POST /api/tour-messages/{tour_id}` sender en besked. Planlæggerens besked sendes som web push til chaufføren på turen.
+- `POST /api/tour-messages/{tour_id}` sender en besked. Chaufføren ser den i appen inden for ca. 15 sek. (toast + vibration + tæller på kortet). Web push til chauffører er slået fra (Fase 15.23b). Backend forsøger kun push, hvis en chauffør har et abonnement, og det har ingen i dag.
 - Adgang kræver, at turen tilhører firmaet. En chauffør kan kun skrive på sine egne eller frie ture.
 - Hurtigsvar til chauffør ("Forsinket ca. 15 min", "Ingen adgang" …) og planlægger.
 

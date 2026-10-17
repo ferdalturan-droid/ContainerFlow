@@ -295,6 +295,9 @@ class UserPublic(BaseModel):
     active_vehicle_id: Optional[str] = ""
     active_trailer_id: Optional[str] = ""
     created_at: Optional[str] = None
+    # 2026-10-17: Koordinator-rettigheder (logistik). Administratorer har alle.
+    is_coordinator: bool = False
+    permissions: Dict[str, bool] = Field(default_factory=dict)
     # Fase 15.40 (2026-02-22): Klient-platformsfunktioner — cached features
     # for brugerens klient/firma så frontend kan gate UI uden ekstra rundtur.
     features: Dict[str, bool] = Field(default_factory=dict)

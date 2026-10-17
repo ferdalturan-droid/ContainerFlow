@@ -180,7 +180,7 @@ const WEEKDAYS = [["1", "Man"], ["2", "Tir"], ["3", "Ons"], ["4", "Tor"], ["5", 
 const blankForm = (date, plads) => ({
   date, plads: plads || "", firma: "", tour_type: "normal", fraction: "", container: "", capacity_label: "",
   stops: [""], facility: "", open_from: "", open_to: "", priority: "normal", driver_id: "", remark: "",
-  loose_count: "", repeat: "none", repeat_days: ["1", "2", "3", "4", "5"], repeat_until: addDays(date, 28),
+  loose_count: "", agreed_price: "", repeat: "none", repeat_days: ["1", "2", "3", "4", "5"], repeat_until: addDays(date, 28),
 });
 
 function repeatDates(f) {
@@ -196,7 +196,7 @@ function repeatDates(f) {
   return out;
 }
 
-function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, defaultPlads, onCreated, siteWord }) {
+function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, defaultPlads, onCreated, siteWord, canPrice = false, customers = [] }) {
   const [f, setF] = useState(() => blankForm(initialDate, defaultPlads));
   const [saving, setSaving] = useState(false);
   useEffect(() => { if (open) setF(blankForm(initialDate, defaultPlads)); }, [open, initialDate, defaultPlads]);
@@ -221,6 +221,7 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
       open_from: f.open_from, open_to: f.open_to, priority: f.priority, remark: f.remark.trim(),
       is_private: !!firma, private_company: firma, sort_order: i,
       loose_estimated_count: f.tour_type === "loes_afhentning" ? (parseInt(f.loose_count, 10) || 0) : 0,
+      ...(canPrice && f.agreed_price !== "" && !isNaN(parseFloat(f.agreed_price)) ? { agreed_price: parseFloat(f.agreed_price) } : {}),
     })));
     setSaving(true);
     try {
@@ -272,7 +273,11 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
         </div>
         <div>
           <label className={labelCls}>Slutkunde / firma <span className="normal-case font-normal">(valgfri - bruges i Økonomi)</span></label>
-          <input className={inputCls} value={f.firma} onChange={(e) => set("firma", e.target.value)} placeholder="Fx Carlsberg Byen A/S" data-testid="tf-firma" />
+          <input className={inputCls} list="tf-customers" value={f.firma} onChange={(e) => set("firma", e.target.value)} placeholder={customers.length ? "Vælg eller skriv en kunde" : "Fx Carlsberg Byen A/S"} data-testid="tf-firma" />
+          <datalist id="tf-customers">{customers.map(c => <option key={c.id} value={c.name} />)}</datalist>
+          {f.firma.trim() && customers.length > 0 && !customers.some(c => c.name.toLowerCase() === f.firma.trim().toLowerCase()) && (
+            <p className="text-[11px] text-slate-500 mt-1">Ny kunde - opret den under Økonomi › Kunder &amp; priser for at give den egne priser.</p>
+          )}
         </div>
       </section>
 
@@ -369,6 +374,15 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
           <label className={labelCls}>Note til chaufføren</label>
           <textarea rows={2} className={inputCls} value={f.remark} onChange={(e) => set("remark", e.target.value)} placeholder="Fx nøgle hos portvagten, ring til Jens 20 30 40 50" />
         </div>
+        {canPrice && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
+            <div>
+              <label className={labelCls}>Aftalt pris pr. tur (kr, ekskl. moms)</label>
+              <input type="number" min="0" inputMode="decimal" className={inputCls} value={f.agreed_price} onChange={(e) => set("agreed_price", e.target.value)} placeholder="Tom = prisreglerne bruges" data-testid="tf-price" />
+            </div>
+            <p className="text-xs text-slate-500 pb-2">Fast pris for netop disse ture. Den ændres ikke, hvis prisreglerne ændres senere, og kan rettes i Økonomi.</p>
+          </div>
+        )}
       </section>
 
       <section className={`${card} p-4 space-y-3`}>
@@ -436,7 +450,7 @@ function Timeline({ tour, audit }) {
   );
 }
 
-function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnreadChanged, ownName, siteWord, askConfirm }) {
+function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnreadChanged, ownName, siteWord, askConfirm, can = () => true }) {
   const [audit, setAudit] = useState(null);
   const [edit, setEdit] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -524,7 +538,7 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
         {tour.claimed_by && tour.claimed_by_id !== tour.driver_id ? (
           <div className="text-sm text-slate-700 dark:text-slate-200">Taget af <b>{tour.claimed_by}</b>{locked ? "" : " (ikke startet)"}</div>
         ) : (
-          <DriverSelect value={tour.driver_id} drivers={drivers} load={load} disabled={locked || tour.not_completed}
+          <DriverSelect value={tour.driver_id} drivers={drivers} load={load} disabled={locked || tour.not_completed || !can("tours_assign")}
             onChange={(v) => onAssign([tour.id], v)} testid="panel-driver" />
         )}
         {locked && <p className="text-[11px] text-slate-400 mt-1.5">Turen er {tour.completed ? "afsluttet" : "i gang"} og kan ikke flyttes til en anden chauffør.</p>}
@@ -533,7 +547,7 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
       <section className={`${card} p-4`}>
         <h3 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2 mb-3"><MessageSquare className="w-4 h-4 text-slate-400" /> Beskeder med chaufføren</h3>
         {!assigneeName(tour) && <p className="text-[11px] text-slate-400 -mt-1 mb-2">Turen har ingen chauffør endnu - beskeden ses af den der tager turen.</p>}
-        <TourChat tourId={tour.id} side="planner" onChanged={onUnreadChanged} maxHeight={260} />
+        <TourChat tourId={tour.id} side="planner" onChanged={onUnreadChanged} maxHeight={260} readOnly={!can("messages")} />
       </section>
 
       <section className={`${card} p-4`}>
@@ -575,25 +589,25 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
           </div>
         ) : (
           <div className="flex flex-wrap gap-2">
-            <button className={btnGhost} disabled={tour.completed} data-testid="panel-edit" onClick={() => setEdit({
+            {can("tours_edit") && <button className={btnGhost} disabled={tour.completed} data-testid="panel-edit" onClick={() => setEdit({
               date: tour.date || "", fraction: tour.fraction || "", address: tour.address || "", facility: tour.facility || "",
               container: tour.container || "", capacity_label: tour.capacity_label || "", open_from: oh.from || "", open_to: oh.to || "",
               tour_type: tour.tour_type || "normal", priority: isHaster(tour) ? "urgent" : (tour.priority || "normal"), remark: tour.remark || "",
-            })}><Edit2 className="w-4 h-4" /> Ret</button>
-            {tour.not_completed && <button className={btnGhost} onClick={reactivate}><RotateCcw className="w-4 h-4" /> Genaktivér</button>}
-            <div className="inline-flex items-stretch rounded-lg border border-slate-200 dark:border-slate-600 overflow-hidden">
+            })}><Edit2 className="w-4 h-4" /> Ret</button>}
+            {tour.not_completed && can("tours_edit") && <button className={btnGhost} onClick={reactivate}><RotateCcw className="w-4 h-4" /> Genaktivér</button>}
+            {can("tours_edit") && <div className="inline-flex items-stretch rounded-lg border border-slate-200 dark:border-slate-600 overflow-hidden">
               <input type="date" value={copyDate} onChange={(e) => setCopyDate(e.target.value)} className="px-2 text-base sm:text-sm bg-white dark:bg-slate-900 border-0 focus:outline-none" aria-label="Kopiér til dato" />
               <button className="px-3 text-sm font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 inline-flex items-center gap-1.5 border-l border-slate-200 dark:border-slate-600"
                 onClick={() => copyDate && duplicate(copyDate)} data-testid="panel-copy"><Copy className="w-4 h-4" /> Kopiér</button>
-            </div>
-            <button className={btnDanger} disabled={tour.on_way || tour.source === "customer_order"}
+            </div>}
+            {can("tours_delete") && <button className={btnDanger} disabled={tour.on_way || tour.source === "customer_order"}
               title={tour.source === "customer_order" ? "Kundebestillinger annulleres af kunden" : undefined} onClick={() => askConfirm({
               title: "Slet tur?", text: `${tour.fraction || "Turen"} · ${tour.address || ""} slettes permanent.`, danger: true, okLabel: "Slet",
               onOk: async () => {
                 try { await axios.delete(`${API}/tours/${tour.id}`); toast.success("Turen er slettet"); onClose(); onChanged(); }
                 catch (e) { toast.error(formatApiError(e)); }
               },
-            })} data-testid="panel-delete"><Trash2 className="w-4 h-4" /> Slet</button>
+            })} data-testid="panel-delete"><Trash2 className="w-4 h-4" /> Slet</button>}
           </div>
         )}
       </section>
@@ -612,7 +626,10 @@ const copyBody = (t, date) => ({
 
 // ─────────────────────────── Arbejdsfladen ───────────────────────────
 
-export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord = "Lokation" }) {
+export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord = "Lokation", perms = {} }) {
+  // 2026-10-17: Koordinator-rettigheder - mangler en nøgle, er den tilladt.
+  const can = useCallback((k) => perms[k] !== false, [perms]);
+  const canSelect = can("tours_assign") || can("tours_edit") || can("tours_delete");
   const [view, setView] = useState("day"); // day | history
   const [date, setDate] = useState(todayStr());
   const [tours, setTours] = useState(null);
@@ -633,6 +650,7 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
   const [formOpen, setFormOpen] = useState(false);
   const [confirm, setConfirm] = useState(null);
   const [materials, setMaterials] = useState([]);
+  const [registry, setRegistry] = useState([]);
   const [bulkDate, setBulkDate] = useState("");
   const [showFilters, setShowFilters] = useState(false);
   const [importResult, setImportResult] = useState(null);
@@ -641,6 +659,18 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
   const lastUnreadTotal = useRef(null);
 
   const isToday = date === todayStr();
+  // Står siden åben over midnat, følger "i dag" med.
+  const lastToday = useRef(todayStr());
+  useEffect(() => {
+    const iv = setInterval(() => {
+      const t = todayStr();
+      if (t !== lastToday.current) {
+        setDate(d => (d === lastToday.current ? t : d));
+        lastToday.current = t;
+      }
+    }, 60000);
+    return () => clearInterval(iv);
+  }, []);
 
   const fetchTours = useCallback(async () => {
     try {
@@ -675,6 +705,9 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
 
   useEffect(() => { setTours(null); setSelected(new Set()); fetchTours(); }, [fetchTours]);
   useEffect(() => { fetchOverdue(); fetchUnread(); }, [fetchOverdue, fetchUnread]);
+  useEffect(() => {
+    axios.get(`${API}/logistics/customers`).then(r => setRegistry((r.data || []).filter(c => c.active !== false))).catch(() => {});
+  }, [formOpen]);
   useEffect(() => {
     axios.get(`${API}/materials`).then(r => setMaterials((r.data?.materials || []).map(m => (typeof m === "string" ? m : m.name)).filter(Boolean))).catch(() => {});
   }, []);
@@ -754,7 +787,7 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
       if (driverId) {
         await axios.post(`${API}/tours/bulk-assign`, { tour_ids: ids, driver_id: driverId });
         const d = drivers.find(x => x.id === driverId);
-        toast.success(`${ids.length === 1 ? "Tildelt" : `${ids.length} ture tildelt`} ${d?.name || ""} - chaufføren har fået besked`);
+        toast.success(`${ids.length === 1 ? "Tildelt" : `${ids.length} ture tildelt`} ${d?.name || ""} - vises hos chaufføren med det samme`);
       } else {
         await Promise.all(ids.map(id => axios.put(`${API}/tours/${id}`, { driver_id: "", driver_name: "" })));
         toast.success("Frigivet - åben for alle chauffører");
@@ -855,7 +888,7 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
               </label>
               <button onClick={() => { setShowOverdue(false); setDate(addDays(date, 1)); }} className="p-2 hover:bg-slate-50 dark:hover:bg-slate-700 rounded-r-xl" aria-label="Næste dag"><ChevronRight className="w-4 h-4" /></button>
             </div>
-            {(!isToday || showOverdue) && <button className={`${btnGhost} order-last sm:order-none`} onClick={() => { setShowOverdue(false); setDate(todayStr()); }}>I dag</button>}
+            {(!isToday || showOverdue) && <button className={`${btnGhost} order-last sm:order-none`} onClick={() => { setShowOverdue(false); setDate(todayStr()); }} title="Gå tilbage til dagens ture">Til i dag</button>}
           </>
         )}
         <div className="flex-1" />
@@ -864,11 +897,11 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" /> Live · {updatedAt.toLocaleTimeString("da-DK", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
           </span>
         )}
-        <button className={btnPrimary} onClick={() => setFormOpen(true)} data-testid="tours-new"><Plus className="w-4 h-4" /> Ny tur</button>
-        <Menu testid="tours-more" items={[
+        {can("tours_edit") && <button className={btnPrimary} onClick={() => setFormOpen(true)} data-testid="tours-new"><Plus className="w-4 h-4" /> Ny tur</button>}
+        {can("tours_edit") && <Menu testid="tours-more" items={[
           { label: "Importér fra Excel-skabelon", icon: Upload, onClick: () => fileRef.current?.click() },
           { label: "Hent tom Excel-skabelon", icon: Download, onClick: downloadTemplate },
-        ]} />
+        ]} />}
         <input ref={fileRef} type="file" accept=".xlsx,.xls" className="hidden" onChange={uploadTemplate} />
       </div>
 
@@ -971,7 +1004,8 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
           {selected.size > 0 && (
             <div className="sticky top-2 z-20 rounded-2xl bg-slate-900 text-white shadow-xl p-2.5 flex flex-wrap items-center gap-2" data-testid="tours-bulkbar">
               <span className="text-sm font-semibold px-2">{selected.size} valgt</span>
-              <div className="w-44"><DriverSelect value="" drivers={drivers} load={load} compact onChange={(v) => { if (v) { assign([...selected], v); clearSel(); } }} testid="bulk-driver" /></div>
+              {can("tours_assign") && <div className="w-44"><DriverSelect value="" drivers={drivers} load={load} compact onChange={(v) => { if (v) { assign([...selected], v); clearSel(); } }} testid="bulk-driver" /></div>}
+              {can("tours_edit") && <>
               <button onClick={() => bulkPriority("urgent")} className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-sm font-semibold">Haster</button>
               <button onClick={() => bulkPriority("normal")} className="px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-sm font-semibold">Normal</button>
               <div className="inline-flex items-center rounded-lg bg-white/10 overflow-hidden">
@@ -979,7 +1013,8 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
                 <button disabled={!bulkDate} onClick={() => bulkMove(bulkDate)} className="px-2.5 py-1.5 text-sm font-semibold hover:bg-white/10 disabled:opacity-40 border-l border-white/10">Flyt</button>
                 <button disabled={!bulkDate} onClick={() => bulkCopy(bulkDate)} className="px-2.5 py-1.5 text-sm font-semibold hover:bg-white/10 disabled:opacity-40 border-l border-white/10">Kopiér</button>
               </div>
-              <button onClick={bulkDelete} className="px-3 py-1.5 rounded-lg bg-white/10 hover:bg-rose-600 text-sm font-semibold inline-flex items-center gap-1.5"><Trash2 className="w-4 h-4" /> Slet</button>
+              </>}
+              {can("tours_delete") && <button onClick={bulkDelete} className="px-3 py-1.5 rounded-lg bg-white/10 hover:bg-rose-600 text-sm font-semibold inline-flex items-center gap-1.5"><Trash2 className="w-4 h-4" /> Slet</button>}
               <div className="flex-1" />
               <button onClick={clearSel} className="p-1.5 rounded-lg hover:bg-white/10" aria-label="Fravælg"><X className="w-4 h-4" /></button>
             </div>
@@ -1003,8 +1038,8 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
                 return (
                   <section key={g.name} className={`${card} overflow-hidden`} data-testid={`tours-group-${g.name}`}>
                     <div className="flex items-center gap-2 px-3 sm:px-4 py-2.5 bg-slate-50/80 dark:bg-slate-800/80 border-b border-slate-100 dark:border-slate-700">
-                      <input type="checkbox" className="w-4 h-4 accent-emerald-600" checked={allSel} aria-label="Vælg alle i gruppen"
-                        onChange={() => setSelected(prev => { const n = new Set(prev); g.list.forEach(t => allSel ? n.delete(t.id) : n.add(t.id)); return n; })} />
+                      {canSelect && <input type="checkbox" className="w-4 h-4 accent-emerald-600" checked={allSel} aria-label="Vælg alle i gruppen"
+                        onChange={() => setSelected(prev => { const n = new Set(prev); g.list.forEach(t => allSel ? n.delete(t.id) : n.add(t.id)); return n; })} />}
                       <button onClick={() => setCollapsed(c => ({ ...c, [g.name]: !isCol }))} className="flex-1 min-w-0 flex items-center gap-2 text-left">
                         <Building2 className="w-4 h-4 text-slate-400 shrink-0" />
                         <span className="font-semibold text-slate-900 dark:text-white truncate">{g.name}</span>
@@ -1026,7 +1061,7 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
                             <li key={t.id} onClick={() => setOpenId(t.id)} data-testid={`tours-row-${t.id}`}
                               className={`group grid grid-cols-[auto_1fr_auto] md:grid-cols-[auto_minmax(0,2.2fr)_minmax(0,1fr)_200px_auto] items-center gap-x-3 gap-y-2 px-3 sm:px-4 py-3 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-700/30 ${t.completed ? "opacity-60" : ""} ${selected.has(t.id) ? "bg-emerald-50/60 dark:bg-emerald-950/20" : ""}`}>
                               <div className="flex items-center gap-2.5 self-start pt-0.5" onClick={(e) => e.stopPropagation()}>
-                                <input type="checkbox" className="w-4 h-4 accent-emerald-600" checked={selected.has(t.id)} onChange={() => toggleSel(t.id)} aria-label="Vælg tur" />
+                                {canSelect && <input type="checkbox" className="w-4 h-4 accent-emerald-600" checked={selected.has(t.id)} onChange={() => toggleSel(t.id)} aria-label="Vælg tur" />}
                                 <span className={`w-2.5 h-2.5 rounded-full ${st.dot}`} title={st.label} />
                               </div>
                               <div className="min-w-0">
@@ -1054,7 +1089,7 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
                                 </div>
                               </div>
                               <div className="col-span-2 col-start-2 md:col-span-1 md:col-start-auto" onClick={(e) => e.stopPropagation()}>
-                                {lockedRow ? (
+                                {lockedRow || !can("tours_assign") ? (
                                   <div className="text-sm text-slate-700 dark:text-slate-200 truncate px-1 inline-flex items-center gap-1.5"><User className="w-3.5 h-3.5 text-slate-400" />{assigneeName(t) || "—"}</div>
                                 ) : (
                                   <DriverSelect value={t.driver_id} drivers={drivers} load={load} compact onChange={(v) => assign([t.id], v)} testid={`row-driver-${t.id}`} />
@@ -1081,12 +1116,12 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
         </>
       )}
 
-      <TourForm open={formOpen} onClose={() => setFormOpen(false)} initialDate={showOverdue ? todayStr() : date} pladsList={pladsList}
+      <TourForm open={formOpen} canPrice={can("economy_edit")} customers={registry} onClose={() => setFormOpen(false)} initialDate={showOverdue ? todayStr() : date} pladsList={pladsList}
         drivers={drivers} materials={materials} defaultPlads={fPlads || (pladsList.length === 1 ? pladsList[0].name : "")}
         siteWord={siteWord}
         onCreated={(d) => { setShowOverdue(false); if (d && d !== date) setDate(d); else refresh(); }} />
       <TourPanel tour={openTour} onClose={() => setOpenId(null)} drivers={drivers} load={load} onAssign={assign}
-        onChanged={refresh} onUnreadChanged={fetchUnread} ownName={ownName} siteWord={siteWord} askConfirm={setConfirm} />
+        onChanged={refresh} onUnreadChanged={fetchUnread} ownName={ownName} siteWord={siteWord} askConfirm={setConfirm} can={can} />
       <Confirm state={confirm} onClose={() => setConfirm(null)} />
     </div>
   );

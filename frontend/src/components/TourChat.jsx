@@ -23,7 +23,7 @@ const fmt = (iso) => {
   return today ? time : `${d.toLocaleDateString("da-DK", { day: "2-digit", month: "2-digit" })} ${time}`;
 };
 
-export default function TourChat({ tourId, side = "planner", onChanged, maxHeight = 320, autoFocus = false }) {
+export default function TourChat({ tourId, side = "planner", onChanged, maxHeight = 320, autoFocus = false, readOnly = false, header = null }) {
   const [msgs, setMsgs] = useState(null);
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
@@ -77,7 +77,7 @@ export default function TourChat({ tourId, side = "planner", onChanged, maxHeigh
         {msgs && msgs.length === 0 && (
           <div className="flex items-center gap-2 text-xs text-slate-400 py-3">
             <MessageSquare className="w-4 h-4" />
-            {side === "driver" ? "Ingen beskeder endnu. Skriv til planlæggeren her." : "Ingen beskeder endnu. Skriv til chaufføren her - de får besked på telefonen."}
+            {side === "driver" ? "Ingen beskeder endnu. Skriv til planlæggeren her." : "Ingen beskeder endnu. Chaufføren ser beskeden i appen ved turen."}
           </div>
         )}
         {(msgs || []).map(m => {
@@ -98,6 +98,10 @@ export default function TourChat({ tourId, side = "planner", onChanged, maxHeigh
           );
         })}
       </div>
+      {header}
+      {readOnly ? (
+        <p className="text-xs text-slate-400">Du kan læse beskeder, men ikke skrive (kræver rettigheden "Skriv med chauffører").</p>
+      ) : (<>
       <div className="flex flex-wrap gap-1.5">
         {QUICK[mine].map(q => (
           <button key={q} type="button" disabled={sending} onClick={() => send(q)}
@@ -130,6 +134,7 @@ export default function TourChat({ tourId, side = "planner", onChanged, maxHeigh
           {sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
         </button>
       </form>
+      </>)}
     </div>
   );
 }

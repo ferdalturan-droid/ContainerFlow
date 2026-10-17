@@ -51,13 +51,13 @@ export default function AdminTabNav({ tabs, moreTabs, active, onChange, badges =
               <t.icon className="w-4 h-4" /> {t.label}<Badge id={t.id} />
             </button>
           ))}
-          <button ref={moreRef} onClick={() => setMoreOpen(v => !v)} data-testid="admin-tab-more"
+          {moreTabs.length > 0 && <button ref={moreRef} onClick={() => setMoreOpen(v => !v)} data-testid="admin-tab-more"
             aria-haspopup="menu" aria-expanded={moreOpen}
             className={`px-4 py-2.5 text-sm font-medium flex items-center gap-1.5 whitespace-nowrap border-b-2 transition-colors ${
               activeMore ? "border-red-500 text-white" : "border-transparent text-slate-400 hover:text-slate-200"}`}>
             <MoreHorizontal className="w-4 h-4" /> {activeMore ? activeMore.label : "Mere"}
             <ChevronDown className={`w-3.5 h-3.5 transition-transform ${moreOpen ? "rotate-180" : ""}`} />
-          </button>
+          </button>}
         </div>
       </div>
 

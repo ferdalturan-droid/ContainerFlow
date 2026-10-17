@@ -436,6 +436,9 @@ class TourCreate(BaseModel):
     created_by_name: str = ""
     created_by_email: str = ""
     loose_estimated_count: int = 0
+    # 2026-10-17: Aftalt fast pris ved oprettelse (manuel tur). Gemmes som
+    # price_override og kræver rettigheden "Ændre priser".
+    agreed_price: Optional[float] = None
 
 class TourUpdate(BaseModel):
     weight: Optional[float] = None
@@ -1467,9 +1470,13 @@ async def create_tours_bulk(tours: List[TourCreate], payload: Optional[dict] = D
     if not tours:
         return []
     try:
+        if any(t.agreed_price is not None for t in tours):
+            await _require_perm(payload, "economy_edit")
         tour_objs = []
+        agreed: Dict[str, float] = {}
         for t in tours:
             td = t.model_dump()
+            ap = td.pop("agreed_price", None)
             td["date"] = normalize_date(td.get("date", ""))
             # Fase 15 (2026-06-19): Auto-generér kort tur-nummer.
             if not td.get("tour_number"):
@@ -1478,9 +1485,22 @@ async def create_tours_bulk(tours: List[TourCreate], payload: Optional[dict] = D
                     td.get("customer_name") or "",
                 )
             tour_objs.append(Tour(**td))
+            if ap is not None:
+                agreed[tour_objs[-1].id] = float(ap)
         docs = [_stamp_logistics_creator(t.model_dump(), payload) for t in tour_objs]
+        if agreed:
+            who = (payload or {}).get("email") or ""
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for d in docs:
+                if d["id"] in agreed:
+                    po = {"mode": "fixed", "amount": agreed[d["id"]], "extra_lines": []}
+                    d["price_override"] = po
+                    d["price_history"] = [{"at": now_iso, "by": who, "note": "Aftalt pris ved oprettelse",
+                                           "kind": "admin", "fact_overrides": {}, "price_override": po}]
         await db.tours.insert_many(docs)
         return tour_objs
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Bulk tour create error: {e}")
         raise HTTPException(status_code=500, detail="Failed to create tours")
@@ -1677,6 +1697,253 @@ async def _tour_for_messages(tour_id: str, payload: dict) -> dict:
 
 def _tour_driver_id(tour: dict) -> str:
     return tour.get("driver_id") or tour.get("claimed_by_id") or ""
+
+
+# ============= EGNE KUNDER (logistikfirmaets egne slutkunder) =============
+# 2026-10-17: Et logistikfirma kan registrere sine egne kunder (fx byggefirmaer
+# på egne ture), så de kan vælges i "Ny tur" og få priser i Økonomi, FØR der
+# findes ture. Priser kobles via nøglen "firma:<normaliseret navn>" - samme
+# nøgle som egne ture med `private_company` har altid haft, så eksisterende
+# regler og ture virker uændret.
+class LogiCustomerIn(BaseModel):
+    name: str = ""
+    cvr: str = ""
+    address: str = ""
+    contact: str = ""
+    phone: str = ""
+    email: str = ""
+    note: str = ""
+    active: Optional[bool] = None
+
+
+def _firma_key(name: str) -> str:
+    return f"firma:{_pricing.norm_label(name)}"
+
+
+async def _logi_cid(payload: dict) -> str:
+    if payload.get("role") != "logistics_admin":
+        raise HTTPException(status_code=403, detail="Kun logistik admin")
+    return payload.get("company_id") or ""
+
+
+@api_router.get("/logistics/customers")
+async def logi_customers_list(payload: dict = Depends(get_current_user_payload)):
+    cid = await _logi_cid(payload)
+    docs = await _raw_db.logistics_customers.find({"company_id": cid}, {"_id": 0}).sort("name", 1).to_list(2000)
+    for d in docs:
+        d["price_key"] = _firma_key(d["name"])
+    return docs
+
+
+@api_router.post("/logistics/customers")
+async def logi_customers_create(body: LogiCustomerIn, payload: dict = Depends(get_current_user_payload)):
+    cid = await _logi_cid(payload)
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Skriv kundens navn")
+    key = _pricing.norm_label(name)
+    for d in await _raw_db.logistics_customers.find({"company_id": cid}, {"_id": 0, "name": 1}).to_list(2000):
+        if _pricing.norm_label(d["name"]) == key:
+            raise HTTPException(status_code=409, detail="Kunden findes allerede")
+    doc = {**body.model_dump(exclude={"active"}), "name": name, "id": str(uuid.uuid4()), "company_id": cid,
+           "active": True, "created_at": datetime.now(timezone.utc).isoformat()}
+    await _raw_db.logistics_customers.insert_one(dict(doc))
+    doc["price_key"] = _firma_key(name)
+    return doc
+
+
+@api_router.put("/logistics/customers/{cust_id}")
+async def logi_customers_update(cust_id: str, body: LogiCustomerIn, payload: dict = Depends(get_current_user_payload)):
+    cid = await _logi_cid(payload)
+    cur = await _raw_db.logistics_customers.find_one({"id": cust_id, "company_id": cid}, {"_id": 0})
+    if not cur:
+        raise HTTPException(status_code=404, detail="Kunde ikke fundet")
+    upd = {k: (v.strip() if isinstance(v, str) else v) for k, v in body.model_dump().items() if v is not None}
+    new_name = upd.get("name") or cur["name"]
+    upd["name"] = new_name
+    old_key, new_key = _firma_key(cur["name"]), _firma_key(new_name)
+    if new_key != old_key:
+        for d in await _raw_db.logistics_customers.find({"company_id": cid, "id": {"$ne": cust_id}}, {"_id": 0, "name": 1}).to_list(2000):
+            if _firma_key(d["name"]) == new_key:
+                raise HTTPException(status_code=409, detail="Der findes allerede en kunde med det navn")
+        # Navnet er nøglen for priser og egne ture - flyt dem med.
+        await _raw_db.price_rules.update_many(
+            {"company_id": cid, "conditions.customer_ids": old_key},
+            {"$set": {"conditions.customer_ids.$": new_key}})
+        await _raw_db.tours.update_many({"company_id": cid, "private_company": cur["name"]},
+                                        {"$set": {"private_company": new_name}})
+    await _raw_db.logistics_customers.update_one({"id": cust_id}, {"$set": upd})
+    return {**cur, **upd, "price_key": new_key}
+
+
+@api_router.delete("/logistics/customers/{cust_id}")
+async def logi_customers_delete(cust_id: str, payload: dict = Depends(get_current_user_payload)):
+    """Kunden skjules (deaktiveres). Ture og priser bevares."""
+    cid = await _logi_cid(payload)
+    res = await _raw_db.logistics_customers.update_one({"id": cust_id, "company_id": cid}, {"$set": {"active": False}})
+    if not res.matched_count:
+        raise HTTPException(status_code=404, detail="Kunde ikke fundet")
+    return {"deactivated": True}
+
+
+# ============= TEAM (logistik admin + koordinatorer) =============
+class TeamMemberIn(BaseModel):
+    name: str = ""
+    email: str = ""
+    phone: str = ""
+    permissions: Dict[str, bool] = Field(default_factory=dict)
+    active: Optional[bool] = None
+
+
+def _team_public(u: dict) -> dict:
+    return {
+        "id": u.get("id"), "name": u.get("name") or "", "email": u.get("email") or "",
+        "phone": u.get("phone") or "", "is_coordinator": bool(u.get("is_coordinator")),
+        "permissions": _effective_perms(u), "active": u.get("active", True),
+        "invitation_status": u.get("invitation_status") or "active",
+        "created_at": u.get("created_at") or "", "invited_by_name": u.get("invited_by_name") or "",
+    }
+
+
+async def _team_caller(payload: dict) -> dict:
+    if payload.get("role") != "logistics_admin":
+        raise HTTPException(status_code=403, detail="Kun logistik admin")
+    me = await _raw_db.users.find_one({"id": payload.get("sub")}, {"_id": 0, "password_hash": 0})
+    if not me:
+        raise HTTPException(status_code=401, detail="Bruger ikke fundet")
+    return me
+
+
+def _grantable(me: dict, wanted: Dict[str, bool]) -> Dict[str, bool]:
+    """En koordinator kan kun give rettigheder vedkommende selv har."""
+    mine = _effective_perms(me)
+    return {k: bool(wanted.get(k)) and mine.get(k, False) for k in COORDINATOR_PERM_KEYS}
+
+
+@api_router.get("/logistics/team")
+async def team_list(payload: dict = Depends(get_current_user_payload)):
+    me = await _team_caller(payload)
+    users = await _raw_db.users.find(
+        {"company_id": me["company_id"], "role": "logistics_admin"},
+        {"_id": 0, "password_hash": 0}).sort("created_at", 1).to_list(200)
+    company = await _raw_db.companies.find_one({"id": me["company_id"]}, {"_id": 0, "dispatch_phone": 1, "dispatch_name": 1}) or {}
+    return {
+        "members": [_team_public(u) for u in users],
+        "catalog": [{"key": k, "label": l} for k, l in COORDINATOR_PERMS],
+        "me": {"id": me["id"], "is_coordinator": bool(me.get("is_coordinator")), "permissions": _effective_perms(me)},
+        "dispatch_phone": company.get("dispatch_phone") or "",
+        "dispatch_name": company.get("dispatch_name") or "",
+    }
+
+
+@api_router.post("/logistics/team")
+async def team_invite(body: TeamMemberIn, payload: dict = Depends(get_current_user_payload)):
+    me = await _team_caller(payload)
+    email = (body.email or "").strip().lower()
+    name = (body.name or "").strip()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Skriv en gyldig e-mail")
+    if not name:
+        raise HTTPException(status_code=400, detail="Skriv et navn")
+    if await _raw_db.users.find_one({"email": email}):
+        raise HTTPException(status_code=409, detail="Der findes allerede en bruger med den e-mail")
+    doc = {
+        "id": str(uuid.uuid4()), "email": email, "name": name, "phone": (body.phone or "").strip(),
+        "role": "logistics_admin", "is_coordinator": True, "permissions": _grantable(me, body.permissions),
+        "company_id": me["company_id"], "active": True, "invitation_status": "pending", "password_hash": "",
+        "managed_company_ids": [], "assigned_plads_ids": [], "visible_plads_ids": [],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "invited_by_id": me["id"], "invited_by_name": me.get("name") or me.get("email") or "",
+    }
+    await _raw_db.users.insert_one(dict(doc))
+    try:
+        await _send_invite_for_user(doc)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Coordinator invitation failed for {email}: {e}")
+    return _team_public(doc)
+
+
+@api_router.put("/logistics/team/{user_id}")
+async def team_update(user_id: str, body: TeamMemberIn, payload: dict = Depends(get_current_user_payload)):
+    me = await _team_caller(payload)
+    u = await _raw_db.users.find_one({"id": user_id, "company_id": me["company_id"], "role": "logistics_admin"}, {"_id": 0})
+    if not u:
+        raise HTTPException(status_code=404, detail="Bruger ikke fundet")
+    upd: Dict[str, Any] = {}
+    if body.name.strip():
+        upd["name"] = body.name.strip()
+    upd["phone"] = (body.phone or "").strip()
+    if u.get("is_coordinator"):
+        if user_id == me["id"]:
+            raise HTTPException(status_code=403, detail="Du kan ikke ændre dine egne rettigheder")
+        upd["permissions"] = _grantable(me, body.permissions)
+        if body.active is not None:
+            upd["active"] = bool(body.active)
+    elif user_id != me["id"] and me.get("is_coordinator"):
+        raise HTTPException(status_code=403, detail="En koordinator kan ikke ændre en administrator")
+    await _raw_db.users.update_one({"id": user_id}, {"$set": upd})
+    _perm_cache.pop(user_id, None)
+    return _team_public({**u, **upd})
+
+
+@api_router.delete("/logistics/team/{user_id}")
+async def team_remove(user_id: str, payload: dict = Depends(get_current_user_payload)):
+    me = await _team_caller(payload)
+    u = await _raw_db.users.find_one({"id": user_id, "company_id": me["company_id"], "role": "logistics_admin"}, {"_id": 0})
+    if not u or not u.get("is_coordinator"):
+        raise HTTPException(status_code=404, detail="Koordinator ikke fundet")
+    if user_id == me["id"]:
+        raise HTTPException(status_code=400, detail="Du kan ikke fjerne dig selv")
+    if u.get("invitation_status") == "pending":
+        await _raw_db.users.delete_one({"id": user_id})
+        await _raw_db.invitation_tokens.delete_many({"user_id": user_id})
+        return {"removed": True}
+    await _raw_db.users.update_one({"id": user_id}, {"$set": {"active": False}})
+    _perm_cache.pop(user_id, None)
+    return {"deactivated": True}
+
+
+@api_router.post("/logistics/team/{user_id}/resend")
+async def team_resend(user_id: str, payload: dict = Depends(get_current_user_payload)):
+    me = await _team_caller(payload)
+    u = await _raw_db.users.find_one({"id": user_id, "company_id": me["company_id"], "role": "logistics_admin"}, {"_id": 0})
+    if not u or u.get("invitation_status") != "pending":
+        raise HTTPException(status_code=404, detail="Ingen afventende invitation")
+    await _send_invite_for_user(u)
+    return {"sent": True}
+
+
+class DispatchContactIn(BaseModel):
+    phone: str = ""
+    name: str = ""
+
+
+@api_router.put("/logistics/team-contact")
+async def team_contact(body: DispatchContactIn, payload: dict = Depends(get_current_user_payload)):
+    """Disponent-telefon som chaufførerne ringer til (fallback når den der
+    tildelte turen ikke har et nummer). Kræver team-rettighed."""
+    me = await _team_caller(payload)
+    await _require_perm(payload, "team")
+    await _raw_db.companies.update_one({"id": me["company_id"]}, {"$set": {
+        "dispatch_phone": (body.phone or "").strip(), "dispatch_name": (body.name or "").strip()}})
+    return {"dispatch_phone": (body.phone or "").strip(), "dispatch_name": (body.name or "").strip()}
+
+
+@api_router.get("/driver/dispatch-contact")
+async def driver_dispatch_contact(tour_id: str = "", payload: dict = Depends(get_current_user_payload)):
+    """Hvem chaufføren ringer til om en tur: den der tildelte turen (hvis
+    vedkommende har et nummer), ellers firmaets disponent-telefon."""
+    cid = payload.get("company_id") or ""
+    if tour_id:
+        t = await _raw_db.tours.find_one({"id": tour_id}, {"_id": 0, "assigned_by_id": 1, "company_id": 1,
+                                                          "assigned_logistics_company_ids": 1})
+        if t and (t.get("company_id") == cid or cid in (t.get("assigned_logistics_company_ids") or [])) and t.get("assigned_by_id"):
+            u = await _raw_db.users.find_one({"id": t["assigned_by_id"], "company_id": cid, "active": {"$ne": False}},
+                                             {"_id": 0, "name": 1, "phone": 1})
+            if u and (u.get("phone") or "").strip():
+                return {"phone": u["phone"].strip(), "name": u.get("name") or "Planlægger"}
+    c = await _raw_db.companies.find_one({"id": cid}, {"_id": 0, "dispatch_phone": 1, "dispatch_name": 1}) or {}
+    return {"phone": (c.get("dispatch_phone") or "").strip(), "name": c.get("dispatch_name") or "Disponent"}
 
 
 @api_router.get("/tour-messages/unread")
@@ -2209,6 +2476,11 @@ async def update_tour(tour_id: str, update: TourUpdate, payload: dict = Depends(
         raise HTTPException(status_code=400, detail="No update data provided")
     if "date" in update_data:
         update_data["date"] = normalize_date(update_data["date"])
+    if payload.get("role") == "logistics_admin":
+        if {"driver_id", "driver_name"} & set(update_data):
+            await _require_perm(payload, "tours_assign")
+        if set(update_data) - {"driver_id", "driver_name"}:
+            await _require_perm(payload, "tours_edit")
 
     role = payload.get("role")
     caller_id = payload.get("sub") or payload.get("user_id") or ""
@@ -4034,6 +4306,51 @@ async def _location_name_taken(name: str, exclude_id: str = "") -> bool:
     return bool(await _raw_db.plads.find_one(q, {"_id": 0, "id": 1}))
 
 
+async def _geocode_dk(query: str) -> dict:
+    """2026-10-17: Adresse -> GPS. Google Maps er slået fra, så vi bruger
+    OpenStreetMap (Nominatim, gratis, kun Danmark) og falder tilbage til den
+    indbyggede postnummer-tabel (groft: byens midte). Resultater caches."""
+    q = (query or "").strip()
+    if len(q) < 3:
+        return {}
+    key = q.lower()
+    hit = await _raw_db.geocode_cache.find_one({"q": key}, {"_id": 0})
+    if hit:
+        return {k: hit.get(k) for k in ("lat", "lng", "source", "label")}
+
+    def _osm():
+        try:
+            r = http_requests.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={"q": q, "format": "json", "limit": 1, "countrycodes": "dk"},
+                headers={"User-Agent": "ContainerFlow/1.0 (containerflow.dk)"}, timeout=6)
+            js = r.json() if r.ok else []
+            if js:
+                return {"lat": float(js[0]["lat"]), "lng": float(js[0]["lon"]), "source": "osm",
+                        "label": js[0].get("display_name", "")[:200]}
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"geocode osm failed: {e}")
+        return {}
+    res = await async_lib.to_thread(_osm)
+    if not res:
+        lat, lng = geocode_address(q)
+        if lat and lng:
+            res = {"lat": lat, "lng": lng, "source": "postnr", "label": "Omtrentlig (postnummer/by)"}
+    if res:
+        await _raw_db.geocode_cache.update_one({"q": key}, {"$set": {"q": key, **res}}, upsert=True)
+    return res
+
+
+@api_router.get("/geocode")
+async def api_geocode(q: str, payload: dict = Depends(get_current_user_payload)):
+    if payload.get("role") not in ("logistics_admin", "super_admin"):
+        raise HTTPException(status_code=403, detail="Adgang nægtet")
+    res = await _geocode_dk(q)
+    if not res:
+        raise HTTPException(status_code=404, detail="Adressen kunne ikke findes - tjek stavning eller skriv postnummer med")
+    return res
+
+
 async def _create_own_location(la: str, plads: "PladsCreate") -> "Plads":
     name = (plads.name or "").strip()
     if not name:
@@ -4046,8 +4363,12 @@ async def _create_own_location(la: str, plads: "PladsCreate") -> "Plads":
         if not await _raw_db.plads.find_one({"location_code": cand}, {"_id": 0, "id": 1}):
             code = cand
             break
+    lat, lng = plads.lat, plads.lng
+    if (lat is None or lng is None) and ((plads.address or "").strip() or (plads.city or "").strip()):
+        g = await _geocode_dk(", ".join(x for x in [(plads.address or "").strip(), (plads.city or "").strip()] if x))
+        lat, lng = g.get("lat"), g.get("lng")
     obj = Plads(name=name, city=(plads.city or "").strip(), address=(plads.address or "").strip(),
-                lat=plads.lat, lng=plads.lng, location_code=code)
+                lat=lat, lng=lng, location_code=code)
     doc = obj.model_dump()
     doc.update({"code": code, "company_id": la, "assigned_logistics_company_ids": [la],
                 "own_location": True})
@@ -4071,6 +4392,13 @@ async def _update_own_location(la: str, plads_id: str, update: "PladsUpdate") ->
             raise HTTPException(status_code=409, detail="Navnet bruges allerede af en anden lokation")
     if not data:
         raise HTTPException(status_code=400, detail="Intet at opdatere")
+    if ("address" in data or "city" in data) and ("lat" not in data or "lng" not in data):
+        addr = data.get("address", cur.get("address") or "")
+        city = data.get("city", cur.get("city") or "")
+        if addr != (cur.get("address") or "") or city != (cur.get("city") or "") or not cur.get("lat"):
+            g = await _geocode_dk(", ".join(x for x in [addr.strip(), city.strip()] if x))
+            if g:
+                data["lat"], data["lng"] = g["lat"], g["lng"]
     await _raw_db.plads.update_one({"id": plads_id}, {"$set": data})
     if data.get("name") and data["name"] != cur.get("name"):
         # Egne ture peger på lokationen via navn - flyt dem med.
@@ -6375,7 +6703,7 @@ async def _build_day_report(driver_id: str, day: str) -> dict:
         pause_min = 0
         if s_min >= 0 and e_min > s_min:
             pause_min = sum(max(0, min(e_min, pe) - max(s_min, ps)) for ps, pe in pauses if ps >= 0 and pe > ps)
-        base, _sur = _pricing.select_rules(rules, ctx.attrs(t))
+        base, _sur = _pricing.select_rules(ctx.rules_for(t), ctx.attrs(t))
         p = (base or {}).get("pricing") or {}
         po = t.get("price_override") or {}
         model = "fixed" if po.get("mode") == "fixed" else (p.get("model") or "")
@@ -10056,6 +10384,80 @@ def invalidate_company_cache(company_id: Optional[str] = None) -> None:
 SUSPENDED_ALLOW_PATHS = {"/api/auth/me", "/api/auth/logout", "/api/auth/login", "/api/health"}
 
 
+# ============= KOORDINATORER + RETTIGHEDER (2026-10-17) =============
+# En koordinator er en bruger med role=logistics_admin + is_coordinator=True og
+# et sæt rettigheder. Firmaets administrator(er) (is_coordinator falsk) har
+# altid alle rettigheder. Kontrollen sker centralt i TenantContextMiddleware
+# (rute -> rettighed), så ingen endpoint kan glemmes; PUT /tours/{id} tjekkes i
+# update_tour, fordi rettigheden afhænger af hvilke felter der ændres.
+COORDINATOR_PERMS = [
+    ("tours_edit", "Opret og ret ture"),
+    ("tours_assign", "Tildel chauffører"),
+    ("tours_delete", "Slet ture"),
+    ("messages", "Skriv med chauffører"),
+    ("planning", "Planlægning og tidsregistrering"),
+    ("drivers", "Chauffører og flåde"),
+    ("reports", "Rapportering"),
+    ("economy_view", "Se priser og økonomi"),
+    ("economy_edit", "Ændre priser, rette og godkende"),
+    ("locations", "Lokationer"),
+    ("archive", "Arkiv (dagrapporter og kvitteringer)"),
+    ("settings", "Indstillinger"),
+    ("team", "Team og rettigheder"),
+]
+COORDINATOR_PERM_KEYS = [k for k, _ in COORDINATOR_PERMS]
+COORDINATOR_PERM_LABEL = dict(COORDINATOR_PERMS)
+
+_PERM_ROUTES = [
+    # (metoder, regex, rettighed). GET på /pricing kræver kun "se".
+    ({"GET"}, re.compile(r"^/api/pricing/"), "economy_view"),
+    ({"POST", "PUT", "DELETE", "PATCH"}, re.compile(r"^/api/pricing/"), "economy_edit"),
+    ({"GET"}, re.compile(r"^/api/admin/statistics"), "reports"),
+    ({"POST", "PUT", "DELETE"}, re.compile(r"^/api/(drivers|vehicles|trailers)(/|$)"), "drivers"),
+    ({"POST", "PUT", "DELETE"}, re.compile(r"^/api/plads(/|$)"), "locations"),
+    ({"POST"}, re.compile(r"^/api/tours(/bulk)?/?$"), "tours_edit"),
+    ({"POST"}, re.compile(r"^/api/tours/upload-template$"), "tours_edit"),
+    ({"POST"}, re.compile(r"^/api/tours/[^/]+/reactivate$"), "tours_edit"),
+    ({"POST"}, re.compile(r"^/api/parse-mail"), "tours_edit"),
+    ({"POST"}, re.compile(r"^/api/tours/bulk-assign$"), "tours_assign"),
+    ({"DELETE"}, re.compile(r"^/api/tours/[^/]+$"), "tours_delete"),
+    ({"POST"}, re.compile(r"^/api/tour-messages/"), "messages"),
+    ({"GET", "POST", "PUT", "DELETE"}, re.compile(r"^/api/logistics/team"), "team"),
+    ({"POST", "PUT", "DELETE"}, re.compile(r"^/api/logistics/customers"), "tours_edit"),
+    ({"GET", "POST"}, re.compile(r"^/api/admin/day-report"), "archive"),
+]
+_perm_cache: Dict[str, tuple] = {}
+
+
+async def _coordinator_perms(uid: str) -> Optional[dict]:
+    """None = fuld adgang (administrator). Ellers dict med rettigheder."""
+    hit = _perm_cache.get(uid)
+    if hit and _time.time() - hit[0] < 15:
+        return hit[1]
+    u = await _raw_db.users.find_one({"id": uid}, {"_id": 0, "is_coordinator": 1, "permissions": 1, "active": 1})
+    perms = None
+    if u and u.get("is_coordinator"):
+        perms = {k: bool((u.get("permissions") or {}).get(k)) for k in COORDINATOR_PERM_KEYS}
+        # Deaktiveret koordinator: ingen adgang, heller ikke med et gammelt token.
+        perms["__active"] = u.get("active", True) is not False
+    _perm_cache[uid] = (_time.time(), perms)
+    return perms
+
+
+def _effective_perms(user_doc: dict) -> dict:
+    if user_doc.get("role") == "logistics_admin" and user_doc.get("is_coordinator"):
+        return {k: bool((user_doc.get("permissions") or {}).get(k)) for k in COORDINATOR_PERM_KEYS}
+    return {k: True for k in COORDINATOR_PERM_KEYS}
+
+
+async def _require_perm(payload: dict, key: str):
+    if (payload or {}).get("role") != "logistics_admin":
+        return
+    perms = await _coordinator_perms(payload.get("sub") or "")
+    if perms is not None and not perms.get(key):
+        raise HTTPException(status_code=403, detail=f"Du har ikke rettighed til: {COORDINATOR_PERM_LABEL.get(key, key)}")
+
+
 class TenantContextMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         path = request.url.path
@@ -10111,6 +10513,22 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
                         status_code=403,
                         content={"detail": "Du har ikke adgang til denne virksomhed"},
                     )
+
+        # 2026-10-17: Koordinator-rettigheder (se COORDINATOR_PERMS).
+        if role == "logistics_admin" and uid and path.startswith("/api/") and not is_public:
+            _cp = await _coordinator_perms(uid)
+            if _cp is not None and not _cp.get("__active", True):
+                from starlette.responses import JSONResponse
+                return JSONResponse(status_code=401, content={"detail": "Din adgang er deaktiveret"})
+            needed = next((perm for methods, rx, perm in _PERM_ROUTES
+                           if request.method in methods and rx.match(path)), None)
+            if needed:
+                perms = await _coordinator_perms(uid)
+                if perms is not None and not perms.get(needed):
+                    from starlette.responses import JSONResponse
+                    return JSONResponse(status_code=403, content={
+                        "detail": f"Du har ikke rettighed til: {COORDINATOR_PERM_LABEL.get(needed, needed)}",
+                        "missing_permission": needed})
 
         # Company suspension check: block any non-super-admin user whose company is inactive.
         # We allow auth endpoints (login/logout/me) so users can still authenticate / log out
@@ -10300,6 +10718,8 @@ def _user_to_public(user_doc: dict, company_name: Optional[str] = None) -> dict:
         "active_trailer_id": user_doc.get("active_trailer_id") or "",
         "plate": user_doc.get("plate") or "",
         "created_at": user_doc.get("created_at"),
+        "is_coordinator": bool(user_doc.get("is_coordinator")),
+        "permissions": _effective_perms(user_doc),
     }
 
 
@@ -12396,18 +12816,40 @@ _RATE_LIMIT_EXEMPT_PATHS = {
     "/api/clients/me/features",
 }
 
+# 2026-10-17: Egen tæller (før delte den `_rate_store` med login-grænsen, så
+# almindelig brug kunne blokere login fra samme netværk) og pr. bruger når
+# der er et gyldigt token - flere koordinatorer og chauffører bag samme
+# kontor-IP deler ellers én kvote.
+_global_rate_store: dict = {}
+
+
+def _rate_key(request: Request) -> tuple:
+    auth = request.headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        try:
+            sub = decode_token(auth.split(" ", 1)[1].strip()).get("sub")
+            if sub:
+                return f"u:{sub}", 300
+        except HTTPException:
+            pass
+    return f"ip:{request.client.host if request.client else 'unknown'}", 120
+
+
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
     # Only rate-limit API endpoints, not static files
     if request.url.path.startswith("/api/") and request.url.path not in _RATE_LIMIT_EXEMPT_PATHS:
-        ip = request.client.host if request.client else "unknown"
+        key, limit = _rate_key(request)
         now = _time.time()
-        rec = _rate_store.get(ip)
+        rec = _global_rate_store.get(key)
         if not rec or now - rec.get("window_start", 0) > _RATE_LIMIT_WIN:
-            _rate_store[ip] = {"count": 1, "window_start": now}
+            _global_rate_store[key] = {"count": 1, "window_start": now}
+            if len(_global_rate_store) > 20000:
+                for k in [k for k, v in _global_rate_store.items() if now - v["window_start"] > _RATE_LIMIT_WIN]:
+                    _global_rate_store.pop(k, None)
         else:
             rec["count"] += 1
-            if rec["count"] > 120:  # 120 req/min global limit
+            if rec["count"] > limit:
                 from fastapi.responses import JSONResponse
                 return JSONResponse(status_code=429, content={"detail": "For mange anmodninger. Vent venligst."})
     response = await call_next(request)
@@ -16325,18 +16767,74 @@ class _PricingContext:
             "deduct_pause_override": (t.get("fact_overrides") or {}).get("deduct_pause"),
         }
 
+    def rules_for(self, t: dict) -> list:
+        """2026-10-17: Prisregler har versioner (version_from/version_to). En tur
+        prisberegnes med de regler der gjaldt da turen blev oprettet/bestilt,
+        så en prisændring i dag ikke ændrer eksisterende ture i rapporter/PDF."""
+        ref = _rule_ref_time(t)
+        return [r for r in self.rules if _rule_active_at(r, ref)]
+
     def price(self, t: dict) -> dict:
         locked = t.get("price_locked")
         if locked:
             return {**locked, "flags": list(locked.get("flags") or []) + ["Faktureret"], "locked": True}
-        res = _pricing.price_tour(self.attrs(t), self.rules, self.time_by_tour.get(t["id"]),
+        res = _pricing.price_tour(self.attrs(t), self.rules_for(t), self.time_by_tour.get(t["id"]),
                                   t.get("price_override"))
         res["locked"] = False
         return res
 
 
 async def _active_rules(cid: str) -> list:
+    """Alle versioner (også udløbne) - filtreres pr. tur i _PricingContext.rules_for."""
     return await _raw_db.price_rules.find({"company_id": cid}, {"_id": 0}).to_list(5000)
+
+
+def _parse_ts(v: str) -> Optional[datetime]:
+    if not v:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            dt = datetime.fromisoformat(str(v)[:10] + "T00:00:00")
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=DK_TZ)
+    return dt
+
+
+def _rule_ref_time(t: dict) -> Optional[datetime]:
+    """Tidspunktet der afgør hvilken prisversion en tur bruger: hvornår turen
+    blev oprettet/bestilt. Mangler det, bruges kørselsdatoen."""
+    return _parse_ts(t.get("created_at") or "") or _parse_ts(t.get("date") or "")
+
+
+def _rule_active_at(r: dict, ref: Optional[datetime]) -> bool:
+    vf, vt = _parse_ts(r.get("version_from") or ""), _parse_ts(r.get("version_to") or "")
+    if ref is None:
+        return not vt  # ukendt tidspunkt: brug den gældende version
+    if vf and ref < vf:
+        return False
+    if vt and ref >= vt:
+        return False
+    return True
+
+
+def _effective_ts(effective: Any) -> Optional[str]:
+    """"all" = gælder også eksisterende ture (None). "now"/tomt = fra nu.
+    "YYYY-MM-DD" = fra den dato kl. 00:00 dansk tid."""
+    e = str(effective or "now").strip()
+    if e == "all":
+        return None
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", e):
+        return datetime.fromisoformat(e + "T00:00:00").replace(tzinfo=DK_TZ).isoformat()
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _rule_is_current(r: dict) -> bool:
+    vt = _parse_ts(r.get("version_to") or "")
+    return not vt or vt > datetime.now(timezone.utc)
 
 
 def _report_row(ctx: _PricingContext, t: dict, pending: Dict[str, int]) -> dict:
@@ -16462,9 +16960,19 @@ async def pricing_options(payload: dict = Depends(get_current_user_payload)):
         for nm in await _raw_db.tours.distinct(field, {"company_id": cid}):
             if isinstance(nm, str) and nm.strip():
                 own_names.setdefault(_pricing.norm_label(nm), nm.strip())
+    # 2026-10-17: Registrerede egne kunder (Økonomi › Kunder) - også før de har ture.
+    registered = await _raw_db.logistics_customers.find({"company_id": cid}, {"_id": 0}).to_list(2000)
+    reg_keys = {}
+    for d in registered:
+        k = _pricing.norm_label(d["name"])
+        reg_keys[k] = d
+        if d.get("active", True) or k in own_names:
+            own_names[k] = d["name"]
     if own_names or profile.get("is_premium"):
         customers.append({"id": cid, "name": "Egne ture uden kunde", "own": True})
-        customers += [{"id": f"firma:{k}", "name": v, "own": True}
+        customers += [{"id": f"firma:{k}", "name": v, "own": True,
+                       "registered_id": (reg_keys.get(k) or {}).get("id"),
+                       "inactive": (reg_keys.get(k) or {}).get("active") is False}
                       for k, v in sorted(own_names.items(), key=lambda kv: kv[1].lower())]
     return {
         "profile": profile,
@@ -16519,7 +17027,7 @@ def _clean_rule(body: dict) -> dict:
         return v
 
     doc = {"kind": kind, "name": name[:80], "conditions": cond,
-           "active": bool(body.get("active", True)), "note": str(body.get("note") or "")[:300],
+           "active": bool(body.get("active", True)), "note": str(body.get("note") or "")[:1000],
            "valid_from": str(body.get("valid_from") or ""), "valid_to": str(body.get("valid_to") or ""),
            "category": "", "pricing": {}, "surcharge": {}}
     if doc["valid_from"] and doc["valid_to"] and doc["valid_from"] > doc["valid_to"]:
@@ -16558,19 +17066,41 @@ def _clean_rule(body: dict) -> dict:
 
 @pricing_router.get("/rules")
 async def pricing_list_rules(payload: dict = Depends(get_current_user_payload)):
+    """Gældende (og planlagte) versioner. Udløbne versioner ses via /history."""
     me = await _pricing_caller(payload)
-    rules = await _active_rules(me["company_id"])
+    all_rules = await _active_rules(me["company_id"])
+    counts: Dict[str, int] = {}
+    for r in all_rules:
+        g = r.get("version_group") or r["id"]
+        counts[g] = counts.get(g, 0) + 1
+    rules = [r for r in all_rules if _rule_is_current(r)]
     for r in rules:
         r["specificity"] = _pricing.specificity(r)
-    return sorted(rules, key=lambda r: (r["kind"] != "base", r.get("category") or "", -r["specificity"], r["name"]))
+        r["versions"] = counts.get(r.get("version_group") or r["id"], 1)
+    return sorted(rules, key=lambda r: (r["kind"] != "base", r.get("category") or "", -r["specificity"], r["name"],
+                                        r.get("version_from") or ""))
+
+
+@pricing_router.get("/rules/{rule_id}/history")
+async def pricing_rule_history(rule_id: str, payload: dict = Depends(get_current_user_payload)):
+    me = await _pricing_caller(payload)
+    r = await _raw_db.price_rules.find_one({"id": rule_id, "company_id": me["company_id"]}, {"_id": 0})
+    if not r:
+        raise HTTPException(status_code=404, detail="Regel ikke fundet")
+    g = r.get("version_group") or r["id"]
+    vs = await _raw_db.price_rules.find(
+        {"company_id": me["company_id"], "$or": [{"version_group": g}, {"id": g}]}, {"_id": 0}).to_list(500)
+    return sorted(vs, key=lambda v: v.get("version_from") or "", reverse=True)
 
 
 @pricing_router.post("/rules")
 async def pricing_create_rule(body: dict, payload: dict = Depends(get_current_user_payload)):
     me = await _pricing_caller(payload)
     now = datetime.now(timezone.utc).isoformat()
-    doc = {**_clean_rule(body), "id": str(uuid.uuid4()), "company_id": me["company_id"],
-           "created_at": now, "updated_at": now, "updated_by": me.get("name") or me.get("email")}
+    rid = str(uuid.uuid4())
+    doc = {**_clean_rule(body), "id": rid, "version_group": rid, "company_id": me["company_id"],
+           "created_at": now, "updated_at": now, "updated_by": me.get("name") or me.get("email"),
+           "version_from": _effective_ts(body.get("effective"))}
     await _raw_db.price_rules.insert_one(doc)
     doc.pop("_id", None)
     return doc
@@ -16578,22 +17108,57 @@ async def pricing_create_rule(body: dict, payload: dict = Depends(get_current_us
 
 @pricing_router.put("/rules/{rule_id}")
 async def pricing_update_rule(rule_id: str, body: dict, payload: dict = Depends(get_current_user_payload)):
+    """2026-10-17: En ændring laver en NY version fra et valgt tidspunkt
+    (standard: nu). Den gamle version lukkes, så eksisterende ture beholder
+    deres pris. effective="all" retter versionen direkte (også bagudrettet)."""
     me = await _pricing_caller(payload)
-    upd = {**_clean_rule(body), "updated_at": datetime.now(timezone.utc).isoformat(),
-           "updated_by": me.get("name") or me.get("email")}
-    res = await _raw_db.price_rules.update_one({"id": rule_id, "company_id": me["company_id"]}, {"$set": upd})
-    if not res.matched_count:
+    old = await _raw_db.price_rules.find_one({"id": rule_id, "company_id": me["company_id"]}, {"_id": 0})
+    if not old:
         raise HTTPException(status_code=404, detail="Regel ikke fundet")
-    return await _raw_db.price_rules.find_one({"id": rule_id}, {"_id": 0})
+    now = datetime.now(timezone.utc).isoformat()
+    who = me.get("name") or me.get("email")
+    clean = _clean_rule(body)
+    eff = _effective_ts(body.get("effective"))
+    old_vf = _parse_ts(old.get("version_from") or "")
+    if eff is None or (old_vf and old_vf >= _parse_ts(eff)):
+        # Bagudrettet rettelse - eller versionen er ikke trådt i kraft endnu.
+        upd = {**clean, "updated_at": now, "updated_by": who}
+        if eff is not None:
+            # Flyt versionens start tilbage til den valgte dato, og luk den
+            # forrige version samme tidspunkt.
+            upd["version_from"] = eff
+            if old.get("previous_id"):
+                await _raw_db.price_rules.update_one({"id": old["previous_id"]}, {"$set": {"version_to": eff}})
+        await _raw_db.price_rules.update_one({"id": rule_id}, {"$set": upd})
+        return await _raw_db.price_rules.find_one({"id": rule_id}, {"_id": 0})
+    new_id = str(uuid.uuid4())
+    doc = {**old, **clean, "id": new_id, "version_group": old.get("version_group") or old["id"],
+           "previous_id": old["id"], "version_from": eff, "version_to": old.get("version_to"),
+           "created_at": now, "updated_at": now, "updated_by": who}
+    if not doc.get("version_to"):
+        doc.pop("version_to", None)
+    await _raw_db.price_rules.update_one({"id": rule_id}, {"$set": {
+        "version_to": eff, "version_group": doc["version_group"], "replaced_by": new_id}})
+    await _raw_db.price_rules.insert_one(dict(doc))
+    doc.pop("_id", None)
+    return doc
 
 
 @pricing_router.delete("/rules/{rule_id}")
-async def pricing_delete_rule(rule_id: str, payload: dict = Depends(get_current_user_payload)):
+async def pricing_delete_rule(rule_id: str, effective: str = "now", payload: dict = Depends(get_current_user_payload)):
+    """Standard: reglen ophører fra nu (eksisterende ture beholder prisen).
+    effective=all: slettes helt (også for eksisterende ture)."""
     me = await _pricing_caller(payload)
-    res = await _raw_db.price_rules.delete_one({"id": rule_id, "company_id": me["company_id"]})
-    if not res.deleted_count:
+    r = await _raw_db.price_rules.find_one({"id": rule_id, "company_id": me["company_id"]}, {"_id": 0})
+    if not r:
         raise HTTPException(status_code=404, detail="Regel ikke fundet")
-    return {"success": True}
+    eff = _effective_ts(effective)
+    vf = _parse_ts(r.get("version_from") or "")
+    if eff is None or (vf and vf >= _parse_ts(eff)):
+        await _raw_db.price_rules.delete_one({"id": rule_id})
+        return {"success": True, "deleted": True}
+    await _raw_db.price_rules.update_one({"id": rule_id}, {"$set": {"version_to": eff, "retired": True}})
+    return {"success": True, "retired_from": eff}
 
 
 @pricing_router.post("/import-legacy")
@@ -16882,7 +17447,7 @@ async def driver_tour_pricing(ids: str, payload: dict = Depends(require_role("dr
         latest.setdefault(r["tour_id"], r)
     out = {}
     for t in tours:
-        base, _s = _pricing.select_rules(rules, ctx.attrs(t))
+        base, _s = _pricing.select_rules(ctx.rules_for(t), ctx.attrs(t))
         po = t.get("price_override") or {}
         info: Dict[str, Any] = {"model": None}
         if po.get("mode") == "fixed":
