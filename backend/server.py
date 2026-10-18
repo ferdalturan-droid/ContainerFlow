@@ -1461,6 +1461,14 @@ async def get_tours(report_id: Optional[str] = None, plads: Optional[str] = None
     tours = await db.tours.find(query, {"_id": 0, "receipt_image": 0}).to_list(min(limit, 500))
     return tours
 
+def _with_owner(doc: dict, td: dict) -> dict:
+    """Tour-modellen har ikke company_id - uden dette satte TenantAwareDB altid
+    logistikfirmaets id ved insert (også på kundens plads)."""
+    if td.get("company_id"):
+        doc["company_id"] = td["company_id"]
+    return doc
+
+
 def _stamp_logistics_creator(doc: dict, payload: Optional[dict]) -> dict:
     """2026-10-16: Ture som et logistikfirmas admin eller chauffør opretter
     manuelt knyttes til firmaet (assigned_logistics_company_ids), så deres
@@ -1582,6 +1590,18 @@ async def _normalize_tour_doc(td: dict, payload: Optional[dict], profile_cache: 
     if td.get("plads"):
         pl = await _raw_db.plads.find_one({"name": td["plads"]}, {"_id": 0, "company_id": 1})
         customer_site = bool(pl and la and pl.get("company_id") != la)
+        # 2026-10-18 (P0): Ejerskab følger lokationen. En tur på en
+        # genbrugsplads-kundes plads er KUNDENS tur (deres priser, deres arkiv,
+        # koordinator-scope) - uanset om den kom fra bestilling, Excel, Kopiér
+        # eller "Ny tur". Logistikfirmaet står i assigned_logistics_company_ids.
+        if customer_site:
+            owner = await _raw_db.companies.find_one(
+                {"id": pl.get("company_id")}, {"_id": 0, "id": 1, "name": 1, "customer_id": 1, "company_type": 1})
+            if owner and owner.get("company_type") == COMPANY_TYPE_CUSTOMER:
+                td["company_id"] = owner["id"]
+                td["customer_name"] = owner.get("name") or ""
+                td["customer_code"] = owner.get("customer_id") or ""
+                td["private_company"], td["is_private"] = "", False
     kind = td.get("tour_kind") if td.get("tour_kind") in ("container", "goods") else "container"
     if not premium or customer_site:
         kind = "container"
@@ -1646,7 +1666,7 @@ async def create_tour(tour: TourCreate, payload: dict = Depends(get_current_user
             tour_data.get("customer_name") or "",
         )
     tour_obj = Tour(**tour_data)
-    doc = _stamp_logistics_creator(tour_obj.model_dump(), payload)
+    doc = _stamp_logistics_creator(_with_owner(tour_obj.model_dump(), tour_data), payload)
     await db.tours.insert_one(doc)
     _push_later(_push_new_haster([dict(doc)]))
     return tour_obj
@@ -1660,6 +1680,7 @@ async def create_tours_bulk(tours: List[TourCreate], payload: Optional[dict] = D
         if any(t.agreed_price is not None for t in tours):
             await _require_perm(payload, "economy_edit")
         tour_objs = []
+        owners: List[Optional[str]] = []
         agreed: Dict[str, tuple] = {}
         prof_cache: dict = {}
         for t in tours:
@@ -1675,9 +1696,11 @@ async def create_tours_bulk(tours: List[TourCreate], payload: Optional[dict] = D
                     td.get("customer_name") or "",
                 )
             tour_objs.append(Tour(**td))
+            owners.append(td.get("company_id"))
             if ap is not None:
                 agreed[tour_objs[-1].id] = (float(ap), add_wait)
-        docs = [_stamp_logistics_creator(t.model_dump(), payload) for t in tour_objs]
+        docs = [_stamp_logistics_creator(_with_owner(t.model_dump(), {"company_id": o}), payload)
+                for t, o in zip(tour_objs, owners)]
         if agreed:
             who = (payload or {}).get("email") or ""
             now_iso = datetime.now(timezone.utc).isoformat()
@@ -18965,8 +18988,42 @@ async def startup_db_client():
         # Migrate dates to YYYY-MM-DD format
         await migrate_dates()
         await _migrate_haster_from_remark()
+        await _migrate_tour_owner_from_plads()
     except Exception as e:
         logger.warning(f"Startup tasks warning: {e}")
+
+
+async def _migrate_tour_owner_from_plads():
+    """2026-10-18 (P0): Engangsrettelse - ture på en genbrugsplads-kundes plads,
+    som blev gemt med logistikfirmaets id (Ny tur/Kopiér), bliver kundens ture.
+    Fakturerede (price_locked) og slettede ture røres ikke. Logistikfirmaet
+    beholdes i assigned_logistics_company_ids, så det stadig ser turen."""
+    try:
+        customers = {c["id"]: c async for c in _raw_db.companies.find(
+            {"company_type": COMPANY_TYPE_CUSTOMER}, {"_id": 0, "id": 1, "name": 1, "customer_id": 1})}
+        logistics = {c["id"] async for c in _raw_db.companies.find(
+            {"company_type": COMPANY_TYPE_LOGISTICS}, {"_id": 0, "id": 1})}
+        plads_owner = {p["name"]: p.get("company_id") async for p in _raw_db.plads.find(
+            {}, {"_id": 0, "name": 1, "company_id": 1}) if p.get("name")}
+        q = {"price_locked": {"$exists": False}, "deleted": {"$ne": True},
+             "company_id": {"$in": list(logistics)}, "plads": {"$in": list(plads_owner)}}
+        n = 0
+        async for t in _raw_db.tours.find(q, {"_id": 0, "id": 1, "plads": 1, "company_id": 1, "assigned_logistics_company_ids": 1}):
+            owner = customers.get(plads_owner.get(t.get("plads")) or "")
+            if not owner or owner["id"] == t.get("company_id"):
+                continue
+            assigned = list(t.get("assigned_logistics_company_ids") or [])
+            if t["company_id"] not in assigned:
+                assigned.append(t["company_id"])
+            await _raw_db.tours.update_one({"id": t["id"]}, {"$set": {
+                "company_id": owner["id"], "customer_name": owner.get("name") or "",
+                "customer_code": owner.get("customer_id") or "", "assigned_logistics_company_ids": assigned,
+                "customer_ref_id": "", "private_company": "", "is_private": False}})
+            n += 1
+        if n:
+            logger.info(f"Ejerskab fra lokation: {n} ture på kunders pladser blev kundens ture")
+    except Exception as e:
+        logger.warning(f"Ejerskabs-migrering: {e}")
 
 
 async def _migrate_haster_from_remark():

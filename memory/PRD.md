@@ -19,6 +19,12 @@ Data must be strictly isolated per company.
   and `/api/health` bypass tenant filtering so the QR-code customer flow continues to work.
 
 ## What's been implemented (2026-02-15)
+## What's new in 2026-10-18 (P0: ejerskab følger lokationen)
+- **Kundens plads:** "Ny tur" og Kopiér på en genbrugsplads-kundes plads giver nu kundens tur (`company_id`, `customer_name`/`customer_code`). Logistikfirmaet står i `assigned_logistics_company_ids`.
+- **Fejlen:** Tour-modellen manglede `company_id`, så TenantAwareDB satte logistikfirmaets id ved insert (`_with_owner` retter det).
+- **Migrering:** `_migrate_tour_owner_from_plads` ved opstart (springer fakturerede over).
+- **Test:** `backend/tests/e2e/flow_ownership.py`. E2E-testene vælger nu en ledig chauffør (`free_driver`).
+
 ## What's new in 2026-10-18 (Friske øjne: pris, stop, afslutning)
 - **Pris:**
   - "Opret pris" gælder ture uden pris (`backfill_unpriced`), og "ture kørt fra en dato" bruges ved prisstigninger.

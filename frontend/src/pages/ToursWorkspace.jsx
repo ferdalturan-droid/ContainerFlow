@@ -423,7 +423,7 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
           </div>
         )}
         {plads && !plads.own_location && (
-          <p className="text-xs text-slate-500 bg-slate-50 dark:bg-slate-900 rounded-lg px-3 py-2">Containertur for {plads.customer_name || "kunden"} - kunden er givet af pladsen.</p>
+          <p className="text-xs text-slate-500 bg-slate-50 dark:bg-slate-900 rounded-lg px-3 py-2" data-testid="tf-owner-note">Turen bliver {plads.customer_name ? `${plads.customer_name}${/[sxz]$/i.test(plads.customer_name) ? "'" : "s"}` : "kundens"} tur: deres priser gælder, og de kan se den i deres arkiv.</p>
         )}
       </section>
 
@@ -1058,8 +1058,8 @@ const copyBody = (t, date) => ({
   tour_type: t.tour_type || "normal", container: t.container || "", container_type: t.container_type || "",
   capacity_label: t.capacity_label || "", capacity_volume_m3: t.capacity_volume_m3 ?? null,
   open_from: t.open_from || "", open_to: t.open_to || "", priority: t.priority || "normal", remark: t.remark || "",
-  is_private: !!t.is_private, private_company: t.private_company || "", customer_name: t.customer_name || "",
-  customer_code: t.customer_code || "", loose_estimated_count: t.loose_estimated_count || 0,
+  // Ejer (kunde) sendes ikke med: backend afgør den ud fra lokationen (P0).
+  is_private: !!t.is_private, private_company: t.private_company || "", loose_estimated_count: t.loose_estimated_count || 0,
   tour_kind: t.tour_kind || "container", address_parts: t.address_parts || {}, facility_parts: t.facility_parts || {},
   trailer_count: t.trailer_count || 0, cargo_lines: t.cargo_lines || [],
   stops: (t.stops || []).map(({ id, done_at, done_by, receiver_name, issue, added_by_driver, approved, ...rest }) => rest),

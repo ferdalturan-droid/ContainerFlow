@@ -158,6 +158,19 @@ def disable_company_rules(c: "Cleanup", admin_email: str):
     return cid
 
 
+def free_driver(emails: list) -> str:
+    """Første chauffør uden ture i gang (testene må ikke afhænge af andres
+    lokale testdata - fx ture man selv har startet i browseren)."""
+    for e in emails:
+        uid = user_id(e)
+        if uid and not db.tours.count_documents({"claimed_by_id": uid, "on_way": True, "completed": {"$ne": True}}):
+            return e
+    sys.exit(f"Ingen ledig chauffør blandt {emails} - afslut deres ture i gang først")
+
+
+ILK_DRIVERS = [ILK_DRIVER, "ferdalturan+ilk.chauffoer2@gmail.com", "ferdalturan+ilk.chauffoer3@gmail.com"]
+
+
 def new_id() -> str:
     return str(uuid.uuid4())
 

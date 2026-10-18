@@ -6,8 +6,9 @@ from _e2e import *  # noqa: F401,F403
 
 def run():
     c = Cleanup()
-    la, drv = login(ILK_ADMIN), login(ILK_DRIVER)
-    lars_id, lars = user_id(ILK_DRIVER), user_name(ILK_DRIVER)
+    d_email = free_driver(ILK_DRIVERS)
+    la, drv = login(ILK_ADMIN), login(d_email)
+    lars_id, lars = user_id(d_email), user_name(d_email)
     lars_doc = db.users.find_one({"id": lars_id}, {"_id": 0, "active_trailer_id": 1}) or {}
     c.restore.append(("users", {"id": lars_id}, {"active_trailer_id": lars_doc.get("active_trailer_id") or ""}))
     try:

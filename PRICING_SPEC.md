@@ -161,6 +161,9 @@ Ud for hver kunde står, om den følger de generelle priser eller har en egen pr
 - **Prisstatus på Ture-siden** (`GET /api/pricing/status?ids=`): Mangler pris / Faktureret / Rettelse venter, uden beløb og kun med økonomi-adgang. Timeprisede ture, der ikke er kørt endnu, er ikke "Mangler tid".
 - **Kunde fra kunderegistret:** Ny tur gemmer `customer_ref_id`. Prisnøglen tages fra registrets navn, også hvis turens tekst er stavet anderledes. Ligner et nyt navn en eksisterende kunde, foreslås den ("Mente du …?"). Nye navne oprettes i registret, hvis man vil.
 
+## 3g. Hvem er kunden på en tur? (2026-10-18)
+Ejerskab følger lokationen. Tur på en genbrugsplads-kundes plads → kunden er pladsens firma (`company_id`), og kundens prisaftaler gælder. Tur på egen lokation → registerkunden (`firma:<navn>` eller `customer_ref_id`). Ældre manuelle ture på kunders pladser er rettet ved opstart (ikke fakturerede). Se TURE_REDESIGN "Ejerskab følger lokationen".
+
 ## 4. Sider (logistik admin → "Økonomi")
 
 Rapport · Kunder & priser · Prisregler · Godkendelser · Helligdage · Indstillinger

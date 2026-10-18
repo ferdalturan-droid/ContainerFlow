@@ -135,3 +135,12 @@ Begge dele er rettet. Desuden:
 - **Chaufføren ser dagens dato ved login** (før kunne sidste sessions dato blive genskabt dagen efter).
 - **Tests:** `backend/tests/e2e/` (se WORKFLOW.md).
 
+### Ejerskab følger lokationen (2026-10-18, P0)
+- **En tur på en genbrugsplads-kundes plads er kundens tur.** Det gælder uanset om den kom fra bestillingssiden, Excel, Kopiér eller "Ny tur". `company_id` er kundens, `customer_name`/`customer_code` kommer fra kunden, og logistikfirmaet står i `assigned_logistics_company_ids`.
+- **Det betyder:** kundens priser gælder, kunden ser turen i sit arkiv, og en koordinator begrænset til kunden ser den.
+- **En tur på firmaets egen lokation er firmaets egen tur** (registerkunde, `firma:`-nøgle, kunden ser intet).
+- **Før:** "Ny tur" og Kopiér gav logistikfirmaets id. Tour-modellen havde ikke `company_id`, så TenantAwareDB satte firmaets id ved insert. Det gav "Cirklen · Egne ture", kunden både som genbrugsplads-kunde og som "Fra ture" i Kunder & priser, kundens pris der ikke ramte, og koordinator-scope der skjulte turen.
+- **Kopiér** sender ikke længere kundenavnet med; backend afgør ejeren ud fra lokationen.
+- **Engangsrettelse ved opstart** (`_migrate_tour_owner_from_plads`): ikke-fakturerede, ikke-slettede ture på en kundes plads med et logistikfirmas id bliver kundens. Firmaet beholdes som tildelt, og antallet logges.
+- **Undtagelse ("noget på kundens plads, kunden ikke skal se"):** bygges ikke. Brug en egen lokation med samme adresse.
+
