@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import {
   Plus, ChevronLeft, ChevronRight, Search, X, Loader2, MessageSquare, AlertTriangle,
   Clock, MapPin, Truck, User, Flag, MoreHorizontal, Upload, Download, Copy, Trash2,
-  RotateCcw, Edit2, Check, ChevronDown, History, CalendarDays, Package2, Building2, Navigation,
+  RotateCcw, Edit2, Check, ChevronDown, History, CalendarDays, Package2, Building2, Navigation, Users,
 } from "lucide-react";
 import { API, formatApiError } from "../auth/api";
 import { ArchiveTab } from "./LocationAdminPage";
@@ -426,11 +426,12 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
         </div>
         {(!plads || plads.own_location) && (
           <div>
-            <label className={labelCls}>Kunde <span className="normal-case font-normal">(valgfri - bruges til priser i Økonomi)</span></label>
+            <label className={labelCls}>Kunde <span className="normal-case font-normal">(valgfri)</span></label>
             <input className={inputCls} list="tf-customers" value={f.firma} onChange={(e) => { set("firma", e.target.value); setFirmaBlurred(false); }}
               onBlur={() => setFirmaBlurred(true)} placeholder={customers.length ? "Vælg eller skriv en kunde" : "Fx Carlsberg Byen A/S"} data-testid="tf-firma" />
             <datalist id="tf-customers">{customers.map(c => <option key={c.id} value={c.name} />)}</datalist>
-            {regMatch && <p className="text-[11px] text-emerald-700 mt-1">Kunde fra kunderegistret</p>}
+            {!firmaTrim && <p className="text-[11px] text-slate-500 mt-1" data-testid="tf-firma-help">Hvem kører I turen for? Kunden afgør hvilke priser der gælder, og hvem turen står på i Rapport og fakturagrundlaget. Tom = jeres egen tur med jeres generelle priser.</p>}
+            {regMatch && <p className="text-[11px] text-emerald-700 mt-1">Kunde fra kunderegistret - kundens priser gælder</p>}
             {firmaTrim && !regMatch && (
               <div className="mt-1.5 space-y-1.5" data-testid="tf-firma-new">
                 {lookPending && (
@@ -1094,13 +1095,213 @@ const copyBody = (t, date) => ({
   capture: t.capture || {}, customer_ref_id: t.customer_ref_id || "",
 });
 
+// ─────────────────────────── Planlæg (tildeling) ───────────────────────────
+/**
+ * 2026-10-18: Den tidligere "Planlægning › Planlæg ture" - nu i Ture.
+ * Venstre: ikke-tildelte ture (vælg én eller flere). Højre: chaufførerne med
+ * dagens belastning - klik på en chauffør for at give dem de valgte ture.
+ * Nederst: tildelte ture pr. chauffør (frigiv, eller åbn turen).
+ * Samme dato, filtre, tur-panel og tildelings-endpoint som resten af Ture.
+ */
+function PlanBoard({ tours, drivers, canAssign, selected, setSelected, onAssign, onOpen, onReactivate, priceStatus, devs, ownName }) {
+  const [collapsed, setCollapsed] = useState(new Set());
+  const [search, setSearch] = useState("");
+  const blocked = tours.filter(t => t.not_completed && !t.completed);
+  const unassigned = tours.filter(t => !t.completed && !t.not_completed && !assigneeName(t) && (t.tour_type || "") !== "estimat")
+    .sort((a, b) => (isHaster(b) - isHaster(a)) || String(a.open_from || "99").localeCompare(String(b.open_from || "99")) || String(a.created_at || "").localeCompare(String(b.created_at || "")));
+  const ids = new Set(unassigned.map(t => t.id));
+  const sel = [...selected].filter(id => ids.has(id));
+  const byDriver = drivers.map(d => {
+    // Den der har taget turen kører den - ellers den den er tildelt.
+    const holder = (t) => t.claimed_by_id || (t.claimed_by ? `name:${t.claimed_by}` : "") || t.driver_id || "";
+    const mine = tours.filter(t => !t.not_completed && (holder(t) === d.id || holder(t) === `name:${d.name}`));
+    return { d, mine, active: mine.filter(t => !t.completed), onWay: mine.filter(t => t.on_way && !t.completed).length, done: mine.filter(t => t.completed).length };
+  });
+  const needle = search.trim().toLowerCase();
+  const toggle = (id) => setSelected(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const allSel = unassigned.length > 0 && sel.length === unassigned.length;
+  const giveTo = async (d) => {
+    if (!sel.length) return;
+    await onAssign(sel, d.id);
+    setSelected(new Set());
+  };
+  const chips = (t) => (
+    <>
+      {isHaster(t) && <span className="px-1.5 py-0.5 rounded bg-rose-600 text-white text-[10px] font-bold uppercase">Haster</span>}
+      {t.tour_type && t.tour_type !== "normal" && <span className="text-[11px] font-semibold text-violet-700 dark:text-violet-300 bg-violet-50 dark:bg-violet-950/40 px-1.5 py-0.5 rounded">{TOUR_TYPE_LABEL[t.tour_type] || t.tour_type}</span>}
+      {priceStatus[t.id]?.status === "missing" && <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300" title={priceStatus[t.id].why || ""}>{priceStatus[t.id].label}</span>}
+      {devs(t).length > 0 && <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-100 text-amber-800" title={devs(t).join(" · ")}>Afvigelse</span>}
+    </>
+  );
+  const where = (t) => `${t.address || "Ingen adresse"}${t.facility && t.facility !== t.plads && t.facility !== t.address ? ` → ${t.facility}` : ""}`;
+
+  return (
+    <div className="space-y-3" data-testid="plan-board">
+      {canAssign && sel.length > 0 && (
+        <div className="sticky top-2 z-20 rounded-2xl bg-slate-900 text-white shadow-xl p-2.5 flex flex-wrap items-center gap-2" data-testid="plan-selbar">
+          <span className="text-sm font-semibold px-2">{sel.length} tur{sel.length === 1 ? "" : "e"} valgt</span>
+          <span className="text-sm text-white/70 hidden lg:inline">· klik på en chauffør til højre</span>
+          <div className="w-48 lg:hidden"><DriverSelect value="" drivers={drivers} compact onChange={(v) => { const d = drivers.find(x => x.id === v); if (d) giveTo(d); }} testid="plan-driver-select" /></div>
+          <div className="flex-1" />
+          <button onClick={() => setSelected(new Set())} className="px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-sm font-semibold">Ryd valg</button>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_320px] gap-3 items-start">
+        <section className={`${card} overflow-hidden`} data-testid="plan-unassigned">
+          {blocked.length > 0 && (
+            <div className="border-b border-rose-200 dark:border-rose-900 bg-rose-50/60 dark:bg-rose-950/20">
+              <div className="px-4 py-2.5 text-sm font-bold text-rose-700 dark:text-rose-300 flex items-center gap-2"><AlertTriangle className="w-4 h-4" /> Kan ikke gennemføres ({blocked.length})</div>
+              <ul className="divide-y divide-rose-100 dark:divide-rose-900/50">
+                {blocked.map(t => (
+                  <li key={t.id} className="px-4 py-2.5 flex items-start gap-3">
+                    <button type="button" className="min-w-0 flex-1 text-left" onClick={() => onOpen(t.id)}>
+                      <div className="text-sm font-semibold text-slate-900 dark:text-white">{t.fraction || "Tur"} <span className="font-normal text-slate-500">· {customerOf(t, ownName)}</span></div>
+                      <div className="text-xs text-slate-600 dark:text-slate-300 truncate">{where(t)}</div>
+                      <div className="text-xs italic text-rose-700 dark:text-rose-300">{t.not_completed_by_name || "Chaufføren"}: {t.not_completed_comment}</div>
+                    </button>
+                    {canAssign && <button className="shrink-0 px-2.5 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-bold inline-flex items-center gap-1" onClick={() => onReactivate(t)}><RotateCcw className="w-3.5 h-3.5" /> Genaktivér</button>}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-700 flex items-center gap-2">
+            {canAssign && unassigned.length > 0 && <input type="checkbox" className="w-4 h-4 accent-emerald-600" checked={allSel} aria-label="Vælg alle synlige"
+              onChange={() => setSelected(allSel ? new Set() : new Set(unassigned.map(t => t.id)))} data-testid="plan-select-all" />}
+            <h3 className="font-bold text-sm text-slate-900 dark:text-white">Ikke tildelt ({unassigned.length})</h3>
+            {canAssign && unassigned.length > 0 && <span className="text-xs text-slate-500">Vælg ture, og klik på en chauffør</span>}
+          </div>
+          {unassigned.length === 0 ? (
+            <div className="p-8 text-center text-sm text-slate-500"><div className="font-semibold text-slate-700 dark:text-slate-200">Alle ture er tildelt</div>Nye ture og bestillinger dukker op her.</div>
+          ) : (
+            <ul className="divide-y divide-slate-100 dark:divide-slate-700/70 max-h-[62vh] overflow-y-auto">
+              {unassigned.map(t => {
+                const on = selected.has(t.id);
+                const oh = openHours(t);
+                return (
+                  <li key={t.id} className={`px-4 py-3 flex items-start gap-3 ${on ? "bg-emerald-50/70 dark:bg-emerald-950/20" : "hover:bg-slate-50 dark:hover:bg-slate-700/30"} ${canAssign ? "cursor-pointer" : ""}`}
+                    onClick={() => canAssign && toggle(t.id)} data-testid={`plan-unassigned-${t.id}`}>
+                    {canAssign && <input type="checkbox" className="mt-1 w-4 h-4 accent-emerald-600" checked={on} onChange={() => toggle(t.id)} onClick={(e) => e.stopPropagation()} aria-label="Vælg tur" />}
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        {t.tour_number && <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900">{t.tour_number}</span>}
+                        <span className="font-semibold text-slate-900 dark:text-white">{t.fraction || "—"}</span>
+                        {chips(t)}
+                        <span className="text-[11px] text-slate-500 bg-slate-100 dark:bg-slate-700 dark:text-slate-300 px-1.5 py-0.5 rounded">{customerOf(t, ownName)}</span>
+                      </div>
+                      <div className="text-sm text-slate-600 dark:text-slate-300 truncate">{where(t)}</div>
+                      <div className="text-[11px] text-slate-500 flex flex-wrap gap-x-3">
+                        <span>{t.plads}</span>
+                        {oh.from && <span className="inline-flex items-center gap-1"><Clock className="w-3 h-3" />{oh.from}–{oh.to}</span>}
+                        {stopsOf(t).length > 0 && <span>{stopsOf(t).length} stop</span>}
+                        {t.container && <span>#{t.container}</span>}
+                      </div>
+                    </div>
+                    <button type="button" className="shrink-0 p-2 rounded-lg text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700" title="Åbn turen"
+                      onClick={(e) => { e.stopPropagation(); onOpen(t.id); }}><ChevronRight className="w-4 h-4" /></button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
+
+        <section className={`${card} overflow-hidden lg:sticky lg:top-2`} data-testid="plan-drivers">
+          <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-700">
+            <h3 className="font-bold text-sm text-slate-900 dark:text-white">Chauffører</h3>
+            <p className="text-[11px] text-slate-500">{canAssign ? (sel.length ? `Klik for at give ${sel.length} tur${sel.length === 1 ? "" : "e"}` : "Vælg en eller flere ture først") : "Kun visning"}</p>
+          </div>
+          {drivers.length === 0 ? <p className="p-6 text-sm text-slate-500 text-center">Ingen chauffører oprettet endnu.</p> : (
+            <ul className="divide-y divide-slate-100 dark:divide-slate-700/70 max-h-[62vh] overflow-y-auto">
+              {byDriver.map(({ d, active, onWay, done }) => {
+                const ready = canAssign && sel.length > 0;
+                return (
+                  <li key={d.id}>
+                    <button type="button" disabled={!ready} onClick={() => giveTo(d)} data-testid={`plan-driver-${d.id}`}
+                      className={`w-full text-left px-4 py-3 flex items-center gap-3 ${ready ? "hover:bg-emerald-50 dark:hover:bg-emerald-950/30 cursor-pointer" : "cursor-default"}`}>
+                      <span className="w-8 h-8 rounded-full bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-200 text-xs font-bold flex items-center justify-center shrink-0">{(d.name || "?").split(" ").map(x => x[0]).join("").slice(0, 2).toUpperCase()}</span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block font-semibold text-sm text-slate-900 dark:text-white truncate">{d.name}</span>
+                        <span className="block text-[11px] text-slate-500">{active.length} at køre{onWay ? ` · ${onWay} på vej` : ""}{done ? ` · ${done} færdig${done === 1 ? "" : "e"}` : ""}</span>
+                      </span>
+                      {ready && <span className="shrink-0 text-xs font-bold text-emerald-700 dark:text-emerald-300">Giv {sel.length} →</span>}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
+      </div>
+
+      <section className={`${card} overflow-hidden`} data-testid="plan-assigned">
+        <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-700 flex flex-wrap items-center gap-2">
+          <h3 className="font-bold text-sm text-slate-900 dark:text-white mr-auto">Tildelte ture pr. chauffør</h3>
+          <div className="relative w-full sm:w-64">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Søg i tildelte ture" className={`${inputCls} pl-9`} />
+          </div>
+          <button className={btnGhost} onClick={() => setCollapsed(new Set())}>Fold alle ud</button>
+          <button className={btnGhost} onClick={() => setCollapsed(new Set(drivers.map(d => d.id)))}>Fold alle sammen</button>
+        </div>
+        {byDriver.filter(x => x.mine.length).length === 0 ? (
+          <p className="p-6 text-sm text-slate-500 text-center">Ingen ture er tildelt denne dag endnu.</p>
+        ) : byDriver.filter(x => x.mine.length).map(({ d, mine, active, done }) => {
+          const list = mine.filter(t => !needle || [t.fraction, t.address, t.facility, t.plads, t.tour_number, customerOf(t, ownName)].join(" ").toLowerCase().includes(needle))
+            .sort((a, b) => (a.completed - b.completed) || (isHaster(b) - isHaster(a)) || String(a.open_from || "99").localeCompare(String(b.open_from || "99")));
+          if (!list.length) return null;
+          const col = collapsed.has(d.id);
+          return (
+            <div key={d.id} className="border-b border-slate-100 dark:border-slate-700 last:border-0" data-testid={`plan-assigned-${d.id}`}>
+              <button type="button" className="w-full px-4 py-2.5 flex items-center gap-2 text-left hover:bg-slate-50 dark:hover:bg-slate-700/30"
+                onClick={() => setCollapsed(prev => { const n = new Set(prev); n.has(d.id) ? n.delete(d.id) : n.add(d.id); return n; })}>
+                <User className="w-4 h-4 text-slate-400" />
+                <span className="font-semibold text-sm text-slate-900 dark:text-white">{d.name}</span>
+                <span className="text-xs text-slate-500">{active.length} at køre · {done} færdig{done === 1 ? "" : "e"}</span>
+                <ChevronDown className={`ml-auto w-4 h-4 text-slate-400 transition-transform ${col ? "-rotate-90" : ""}`} />
+              </button>
+              {!col && (
+                <div className="px-4 pb-3 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
+                  {list.map(t => {
+                    const st = tourStatus(t);
+                    const canRelease = canAssign && !t.on_way && !t.completed;
+                    return (
+                      <div key={t.id} className={`rounded-xl border border-slate-200 dark:border-slate-700 p-2.5 ${t.completed ? "opacity-70" : ""}`} data-testid={`plan-assigned-tour-${t.id}`}>
+                        <button type="button" className="w-full text-left" onClick={() => onOpen(t.id)}>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className={`px-1.5 py-0.5 rounded border text-[10px] font-semibold ${st.chip}`}>{st.label}{t.on_way_time && !t.completed ? ` ${t.on_way_time}` : ""}</span>
+                            <span className="font-semibold text-sm text-slate-900 dark:text-white truncate">{t.fraction || "—"}</span>
+                            {chips(t)}
+                          </div>
+                          <div className="text-xs text-slate-600 dark:text-slate-300 truncate mt-0.5">{where(t)}</div>
+                          <div className="text-[11px] text-slate-500 truncate">{t.plads} · {customerOf(t, ownName)}</div>
+                        </button>
+                        {canRelease && <button type="button" className="mt-1.5 text-xs font-semibold text-slate-500 hover:text-rose-600 underline" onClick={() => onAssign([t.id], "")} data-testid={`plan-release-${t.id}`}>Frigiv</button>}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </section>
+    </div>
+  );
+}
+
 // ─────────────────────────── Arbejdsfladen ───────────────────────────
 
 export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord = "Lokation", perms = {}, profile = null }) {
   // 2026-10-17: Koordinator-rettigheder - mangler en nøgle, er den tilladt.
   const can = useCallback((k) => perms[k] !== false, [perms]);
   const canSelect = can("tours_assign") || can("tours_edit") || can("tours_delete");
-  const [view, setView] = useState("day"); // day | history
+  // 2026-10-18: "Planlæg" = den tidligere Planlægning › Planlæg ture (ikke-
+  // tildelte ture → chauffører → tildelte pr. chauffør), nu inde i Ture med
+  // samme dato, filtre og tur-panel. Det er det ENE sted man tildeler ture;
+  // Dagsplan viser hvem der kører.
+  const [view, setView] = useState("day"); // day | plan | history
   const [date, setDate] = useState(todayStr());
   const [tours, setTours] = useState(null);
   const [overdue, setOverdue] = useState([]);
@@ -1117,10 +1318,6 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
   const [priceStatus, setPriceStatus] = useState({});
   const [attnFilter, setAttnFilter] = useState(""); // "" | "price" | "deviation"
   const devs = useCallback((t) => deviationsOf(t, { hourly: priceStatus[t.id]?.hourly }), [priceStatus]);
-  // 2026-10-18 (P1): Ture grupperes pr. lokation eller pr. chauffør (erstatter
-  // "Planlægning › Planlæg ture" - samme dato, filtre, rækker og panel).
-  const [groupBy, setGroupByState] = useState(() => { try { return localStorage.getItem("cf_tours_group_by") === "driver" ? "driver" : "plads"; } catch (_) { return "plads"; } });
-  const setGroupBy = (v) => { setGroupByState(v); try { localStorage.setItem("cf_tours_group_by", v); } catch (_) { /* ignore */ } };
   const [showOverdue, setShowOverdue] = useState(false);
   const [selected, setSelected] = useState(new Set());
   const [collapsed, setCollapsed] = useState({});
@@ -1229,15 +1426,17 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
   const customers = useMemo(() => Array.from(new Set(source.map(t => customerOf(t, ownName)))).sort(), [source, ownName]);
   const pladsNames = useMemo(() => Array.from(new Set(source.map(t => t.plads || "Uden lokation"))).sort(), [source]);
 
-  const filtered = useMemo(() => {
+  // Planlæg bruger de samme filtre - undtagen status-faner og chauffør
+  // (der vises både ikke-tildelte og alle chauffører).
+  const matches = useCallback((t, forPlan) => {
     const needle = q.trim().toLowerCase();
-    return source.filter(t => {
-      if (status !== "all" && tourStatus(t).id !== status) return false;
+    {
+      if (!forPlan && status !== "all" && tourStatus(t).id !== status) return false;
       if (onlyHaster && !isHaster(t)) return false;
       if (fPlads && (t.plads || "Uden lokation") !== fPlads) return false;
       if (fCustomer && customerOf(t, ownName) !== fCustomer) return false;
-      if (fDriver === "__none" && assigneeName(t)) return false;
-      if (fDriver && fDriver !== "__none" && t.driver_id !== fDriver && t.claimed_by_id !== fDriver) return false;
+      if (!forPlan && fDriver === "__none" && assigneeName(t)) return false;
+      if (!forPlan && fDriver && fDriver !== "__none" && t.driver_id !== fDriver && t.claimed_by_id !== fDriver) return false;
       if (fSource && (t.source || "manual") !== fSource) return false;
       if (attnFilter === "price" && priceStatus[t.id]?.status !== "missing") return false;
       if (attnFilter === "deviation" && !devs(t).length) return false;
@@ -1246,31 +1445,30 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
         if (!hay.includes(needle)) return false;
       }
       return true;
-    });
-  }, [source, status, onlyHaster, fPlads, fCustomer, fDriver, fSource, q, ownName, attnFilter, priceStatus, devs]);
+    }
+  }, [status, onlyHaster, fPlads, fCustomer, fDriver, fSource, q, ownName, attnFilter, priceStatus, devs]);
+  const filtered = useMemo(() => source.filter(t => matches(t, false)), [source, matches]);
+  const planList = useMemo(() => (tours || []).filter(t => !t.is_pause && matches(t, true)), [tours, matches]);
 
-  const NO_DRIVER = "Uden chauffør";
   const groups = useMemo(() => {
     const rank = (t) => (t.not_completed ? 0 : t.completed ? 4 : t.on_way ? 2 : assigneeName(t) ? 3 : 1);
     const m = new Map();
     filtered.forEach(t => {
-      const k = groupBy === "driver" ? (assigneeName(t) || NO_DRIVER) : (t.plads || "Uden lokation");
+      const k = t.plads || "Uden lokation";
       if (!m.has(k)) m.set(k, []);
       m.get(k).push(t);
     });
-    const order = (a, b) => (groupBy === "driver" ? ((b[0] === NO_DRIVER) - (a[0] === NO_DRIVER)) : 0) || a[0].localeCompare(b[0], "da");
+    const order = (a, b) => a[0].localeCompare(b[0], "da");
     return Array.from(m.entries()).sort(order).map(([name, list]) => {
       // Kunderne i gruppen (en egen lokation kan have flere kunder).
       const custs = Array.from(new Set(list.map(t => customerOf(t, ownName))));
-      const places = Array.from(new Set(list.map(t => t.plads || "Uden lokation")));
       return {
         name,
-        customer: groupBy === "driver" ? places.slice(0, 2).join(", ") + (places.length > 2 ? ` +${places.length - 2}` : "")
-          : custs.slice(0, 2).join(", ") + (custs.length > 2 ? ` +${custs.length - 2}` : ""),
+        customer: custs.slice(0, 2).join(", ") + (custs.length > 2 ? ` +${custs.length - 2}` : ""),
         list: list.sort((a, b) => (isHaster(b) - isHaster(a)) || (rank(a) - rank(b)) || String(a.open_from || "99").localeCompare(String(b.open_from || "99")) || ((a.sort_order || 0) - (b.sort_order || 0))),
       };
     });
-  }, [filtered, ownName, groupBy]);
+  }, [filtered, ownName]);
 
   const unreadTotal = Object.values(unread).reduce((s, n) => s + n, 0);
   const hasterOpen = (tours || []).filter(t => isHaster(t) && !t.completed && !assigneeName(t) && !t.not_completed);
@@ -1303,6 +1501,13 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
     } catch (e) { toast.error(formatApiError(e)); }
   };
 
+  const reactivateTour = (t) => setConfirm({
+    title: "Genaktivér turen?", text: `${t.fraction || "Turen"} · ${t.address || ""} bliver synlig igen for chaufførerne.`, okLabel: "Genaktivér",
+    onOk: async () => {
+      try { await axios.post(`${API}/tours/${t.id}/reactivate`, { comment: "Genaktiveret fra Planlæg" }); toast.success("Turen er åben igen"); refresh(); }
+      catch (e) { toast.error(formatApiError(e)); }
+    },
+  });
   const selectedTours = source.filter(t => selected.has(t.id));
   const toggleSel = (id) => setSelected(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const clearSel = () => setSelected(new Set());
@@ -1378,14 +1583,14 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
       {/* Topbar */}
       <div className="flex flex-wrap items-center gap-2 sm:gap-3">
         <div className="inline-flex rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 p-1">
-          {[["day", "Dagsplan", CalendarDays], ["history", "Historik", History]].map(([id, l, Icon]) => (
+          {[["day", "Dagsplan", CalendarDays], ["plan", "Planlæg", Users], ["history", "Historik", History]].map(([id, l, Icon]) => (
             <button key={id} onClick={() => setView(id)} data-testid={`tours-view-${id}`}
               className={`px-2.5 sm:px-3 py-1.5 rounded-lg text-sm font-semibold inline-flex items-center gap-1.5 ${view === id ? "bg-emerald-600 text-white" : "text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700"}`}>
               <Icon className="w-4 h-4 hidden sm:block" /> {l}
             </button>
           ))}
         </div>
-        {view === "day" && (
+        {view !== "history" && (
           <>
             <div className="order-last sm:order-none w-full sm:w-auto flex sm:inline-flex items-center rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
               <button onClick={() => { setShowOverdue(false); setDate(addDays(date, -1)); }} className="p-2 hover:bg-slate-50 dark:hover:bg-slate-700 rounded-l-xl" aria-label="Forrige dag"><ChevronLeft className="w-4 h-4" /></button>
@@ -1399,7 +1604,7 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
           </>
         )}
         <div className="flex-1" />
-        {view === "day" && updatedAt && (
+        {view !== "history" && updatedAt && (
           <span className="hidden md:inline-flex items-center gap-1.5 text-[11px] text-slate-400" title="Opdateres automatisk hvert 10. sekund">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" /> Live · {updatedAt.toLocaleTimeString("da-DK", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
           </span>
@@ -1450,7 +1655,7 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
                 </button>
               )}
               {overdue.length > 0 && (
-                <button onClick={() => { setShowOverdue(true); setStatus("all"); }} className="text-left rounded-xl border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/30 px-3 py-2.5 flex items-center gap-2.5" data-testid="tours-overdue-btn">
+                <button onClick={() => { setShowOverdue(true); setStatus("all"); setView("day"); }} className="text-left rounded-xl border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/30 px-3 py-2.5 flex items-center gap-2.5" data-testid="tours-overdue-btn">
                   <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" /><span className="text-sm text-amber-900 dark:text-amber-200"><b>{overdue.length}</b> fra tidligere dage ikke kørt</span>
                 </button>
               )}
@@ -1479,8 +1684,8 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
             </div>
           )}
 
-          {/* Status-faner */}
-          <div className="flex gap-1.5 overflow-x-auto pb-1 -mx-1 px-1 scrollbar-none">
+          {/* Status-faner (kun Dagsplan - Planlæg viser altid ikke-tildelte + chauffører) */}
+          {view === "day" && <div className="flex gap-1.5 overflow-x-auto pb-1 -mx-1 px-1 scrollbar-none">
             {STATUS_FILTERS.filter(s => s.id !== "blocked" || counts.blocked > 0).map(s => (
               <button key={s.id} onClick={() => setStatus(s.id)} data-testid={`tours-status-${s.id}`}
                 className={`shrink-0 px-3 py-2 rounded-xl text-sm font-semibold border inline-flex items-center gap-2 ${status === s.id
@@ -1494,13 +1699,7 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
               className={`shrink-0 px-3 py-2 rounded-xl text-sm font-semibold border inline-flex items-center gap-2 ${onlyHaster ? "bg-rose-600 text-white border-rose-600" : "bg-white dark:bg-slate-800 text-rose-600 border-rose-200 dark:border-rose-900"}`}>
               <Flag className="w-3.5 h-3.5" /> Haster <span className="text-xs tabular-nums">{counts.haster}</span>
             </button>
-            <div className="ml-auto shrink-0 inline-flex p-0.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800" role="tablist" aria-label="Gruppér ture" data-testid="tours-group-by">
-              {[["plads", "Pr. lokation"], ["driver", "Pr. chauffør"]].map(([v, l]) => (
-                <button key={v} type="button" role="tab" aria-selected={groupBy === v} onClick={() => setGroupBy(v)} data-testid={`tours-group-by-${v}`}
-                  className={`px-3 py-1.5 rounded-lg text-sm font-semibold ${groupBy === v ? "bg-slate-900 text-white dark:bg-white dark:text-slate-900" : "text-slate-600 dark:text-slate-300"}`}>{l}</button>
-              ))}
-            </div>
-          </div>
+          </div>}
 
           {/* Filtre */}
           <div className={`${card} p-2.5 sm:p-3 flex flex-col lg:flex-row gap-2`}>
@@ -1522,11 +1721,11 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
                 <option value="">Alle kunder</option>
                 {customers.map(n => <option key={n} value={n}>{n}</option>)}
               </select>
-              <select className={inputCls} value={fDriver} onChange={(e) => setFDriver(e.target.value)} aria-label="Chauffør">
+              {view === "day" && <select className={inputCls} value={fDriver} onChange={(e) => setFDriver(e.target.value)} aria-label="Chauffør">
                 <option value="">Alle chauffører</option>
                 <option value="__none">Uden chauffør</option>
                 {drivers.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
-              </select>
+              </select>}
               <select className={inputCls} value={fSource} onChange={(e) => setFSource(e.target.value)} aria-label="Kilde">
                 <option value="">Alle kilder</option>
                 {Object.entries(SOURCE_LABEL).map(([id, l]) => <option key={id} value={id}>{l}</option>)}
@@ -1536,10 +1735,10 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
           </div>
 
           {/* Masse-handlinger */}
-          {selected.size > 0 && (
+          {view === "day" && selected.size > 0 && (
             <div className="sticky top-2 z-20 rounded-2xl bg-slate-900 text-white shadow-xl p-2.5 flex flex-wrap items-center gap-2" data-testid="tours-bulkbar">
               <span className="text-sm font-semibold px-2">{selected.size} valgt</span>
-              {can("tours_assign") && <div className="w-44"><DriverSelect value="" drivers={drivers} load={load} compact onChange={(v) => { if (v) { assign([...selected], v); clearSel(); } }} testid="bulk-driver" /></div>}
+              {can("tours_assign") && view === "day" && <button onClick={() => setView("plan")} className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-sm font-semibold" data-testid="bulk-plan">Tildel i Planlæg →</button>}
               {can("tours_edit") && <>
               <button onClick={() => bulkPriority("urgent")} className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-sm font-semibold">Haster</button>
               <button onClick={() => bulkPriority("normal")} className="px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-sm font-semibold">Normal</button>
@@ -1555,8 +1754,16 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
             </div>
           )}
 
+          {/* Planlæg: tildeling (samme data, filtre og panel) */}
+          {view === "plan" ? (tours === null ? (
+            <div className={`${card} p-10 flex items-center justify-center text-slate-400`}><Loader2 className="w-5 h-5 animate-spin" /></div>
+          ) : (
+            <PlanBoard tours={planList} drivers={drivers} canAssign={can("tours_assign")} selected={selected} setSelected={setSelected}
+              onAssign={assign} onOpen={setOpenId} onReactivate={reactivateTour} priceStatus={priceStatus} devs={devs} ownName={ownName} />
+          )) : null}
+
           {/* Listen */}
-          {tours === null ? (
+          {view !== "day" ? null : tours === null ? (
             <div className={`${card} p-10 flex items-center justify-center text-slate-400`}><Loader2 className="w-5 h-5 animate-spin" /></div>
           ) : groups.length === 0 ? (
             <div className={`${card} p-10 text-center`}>
@@ -1567,7 +1774,7 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
           ) : (
             <div className="space-y-3">
               {groups.map(g => {
-                const colKey = `${groupBy}:${g.name}`;
+                const colKey = g.name;
                 const isCol = !!collapsed[colKey];
                 const done = g.list.filter(t => t.completed).length;
                 const allSel = g.list.every(t => selected.has(t.id));
@@ -1577,7 +1784,7 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
                       {canSelect && <input type="checkbox" className="w-4 h-4 accent-emerald-600" checked={allSel} aria-label="Vælg alle i gruppen"
                         onChange={() => setSelected(prev => { const n = new Set(prev); g.list.forEach(t => allSel ? n.delete(t.id) : n.add(t.id)); return n; })} />}
                       <button onClick={() => setCollapsed(c => ({ ...c, [colKey]: !isCol }))} className="flex-1 min-w-0 flex items-center gap-2 text-left">
-                        {groupBy === "driver" ? <User className={`w-4 h-4 shrink-0 ${g.name === NO_DRIVER ? "text-amber-500" : "text-slate-400"}`} /> : <Building2 className="w-4 h-4 text-slate-400 shrink-0" />}
+                        <Building2 className="w-4 h-4 text-slate-400 shrink-0" />
                         <span className="font-semibold text-slate-900 dark:text-white truncate">{g.name}</span>
                         <span className="text-xs text-slate-400 truncate hidden sm:inline">· {g.customer}</span>
                         <span className="ml-auto text-xs text-slate-500 tabular-nums shrink-0">{done}/{g.list.length} færdig</span>
@@ -1617,7 +1824,6 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
                                   {devs(t).length > 0 && <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200" title={devs(t).join(" · ")} data-testid={`row-deviation-${t.id}`}>Afvigelse</span>}
                                 </div>
                                 <div className="text-sm text-slate-600 dark:text-slate-300 truncate">{t.address || "Ingen adresse"}{t.facility && t.facility !== t.plads && t.facility !== t.address ? <span className="text-slate-400"> → {t.facility}</span> : null}</div>
-                                {groupBy === "driver" && <div className="text-[11px] text-slate-400 truncate inline-flex items-center gap-1"><Building2 className="w-3 h-3" />{t.plads || "Uden lokation"} · {customerOf(t, ownName)}</div>}
                                 {stopsOf(t).length > 0 && <div className="text-[11px] font-semibold text-slate-500">{stopsOf(t).length} stop · {stopsDone(t)} udført</div>}
                                 <div className="md:hidden mt-1 flex items-center gap-3 text-[11px] text-slate-500">
                                   {oh.from && <span className="inline-flex items-center gap-1"><Clock className="w-3 h-3" />{oh.from}–{oh.to}</span>}
@@ -1633,11 +1839,13 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
                                 </div>
                               </div>
                               <div className="col-span-2 col-start-2 md:col-span-1 md:col-start-auto" onClick={(e) => e.stopPropagation()}>
-                                {lockedRow || !can("tours_assign") ? (
-                                  <div className="text-sm text-slate-700 dark:text-slate-200 truncate px-1 inline-flex items-center gap-1.5"><User className="w-3.5 h-3.5 text-slate-400" />{assigneeName(t) || "—"}</div>
-                                ) : (
-                                  <DriverSelect value={t.driver_id} drivers={drivers} load={load} compact onChange={(v) => assign([t.id], v)} testid={`row-driver-${t.id}`} />
-                                )}
+                                {assigneeName(t) ? (
+                                  <div className="text-sm text-slate-700 dark:text-slate-200 truncate px-1 inline-flex items-center gap-1.5"><User className="w-3.5 h-3.5 text-slate-400" />{assigneeName(t)}</div>
+                                ) : !t.completed && !t.not_completed && can("tours_assign") ? (
+                                  <button type="button" onClick={() => { setSelected(new Set([t.id])); setView("plan"); }} data-testid={`row-plan-${t.id}`}
+                                    className="text-sm font-semibold text-amber-700 dark:text-amber-300 px-1 inline-flex items-center gap-1.5 hover:underline">
+                                    <User className="w-3.5 h-3.5" /> Ikke tildelt · Planlæg →</button>
+                                ) : <div className="text-sm text-slate-400 px-1">—</div>}
                               </div>
                               <div className="row-start-1 col-start-3 md:row-start-auto md:col-start-auto flex items-center gap-1 self-start md:self-center">
                                 <button onClick={(e) => { e.stopPropagation(); setOpenId(t.id); }} title="Beskeder"

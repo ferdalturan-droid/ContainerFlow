@@ -162,3 +162,14 @@ Begge dele er rettet. Desuden:
 - **Ingen "A → A" (P3):** pilen vises ikke, når aflevering = afhentning.
 - **Ingen økonomi-ret (P4):** panelet siger "Bed din administrator om at oprette prisen".
 
+### Planlæg: ét sted at tildele ture (2026-10-18)
+- **Ture har tre visninger: Dagsplan · Planlæg · Historik** med samme dato, filtre og tur-panel.
+- **Planlæg** er den tidligere "Planlægning › Planlæg ture" og har tre zoner:
+  - ikke-tildelte ture med afkrydsning og "Kan ikke gennemføres" med Genaktivér;
+  - chaufførerne med dagens belastning ("2 at køre · 1 på vej"), hvor et klik giver dem de valgte ture;
+  - tildelte ture pr. chauffør med søgning, fold ud/sammen og "Frigiv".
+- **Det er det eneste sted, man planlægger og tildeler.** Dagsplan viser, hvem der kører. Ikke-tildelte ture har "Planlæg →", og markeringslinjen har "Tildel i Planlæg →". Dropdownen i rækkerne og "Pr. chauffør" er fjernet.
+- **Tur-panelet beholder chaufførvalget** for den enkelte tur.
+- **En tur, der er tildelt én chauffør men taget af en anden,** tælles hos den, der har taget den.
+- **Ny tur › Kunde** forklarer feltet: hvem man kører for, hvilke priser der gælder, og at tomt felt = egen tur med generelle priser.
+

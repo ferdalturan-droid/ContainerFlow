@@ -19,6 +19,10 @@ Data must be strictly isolated per company.
   and `/api/health` bypass tenant filtering so the QR-code customer flow continues to work.
 
 ## What's been implemented (2026-02-15)
+## What's new in 2026-10-18 (Planlæg i Ture)
+- "Planlæg" er genskabt som visning i Ture: ikke-tildelte → chauffører → tildelte pr. chauffør. Det er det eneste sted, man tildeler; rækkens dropdown og "Pr. chauffør" er fjernet.
+- Kundefeltet i Ny tur er forklaret.
+
 ## What's new in 2026-10-18 (Chauffør, Ny tur og Økonomi: finpudsning)
 - **Chauffør:**
   - Næste stop på kortet (P6).
