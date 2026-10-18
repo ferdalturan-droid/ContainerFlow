@@ -7812,12 +7812,12 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
             can.drivers      && { id: "drivers",    label: "Chauffører",    icon: Users },
             can.reports      && { id: "statistics", label: "Rapportering",  icon: BarChart3,  testid: "admin-statistics-tab" },
             can.economy_view && { id: "priser",     label: "Økonomi",       icon: DollarSign },
+            can.archive      && { id: "archives",   label: "Arkiv",         icon: Archive,    testid: "admin-archives-tab" },
           ].filter(Boolean)}
           moreTabs={[
             can.locations && (isPremiumLogistics
               ? { id: "plads",  label: "Lokationer",    icon: MapPin }
               : { id: "plads",  label: "Genbrugspladser", icon: Building2 }),
-            can.archive  && { id: "archives",   label: "Arkiv",         icon: Archive,    testid: "admin-archives-tab", hint: "PDF og kvitteringer" },
             can.team     && { id: "team",       label: "Team & rettigheder", icon: Shield, testid: "admin-tab-team" },
             can.settings && { id: "settings",   label: "Indstillinger", icon: Settings,   testid: "admin-settings-tab" },
           ].filter(Boolean)}

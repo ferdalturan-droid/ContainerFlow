@@ -1850,17 +1850,31 @@ async def bulk_assign_tours(
         "assigned_by_name": assigner_name,
         "assigned_at": now_iso,
     }
-    ops = [UpdateOne({"id": tid}, {"$set": update_set}) for tid in body.tour_ids]
+    # 2026-10-18: Kun ture der ikke er startet, afsluttet eller forgæves kan
+    # (om)tildeles. Før kunne en masse-tildeling sætte en ny chauffør på en tur
+    # en anden chauffør var i gang med (tildelt X, kørt af Y). En tur der er
+    # taget men ikke startet, gives videre: den gamle chaufførs "taget" ryddes.
+    cur_docs = {d["id"]: d for d in await _raw_db.tours.find(
+        {"id": {"$in": body.tour_ids}},
+        {"_id": 0, "id": 1, "on_way": 1, "completed": 1, "not_completed": 1, "claimed_by_id": 1,
+         "driver_id": 1, "driver_name": 1}).to_list(len(body.tour_ids) + 1)}
+    skipped = [tid for tid in body.tour_ids if tid not in cur_docs or cur_docs[tid].get("on_way")
+               or cur_docs[tid].get("completed") or cur_docs[tid].get("not_completed")]
+    body.tour_ids = [tid for tid in body.tour_ids if tid not in skipped]
+    ops = []
+    for tid in body.tour_ids:
+        st = dict(update_set)
+        if cur_docs[tid].get("claimed_by_id") and cur_docs[tid]["claimed_by_id"] != body.driver_id:
+            st.update({"claimed_by": "", "claimed_by_id": "", "claimed_at": ""})
+        ops.append(UpdateOne({"id": tid}, {"$set": st}))
     if not ops:
-        return {"updated": 0}
+        return {"updated": 0, "skipped": len(skipped)}
     res = await _raw_db.tours.bulk_write(ops)
 
     # Audit log per tour (best-effort)
     for tid in body.tour_ids:
         try:
-            existing = await _raw_db.tours.find_one(
-                {"id": tid}, {"_id": 0, "driver_id": 1, "driver_name": 1}
-            )
+            existing = cur_docs.get(tid) or {}
             await _tour_audit(
                 tour_id=tid,
                 action="bulk_assign",
@@ -1880,7 +1894,7 @@ async def bulk_assign_tours(
             payload.get("company_id") or "", body.driver_id, driver_name,
             "Ny tur tildelt" if n == 1 else f"{n} nye ture tildelt",
             f"{assigner_name or 'Planlæggeren'} har givet dig {('en tur' if n == 1 else f'{n} ture')}."))
-    return {"updated": res.modified_count, "assigned_to": driver_name}
+    return {"updated": res.modified_count, "assigned_to": driver_name, "skipped": len(skipped)}
 
 
 # ============= TUR-BESKEDER (planlægger <-> chauffør pr. tur) =============
@@ -19061,8 +19075,28 @@ async def startup_db_client():
         await migrate_dates()
         await _migrate_haster_from_remark()
         await _migrate_tour_owner_from_plads()
+        await _migrate_driver_matches_claimer()
     except Exception as e:
         logger.warning(f"Startup tasks warning: {e}")
+
+
+async def _migrate_driver_matches_claimer():
+    """2026-10-18: Ture der er i gang, men står som tildelt en anden end den
+    der kører dem (opstod ved masse-tildeling af startede ture), sættes til
+    chaufføren der kører. Afsluttede ture røres ikke."""
+    try:
+        q = {"on_way": True, "completed": {"$ne": True}, "deleted": {"$ne": True},
+             "claimed_by_id": {"$nin": ["", None]}, "driver_id": {"$nin": ["", None]}}
+        n = 0
+        async for t in _raw_db.tours.find(q, {"_id": 0, "id": 1, "driver_id": 1, "claimed_by_id": 1, "claimed_by": 1}):
+            if t["driver_id"] != t["claimed_by_id"]:
+                await _raw_db.tours.update_one({"id": t["id"]}, {"$set": {
+                    "driver_id": t["claimed_by_id"], "driver_name": t.get("claimed_by") or ""}})
+                n += 1
+        if n:
+            logger.info(f"Tildelt chauffør rettet til den der kører: {n} ture i gang")
+    except Exception as e:
+        logger.warning(f"Chauffør-migrering: {e}")
 
 
 async def _migrate_tour_owner_from_plads():

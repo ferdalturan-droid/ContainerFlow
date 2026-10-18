@@ -172,4 +172,9 @@ Begge dele er rettet. Desuden:
 - **Tur-panelet beholder chaufførvalget** for den enkelte tur.
 - **En tur, der er tildelt én chauffør men taget af en anden,** tælles hos den, der har taget den.
 - **Ny tur › Kunde** forklarer feltet: hvem man kører for, hvilke priser der gælder, og at tomt felt = egen tur med generelle priser.
+- **Omfordeling (rettet samme dag):** "Tildel i Planlæg" fra Dagsplan tager kun ture, der ikke er startet. Startede og færdige ture fravælges med en besked, og knappen er slået fra, hvis ingen af de valgte kan gives videre. Før skete der intet synligt, fordi Planlæg kun viste ikke-tildelte ture.
+- **I Planlæg kan tildelte ture, der ikke er startet, vælges** (afkrydsning på kortet under chaufføren) og gives til en anden chauffør med ét klik.
+- **Serveren afviser at give en startet, færdig eller forgæves tur til en anden chauffør.** Masse-tildeling kunne før gøre det, og det gav ture "tildelt Mads, kørt af Lars". En tur, der er taget men ikke startet, kan gives videre; den gamle chaufførs "taget" ryddes.
+- **Engangsrettelse ved opstart:** ture i gang, der står som tildelt en anden end den, der kører dem, sættes til den, der kører.
+- **Menuen** har nu seks punkter + "Mere": Ture · Tid & ressourcer · Chauffører · Rapportering · Økonomi · Arkiv. Arkiv er flyttet ud af "Mere".
 

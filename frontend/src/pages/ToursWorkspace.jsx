@@ -1109,7 +1109,10 @@ function PlanBoard({ tours, drivers, canAssign, selected, setSelected, onAssign,
   const blocked = tours.filter(t => t.not_completed && !t.completed);
   const unassigned = tours.filter(t => !t.completed && !t.not_completed && !assigneeName(t) && (t.tour_type || "") !== "estimat")
     .sort((a, b) => (isHaster(b) - isHaster(a)) || String(a.open_from || "99").localeCompare(String(b.open_from || "99")) || String(a.created_at || "").localeCompare(String(b.created_at || "")));
-  const ids = new Set(unassigned.map(t => t.id));
+  // Kan vælges: ikke-tildelte + tildelte ture der ikke er startet (kan gives
+  // til en anden chauffør). Startede/færdige ture bliver hos chaufføren.
+  const movableAssigned = tours.filter(t => assigneeName(t) && !t.on_way && !t.completed && !t.not_completed);
+  const ids = new Set([...unassigned, ...movableAssigned].map(t => t.id));
   const sel = [...selected].filter(id => ids.has(id));
   const byDriver = drivers.map(d => {
     // Den der har taget turen kører den - ellers den den er tildelt.
@@ -1119,7 +1122,7 @@ function PlanBoard({ tours, drivers, canAssign, selected, setSelected, onAssign,
   });
   const needle = search.trim().toLowerCase();
   const toggle = (id) => setSelected(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
-  const allSel = unassigned.length > 0 && sel.length === unassigned.length;
+  const allSel = unassigned.length > 0 && unassigned.every(t => selected.has(t.id));
   const giveTo = async (d) => {
     if (!sel.length) return;
     await onAssign(sel, d.id);
@@ -1139,7 +1142,7 @@ function PlanBoard({ tours, drivers, canAssign, selected, setSelected, onAssign,
     <div className="space-y-3" data-testid="plan-board">
       {canAssign && sel.length > 0 && (
         <div className="sticky top-2 z-20 rounded-2xl bg-slate-900 text-white shadow-xl p-2.5 flex flex-wrap items-center gap-2" data-testid="plan-selbar">
-          <span className="text-sm font-semibold px-2">{sel.length} tur{sel.length === 1 ? "" : "e"} valgt</span>
+          <span className="text-sm font-semibold px-2">{sel.length} tur{sel.length === 1 ? "" : "e"} valgt{sel.some(id => !unassigned.some(t => t.id === id)) ? " (flyttes fra nuværende chauffør)" : ""}</span>
           <span className="text-sm text-white/70 hidden lg:inline">· klik på en chauffør til højre</span>
           <div className="w-48 lg:hidden"><DriverSelect value="" drivers={drivers} compact onChange={(v) => { const d = drivers.find(x => x.id === v); if (d) giveTo(d); }} testid="plan-driver-select" /></div>
           <div className="flex-1" />
@@ -1168,7 +1171,7 @@ function PlanBoard({ tours, drivers, canAssign, selected, setSelected, onAssign,
           )}
           <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-700 flex items-center gap-2">
             {canAssign && unassigned.length > 0 && <input type="checkbox" className="w-4 h-4 accent-emerald-600" checked={allSel} aria-label="Vælg alle synlige"
-              onChange={() => setSelected(allSel ? new Set() : new Set(unassigned.map(t => t.id)))} data-testid="plan-select-all" />}
+              onChange={() => setSelected(prev => { const n = new Set(prev); unassigned.forEach(t => (allSel ? n.delete(t.id) : n.add(t.id))); return n; })} data-testid="plan-select-all" />}
             <h3 className="font-bold text-sm text-slate-900 dark:text-white">Ikke tildelt ({unassigned.length})</h3>
             {canAssign && unassigned.length > 0 && <span className="text-xs text-slate-500">Vælg ture, og klik på en chauffør</span>}
           </div>
@@ -1210,7 +1213,7 @@ function PlanBoard({ tours, drivers, canAssign, selected, setSelected, onAssign,
         <section className={`${card} overflow-hidden lg:sticky lg:top-2`} data-testid="plan-drivers">
           <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-700">
             <h3 className="font-bold text-sm text-slate-900 dark:text-white">Chauffører</h3>
-            <p className="text-[11px] text-slate-500">{canAssign ? (sel.length ? `Klik for at give ${sel.length} tur${sel.length === 1 ? "" : "e"}` : "Vælg en eller flere ture først") : "Kun visning"}</p>
+            <p className="text-[11px] text-slate-500">{canAssign ? (sel.length ? `Klik for at give ${sel.length} tur${sel.length === 1 ? "" : "e"}` : "Vælg ture først - også tildelte, der ikke er startet") : "Kun visning"}</p>
           </div>
           {drivers.length === 0 ? <p className="p-6 text-sm text-slate-500 text-center">Ingen chauffører oprettet endnu.</p> : (
             <ul className="divide-y divide-slate-100 dark:divide-slate-700/70 max-h-[62vh] overflow-y-auto">
@@ -1266,9 +1269,13 @@ function PlanBoard({ tours, drivers, canAssign, selected, setSelected, onAssign,
                   {list.map(t => {
                     const st = tourStatus(t);
                     const canRelease = canAssign && !t.on_way && !t.completed;
+                    const picked = selected.has(t.id);
                     return (
-                      <div key={t.id} className={`rounded-xl border border-slate-200 dark:border-slate-700 p-2.5 ${t.completed ? "opacity-70" : ""}`} data-testid={`plan-assigned-tour-${t.id}`}>
-                        <button type="button" className="w-full text-left" onClick={() => onOpen(t.id)}>
+                      <div key={t.id} className={`rounded-xl border p-2.5 ${picked ? "border-emerald-400 bg-emerald-50/60 dark:bg-emerald-950/20" : "border-slate-200 dark:border-slate-700"} ${t.completed ? "opacity-70" : ""}`} data-testid={`plan-assigned-tour-${t.id}`}>
+                        <div className="flex items-start gap-2">
+                        {canRelease && <input type="checkbox" className="mt-1 w-4 h-4 accent-emerald-600" checked={picked} onChange={() => toggle(t.id)}
+                          aria-label="Vælg - giv til en anden chauffør" title="Vælg for at give turen til en anden chauffør" data-testid={`plan-pick-${t.id}`} />}
+                        <button type="button" className="min-w-0 flex-1 text-left" onClick={() => onOpen(t.id)}>
                           <div className="flex items-center gap-1.5 flex-wrap">
                             <span className={`px-1.5 py-0.5 rounded border text-[10px] font-semibold ${st.chip}`}>{st.label}{t.on_way_time && !t.completed ? ` ${t.on_way_time}` : ""}</span>
                             <span className="font-semibold text-sm text-slate-900 dark:text-white truncate">{t.fraction || "—"}</span>
@@ -1277,6 +1284,7 @@ function PlanBoard({ tours, drivers, canAssign, selected, setSelected, onAssign,
                           <div className="text-xs text-slate-600 dark:text-slate-300 truncate mt-0.5">{where(t)}</div>
                           <div className="text-[11px] text-slate-500 truncate">{t.plads} · {customerOf(t, ownName)}</div>
                         </button>
+                        </div>
                         {canRelease && <button type="button" className="mt-1.5 text-xs font-semibold text-slate-500 hover:text-rose-600 underline" onClick={() => onAssign([t.id], "")} data-testid={`plan-release-${t.id}`}>Frigiv</button>}
                       </div>
                     );
@@ -1490,9 +1498,11 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
   const assign = async (ids, driverId) => {
     try {
       if (driverId) {
-        await axios.post(`${API}/tours/bulk-assign`, { tour_ids: ids, driver_id: driverId });
+        const { data } = await axios.post(`${API}/tours/bulk-assign`, { tour_ids: ids, driver_id: driverId });
         const d = drivers.find(x => x.id === driverId);
-        toast.success(`${ids.length === 1 ? "Tildelt" : `${ids.length} ture tildelt`} ${d?.name || ""} - vises hos chaufføren med det samme`);
+        const n = ids.length - (data?.skipped || 0);
+        if (n > 0) toast.success(`${n === 1 ? "Tildelt" : `${n} ture tildelt`} ${d?.name || ""} - vises hos chaufføren med det samme`);
+        if (data?.skipped) toast.error(`${data.skipped} tur${data.skipped === 1 ? " er" : "e er"} startet eller færdig${data.skipped === 1 ? "" : "e"} og kan ikke gives til en anden chauffør`);
       } else {
         await Promise.all(ids.map(id => axios.put(`${API}/tours/${id}`, { driver_id: "", driver_name: "" })));
         toast.success("Frigivet - åben for alle chauffører");
@@ -1738,7 +1748,20 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
           {view === "day" && selected.size > 0 && (
             <div className="sticky top-2 z-20 rounded-2xl bg-slate-900 text-white shadow-xl p-2.5 flex flex-wrap items-center gap-2" data-testid="tours-bulkbar">
               <span className="text-sm font-semibold px-2">{selected.size} valgt</span>
-              {can("tours_assign") && view === "day" && <button onClick={() => setView("plan")} className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-sm font-semibold" data-testid="bulk-plan">Tildel i Planlæg →</button>}
+              {can("tours_assign") && view === "day" && (() => {
+                // Kun ture der ikke er startet/færdige kan gives til en (anden) chauffør.
+                const movable = selectedTours.filter(t => !t.on_way && !t.completed && !t.not_completed);
+                return (
+                  <button disabled={!movable.length} data-testid="bulk-plan"
+                    title={movable.length ? "Vælg chauffør i Planlæg" : "De valgte ture er startet eller færdige - de kan ikke gives til en anden chauffør"}
+                    onClick={() => {
+                      if (movable.length < selected.size) toast.message(`${selected.size - movable.length} af de valgte er startet eller færdige og er fravalgt`);
+                      setSelected(new Set(movable.map(t => t.id))); setView("plan");
+                    }}
+                    className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-sm font-semibold disabled:opacity-40 disabled:hover:bg-emerald-600">
+                    Tildel{movable.length && movable.length !== selected.size ? ` ${movable.length}` : ""} i Planlæg →</button>
+                );
+              })()}
               {can("tours_edit") && <>
               <button onClick={() => bulkPriority("urgent")} className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-sm font-semibold">Haster</button>
               <button onClick={() => bulkPriority("normal")} className="px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-sm font-semibold">Normal</button>
