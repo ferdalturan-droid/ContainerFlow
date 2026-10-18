@@ -66,7 +66,7 @@ Begge dele er rettet. Desuden:
 |---|---|---|
 | Genbrugsplads-kundens plads (B2B, bestilling eller manuel) | altid **Container** | materiale, container nr., kapacitet, containeropgaver; vægt kræves ved "Afhent container" |
 | Partner-firma (option 2) | altid **Container** | som B2B; ingen hængere eller indholdslinjer |
-| Premium-firmaets egne lokationer | **Container** eller **Gods og andet** (valgt pr. tur, sidste valg huskes) | Gods: "hvad skal køres" med antal og enhed, opgaver Afhentning/Levering/Afhentning + levering/Flytning/Andet, vægt valgfri, ingen containerfelter |
+| Premium-firmaets egne lokationer | **Container** eller **Fragt** (tidl. "Gods og andet"; valgt pr. tur, sidste valg huskes) | Fragt: "hvad skal køres" med antal og enhed, opgaver Afhentning/Levering/Afhentning + levering/Flytning/Andet, vægt valgfri, ingen containerfelter |
 
 - Backend håndhæver reglerne i `_normalize_tour_doc`. Frontend viser kun de felter, der giver mening.
 - Et premium-firma med kunder får B2B-flowet på kundernes pladser og det generiske flow på egne lokationer.
@@ -176,5 +176,7 @@ Begge dele er rettet. Desuden:
 - **I Planlæg kan tildelte ture, der ikke er startet, vælges** (afkrydsning på kortet under chaufføren) og gives til en anden chauffør med ét klik.
 - **Serveren afviser at give en startet, færdig eller forgæves tur til en anden chauffør.** Masse-tildeling kunne før gøre det, og det gav ture "tildelt Mads, kørt af Lars". En tur, der er taget men ikke startet, kan gives videre; den gamle chaufførs "taget" ryddes.
 - **Engangsrettelse ved opstart:** ture i gang, der står som tildelt en anden end den, der kører dem, sættes til den, der kører.
+- **Planlæg › Chauffører har et søgefelt** (navn, telefon eller e-mail) i samme kort. Listen kan stadig rulles; telefonnumre matcher uanset mellemrum og +45.
+- **"Gods og andet" hedder nu "Fragt"** i Ny tur, med en kort forklaring under hver knap: "Afhent, byt eller flyt containere" og "Paller, materialer, flytning m.m.". Mærket på turen i Dagsplan og hos chaufføren siger også "Fragt". Internt hedder typen stadig `goods`.
 - **Menuen** har nu seks punkter + "Mere": Ture · Tid & ressourcer · Chauffører · Rapportering · Økonomi · Arkiv. Arkiv er flyttet ud af "Mere".
 

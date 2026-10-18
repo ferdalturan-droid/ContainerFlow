@@ -9,7 +9,7 @@ export const TOUR_TYPES = [
   { id: "vaerksted", label: "Til værksted" },
   { id: "afhent_vaerksted", label: "Afhent fra værksted" },
 ];
-// 2026-10-17: Opgavetyper for "Gods og andet" (premium-firmaers egne ture
+// 2026-10-17: Opgavetyper for "Fragt" (tidl. "Gods og andet"; premium-firmaers egne ture
 // der ikke handler om containere).
 export const GOODS_TYPES = [
   { id: "afhentning", label: "Afhentning" },

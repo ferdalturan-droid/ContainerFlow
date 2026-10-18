@@ -35,4 +35,4 @@ før den kan bygges rigtigt.
 
 ## Besvaret 2026-10-17
 - **Push til chauffører:** slået til som standard; chaufføren kan slå det fra under Profil. Det kræver VAPID-nøgler i Scaleway (se `WORKFLOW.md` 4b).
-- **Gods og andet:** premium-firmaer kan nu køre ture der ikke handler om containere (se `TURE_REDESIGN.md`).
+- **Fragt** (tidl. "Gods og andet"): premium-firmaer kan nu køre ture der ikke handler om containere (se `TURE_REDESIGN.md`).

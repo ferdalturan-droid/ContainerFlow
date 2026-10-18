@@ -263,7 +263,7 @@ function StopExtras({ value, onChange }) {
  * under "Flere detaljer". Feltsættet følger turens type:
  *  - Container: genbrugsplads-kundens plads (B2B) eller premium-firmaets
  *    egne containerture - materiale, container nr., kapacitet.
- *  - Gods og andet (kun premium, egne lokationer): "hvad skal køres" med
+ *  - Fragt (tour_kind "goods", kun premium, egne lokationer): "hvad skal køres" med
  *    antal/enhed, ingen containerfelter.
  * Hængere og indhold pr. hænger er premium-funktioner.
  */
@@ -459,9 +459,14 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
       <section className={`${card} p-4 space-y-3`}>
         {canChooseKind && (
           <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-slate-100 dark:bg-slate-900" data-testid="tf-kind">
-            {[["container", "Container"], ["goods", "Gods og andet"]].map(([k, l]) => (
-              <button key={k} type="button" onClick={() => setKind(k)}
-                className={`py-2 rounded-lg text-sm font-semibold ${kind === k ? "bg-white dark:bg-slate-700 shadow-sm text-slate-900 dark:text-white" : "text-slate-500"}`}>{l}</button>
+            {/* 2026-10-18: "Gods og andet" hed før sådan - "Fragt" + en kort
+                forklaring er til at forstå (tour_kind er stadig "goods"). */}
+            {[["container", "Container", "Afhent, byt eller flyt containere"], ["goods", "Fragt", "Paller, materialer, flytning m.m."]].map(([k, l, sub]) => (
+              <button key={k} type="button" onClick={() => setKind(k)} data-testid={`tf-kind-${k}`}
+                className={`py-2 px-2 rounded-lg text-center ${kind === k ? "bg-white dark:bg-slate-700 shadow-sm" : ""}`}>
+                <span className={`block text-sm font-semibold ${kind === k ? "text-slate-900 dark:text-white" : "text-slate-500"}`}>{l}</span>
+                <span className="block text-[11px] text-slate-500 dark:text-slate-400 leading-tight">{sub}</span>
+              </button>
             ))}
           </div>
         )}
@@ -1106,6 +1111,7 @@ const copyBody = (t, date) => ({
 function PlanBoard({ tours, drivers, canAssign, selected, setSelected, onAssign, onOpen, onReactivate, priceStatus, devs, ownName }) {
   const [collapsed, setCollapsed] = useState(new Set());
   const [search, setSearch] = useState("");
+  const [driverQ, setDriverQ] = useState("");
   const blocked = tours.filter(t => t.not_completed && !t.completed);
   const unassigned = tours.filter(t => !t.completed && !t.not_completed && !assigneeName(t) && (t.tour_type || "") !== "estimat")
     .sort((a, b) => (isHaster(b) - isHaster(a)) || String(a.open_from || "99").localeCompare(String(b.open_from || "99")) || String(a.created_at || "").localeCompare(String(b.created_at || "")));
@@ -1121,6 +1127,13 @@ function PlanBoard({ tours, drivers, canAssign, selected, setSelected, onAssign,
     return { d, mine, active: mine.filter(t => !t.completed), onWay: mine.filter(t => t.on_way && !t.completed).length, done: mine.filter(t => t.completed).length };
   });
   const needle = search.trim().toLowerCase();
+  // Søg chauffør: navn, telefon eller e-mail. Et telefonnummer matcher uanset
+  // mellemrum og +45 ("40112001" finder "40 11 20 01").
+  const dq = driverQ.trim().toLowerCase();
+  const dqPhone = /^[+\d\s]+$/.test(dq) ? dq.replace(/\s/g, "").replace(/^\+45/, "") : "";
+  const shownDrivers = !dq ? byDriver : byDriver.filter(({ d }) =>
+    `${d.name || ""} ${d.email || ""} ${d.phone || ""}`.toLowerCase().includes(dq)
+    || (dqPhone && String(d.phone || "").replace(/\s/g, "").replace(/^\+45/, "").includes(dqPhone)));
   const toggle = (id) => setSelected(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const allSel = unassigned.length > 0 && unassigned.every(t => selected.has(t.id));
   const giveTo = async (d) => {
@@ -1211,13 +1224,25 @@ function PlanBoard({ tours, drivers, canAssign, selected, setSelected, onAssign,
         </section>
 
         <section className={`${card} overflow-hidden lg:sticky lg:top-2`} data-testid="plan-drivers">
-          <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-700">
-            <h3 className="font-bold text-sm text-slate-900 dark:text-white">Chauffører</h3>
-            <p className="text-[11px] text-slate-500">{canAssign ? (sel.length ? `Klik for at give ${sel.length} tur${sel.length === 1 ? "" : "e"}` : "Vælg ture først - også tildelte, der ikke er startet") : "Kun visning"}</p>
+          <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-700 space-y-2">
+            <div>
+              <h3 className="font-bold text-sm text-slate-900 dark:text-white">Chauffører</h3>
+              <p className="text-[11px] text-slate-500">{canAssign ? (sel.length ? `Klik for at give ${sel.length} tur${sel.length === 1 ? "" : "e"}` : "Vælg ture først - også tildelte, der ikke er startet") : "Kun visning"}</p>
+            </div>
+            {drivers.length > 0 && (
+              <div className="relative">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input value={driverQ} onChange={(e) => setDriverQ(e.target.value)} placeholder="Søg navn, telefon eller e-mail"
+                  className={`${inputCls} pl-9 ${driverQ ? "pr-9" : ""}`} aria-label="Søg chauffør" data-testid="plan-driver-search" />
+                {driverQ && <button type="button" onClick={() => setDriverQ("")} className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded text-slate-400 hover:text-slate-600" aria-label="Ryd søgning"><X className="w-4 h-4" /></button>}
+              </div>
+            )}
           </div>
-          {drivers.length === 0 ? <p className="p-6 text-sm text-slate-500 text-center">Ingen chauffører oprettet endnu.</p> : (
+          {drivers.length === 0 ? <p className="p-6 text-sm text-slate-500 text-center">Ingen chauffører oprettet endnu.</p> : shownDrivers.length === 0 ? (
+            <p className="p-6 text-sm text-slate-500 text-center" data-testid="plan-driver-none">Ingen chauffør matcher "{driverQ.trim()}".</p>
+          ) : (
             <ul className="divide-y divide-slate-100 dark:divide-slate-700/70 max-h-[62vh] overflow-y-auto">
-              {byDriver.map(({ d, active, onWay, done }) => {
+              {shownDrivers.map(({ d, active, onWay, done }) => {
                 const ready = canAssign && sel.length > 0;
                 return (
                   <li key={d.id}>
@@ -1834,7 +1859,7 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
                                 <div className="flex items-center gap-1.5 flex-wrap">
                                   {isHaster(t) && !t.completed && <span className="px-1.5 py-0.5 rounded bg-rose-600 text-white text-[10px] font-bold uppercase">Haster</span>}
                                   <span className="font-semibold text-slate-900 dark:text-white">{t.fraction || "—"}</span>
-                                  {isGoods(t) && <span className="text-[11px] font-semibold text-sky-700 bg-sky-50 dark:bg-sky-950/40 dark:text-sky-300 px-1.5 py-0.5 rounded">Gods</span>}
+                                  {isGoods(t) && <span className="text-[11px] font-semibold text-sky-700 bg-sky-50 dark:bg-sky-950/40 dark:text-sky-300 px-1.5 py-0.5 rounded">Fragt</span>}
                                   {Number(t.trailer_count) > 0 && <span className="text-[11px] text-slate-500">{t.trailer_count} hænger{Number(t.trailer_count) === 1 ? "" : "e"}</span>}
                                   {t.tour_type && t.tour_type !== "normal" && <span className="text-[11px] font-semibold text-violet-700 dark:text-violet-300 bg-violet-50 dark:bg-violet-950/40 px-1.5 py-0.5 rounded">{TOUR_TYPE_LABEL[t.tour_type] || t.tour_type}</span>}
                                   {cap && <span className="text-[11px] text-slate-500 inline-flex items-center gap-0.5"><Package2 className="w-3 h-3" />{cap}</span>}

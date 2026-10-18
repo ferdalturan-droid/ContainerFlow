@@ -12384,7 +12384,7 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
                 tour.tour_type === "loes_afhentning"
                   ? `Løs afhentning · ${tour.loose_estimated_count || 0} container(e)`
                   : isGoodsTour
-                    ? `Gods${Number(tour.trailer_count) ? ` · ${tour.trailer_count} hængere` : ""}`
+                    ? `Fragt${Number(tour.trailer_count) ? ` · ${tour.trailer_count} hængere` : ""}`
                     : (tour.container ? `Container ${tour.container}` : (Number(tour.trailer_count) ? `${tour.trailer_count} hængere` : "")),
               ].filter(Boolean).join(" • ")}
             </p>
