@@ -1177,7 +1177,8 @@ function CustomersView({ options, reloadOptions, canEdit, goRules }) {
         </section>
       )}
 
-      <section className={`${card} overflow-hidden`}>
+      {/* 2026-10-18: Egne kunder er premium - en partner har kun sine genbrugsplads-kunder. */}
+      {options.profile?.tier !== "partner" && <section className={`${card} overflow-hidden`}>
         <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-700 flex flex-wrap items-center justify-between gap-2">
           <div>
             <h3 className="font-bold flex items-center gap-2"><Users className="w-4 h-4 text-slate-400" /> Egne kunder</h3>
@@ -1191,7 +1192,7 @@ function CustomersView({ options, reloadOptions, canEdit, goRules }) {
           {own.map(c => <Row key={c.id} c={c} kind="own" />)}
           {noCustomer && <Row c={{ ...noCustomer, name: "Egne ture uden kunde" }} kind="none" />}
         </ul>
-      </section>
+      </section>}
 
       {newRuleFor && (
         <BundleEditor
@@ -1863,6 +1864,32 @@ function DeviationCodes({ codes, onSave }) {
   );
 }
 
+/** 2026-10-18: Afvigelseskoder og "ét afslutningsark" er drift - chaufføren
+ *  bruger dem uanset priser. De ligger under logistik admin › Indstillinger
+ *  (rettigheden "Indstillinger") og gemmes via /company/finish-settings. */
+export function FinishSettingsCard() {
+  const [s, setS] = useState(null);
+  useEffect(() => { axios.get(`${API}/company/finish-settings`).then(r => setS(r.data)).catch(e => toast.error(formatApiError(e))); }, []);
+  const save = async (patch) => {
+    try { setS((await axios.put(`${API}/company/finish-settings`, patch)).data); toast.success("Gemt"); }
+    catch (e) { toast.error(formatApiError(e)); }
+  };
+  if (!s) return <div className={`${card} p-10 flex justify-center`}><Loader2 className="w-6 h-6 animate-spin text-slate-400" /></div>;
+  return (
+    <div className="space-y-4" data-testid="finish-settings">
+      <DeviationCodes codes={s.deviation_codes || []} onSave={(codes) => save({ deviation_codes: codes })} />
+      <div className={`${card} p-4 space-y-3`} data-testid="settings-unified">
+        <h3 className="font-bold">Chaufførens afslutning</h3>
+        <label className="flex items-start gap-3 text-sm">
+          <input type="checkbox" className="accent-emerald-600 w-4 h-4 mt-0.5" checked={!!s.unified_finish} onChange={e => save({ unified_finish: e.target.checked })} />
+          <span><b>Ét afslutningsark for alle ture</b> - også bestillinger fra genbrugspladser (B2B). Vægten er stadig påkrævet på containerafhentninger, løs afhentning vejes pr. læs, og vejesedlen kan vedhæftes.
+            <span className="block text-xs text-slate-500 mt-0.5">Slået fra: B2B-ture bruger det hidtidige vægt-flow. Slå det til for én dag og se om chaufførerne er glade for det.</span></span>
+        </label>
+      </div>
+    </div>
+  );
+}
+
 function SettingsView() {
   const [s, setS] = useState(null);
   useEffect(() => { axios.get(`${API}/pricing/settings`).then(r => setS(r.data)).catch(e => toast.error(formatApiError(e))); }, []);
@@ -1896,15 +1923,7 @@ function SettingsView() {
           <span className="text-xs text-slate-500">(0 = du godkender altid selv)</span>
         </div>
       </div>
-      <DeviationCodes codes={s.deviation_codes || []} onSave={(codes) => save({ deviation_codes: codes })} />
-      <div className={`${card} p-4 space-y-3`} data-testid="settings-unified">
-        <h3 className="font-bold">Chaufførens afslutning</h3>
-        <label className="flex items-start gap-3 text-sm">
-          <input type="checkbox" className="accent-emerald-600 w-4 h-4 mt-0.5" checked={!!s.unified_finish} onChange={e => save({ unified_finish: e.target.checked })} />
-          <span><b>Ét afslutningsark for alle ture</b> - også bestillinger fra genbrugspladser (B2B). Vægten er stadig påkrævet på containerafhentninger, løs afhentning vejes pr. læs, og vejesedlen kan vedhæftes.
-            <span className="block text-xs text-slate-500 mt-0.5">Slået fra: B2B-ture bruger det hidtidige vægt-flow. Slå det til for én dag og se om chaufførerne er glade for det.</span></span>
-        </label>
-      </div>
+      <p className="text-xs text-slate-500 px-1" data-testid="settings-moved-note">Afvigelseskoder og chaufførens afslutning ligger under Indstillinger (i menuen "Mere").</p>
       <div className={`${card} p-4 space-y-2`}>
         <h3 className="font-bold">Moms</h3>
         <p className="text-sm text-slate-500">Priser i reglerne er ekskl. moms. Rapporten viser moms separat.</p>

@@ -33,7 +33,7 @@ import FinishSheet, { effectiveCapture } from "@/components/FinishSheet";
 import DriverStopList from "@/components/DriverStopList";
 import { initTourOpQueue, enqueueOp, isNetworkError, subscribeOps } from "@/lib/tourOpQueue";
 import { enablePush, disablePush, syncPush, pushSupported, isIOS, isStandalone, permission as pushPermission } from "@/lib/push";
-import EconomyPanel from "@/pages/EconomyPanel";
+import EconomyPanel, { FinishSettingsCard } from "@/pages/EconomyPanel";
 import LogisticsLocations from "@/pages/LogisticsLocations";
 import { buildDayReportPdf, dayReportFileName } from "@/lib/dayReportPdf";
 import { saveAs } from "file-saver";
@@ -7718,6 +7718,7 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
           active={activeTab}
           onChange={setActiveTab}
           title={activeCompany ? activeCompany.name : "Logistik-administration"}
+          moreNote={logisticsProfile?.tier === "partner" ? "Vil I også køre egne ture og kunder i ContainerFlow - med egne lokationer, Fragt og flere stop? Spørg om ContainerFlow Premium." : ""}
           tabs={[
             { id: "tours",      label: "Ture",          icon: Truck,      testid: "admin-tab-tours" },
             can.planning     && { id: "schedule",   label: "Tid & ressourcer", icon: Calendar },
@@ -8104,7 +8105,7 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
                   {/* Plads Stats */}
                   <div className="bg-white dark:bg-slate-800 rounded-xl shadow-lg p-6" data-testid="stats-plads">
                     <h3 className="font-bold text-lg mb-4 flex items-center gap-2">
-                      <Building2 className="w-5 h-5 text-purple-600" /> Genbrugsplads oversigt
+                      <Building2 className="w-5 h-5 text-purple-600" /> {isPremiumLogistics ? "Lokationer" : "Genbrugspladser"} - oversigt
                     </h3>
                     {statisticsData.plads_stats.length > 0 ? (
                       <div className="space-y-3">
@@ -8980,6 +8981,7 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
             og Arkiv > Ture). Se frontend/src/pages/ToursWorkspace.jsx. */}
         {activeTab === "tours" && (
           <ToursWorkspace
+            onGoDrivers={() => setActiveTab("drivers")}
             drivers={activeDrivers}
             pladsList={pladsList}
             perms={can}
@@ -11359,6 +11361,9 @@ const AdminSettingsPanel = ({ onSettingsChanged }) => {
           )}
         </div>
       </div>
+      {/* 2026-10-18: Flyttet hertil fra Økonomi › Indstillinger - det er drift,
+          som chaufføren bruger uanset priser (også for logistikpartnere). */}
+      <FinishSettingsCard />
     </div>
   );
 };
@@ -11744,7 +11749,7 @@ const TourBillingBox = ({ tour }) => {
   );
 };
 
-const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onToggleComplete, currentDriverName, onChat, onRefresh, onOpenFinish, unifiedFinish = false, deviationCodes = [] }) => {
+const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onToggleComplete, currentDriverName, onChat, onRefresh, onOpenFinish, unifiedFinish = false, deviationCodes = [], canAddStop = false }) => {
   const [weightInput, setWeightInput] = useState("");
   const [trailerAsk, setTrailerAsk] = useState(null);
   const [trailerChoice, setTrailerChoice] = useState(null); // P5: valgt i vægtarket (null = forslaget)
@@ -12430,8 +12435,8 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
               </a>
             </div>
           )}
-          {(tourStops.length > 0 || (tour.on_way && !tour.completed && !isClaimedByOther)) && (
-            <DriverStopList tour={tour} stops={tourStops} codes={deviationCodes}
+          {(tourStops.length > 0 || (canAddStop && tour.on_way && !tour.completed && !isClaimedByOther)) && (
+            <DriverStopList tour={tour} stops={tourStops} codes={deviationCodes} canAdd={canAddStop}
               canTick={!tour.completed && !isClaimedByOther && !!(tour.on_way || tour.claimed_by)}
               onChanged={(st, queued) => { setLocalStops(st); if (!queued) onRefresh?.(); }} />
           )}
@@ -13228,6 +13233,13 @@ function App() {
   const [setupTrailerId, setSetupTrailerId] = useState(""); // "" = ingen hænger
   // Fase 5: active customer selection (multi-tenant chauffør-side)
   const [driverCustomers, setDriverCustomers] = useState([]);
+  // 2026-10-18: Firmaets premium-evner (fx "Tilføj et stop") - en partner-
+  // chauffør kører kundernes ture uden premium-værktøjerne.
+  const [driverCaps, setDriverCaps] = useState({});
+  useEffect(() => {
+    if (authUser?.role !== "driver") return;
+    axios.get(`${API}/logistics/profile`).then(r => setDriverCaps(r.data?.capabilities || {})).catch(() => {});
+  }, [authUser?.role, authUser?.company_id]);
   const [activeCustomer, setActiveCustomer] = useState(null); // { id, name, customer_id, city }
   const [customerSwitchOpen, setCustomerSwitchOpen] = useState(false);
 
@@ -15498,7 +15510,12 @@ function App() {
                 {driverCustomers.length === 0 ? (
                   <div className="bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-xl p-4 text-center text-sm text-amber-800 dark:text-amber-300">
                     <p className="font-semibold mb-1">Ingen kunder tildelt endnu</p>
-                    <p className="text-xs">Dit logistik-firma er ikke koblet til nogen kunde. Kontakt din administrator.</p>
+                    <p className="text-xs">Dit logistik-firma er ikke koblet til nogen kunde endnu. Når en kunde tilknytter jer, kan du se og køre deres ture her.</p>
+                    {/* 2026-10-18: Før var skærmen en blindgyde uden vej videre. */}
+                    <div className="mt-3 flex gap-2 justify-center">
+                      <button type="button" onClick={() => window.location.reload()} className="px-4 py-2 rounded-lg bg-white dark:bg-slate-800 border border-amber-300 dark:border-amber-700 font-semibold" data-testid="setup-no-customers-retry">Prøv igen</button>
+                      <button type="button" onClick={handleLogoutDriver} className="px-4 py-2 rounded-lg bg-amber-600 text-white font-semibold" data-testid="setup-no-customers-logout">Log ud</button>
+                    </div>
                   </div>
                 ) : (
                   <div className="space-y-2 max-h-64 overflow-y-auto" data-testid="customer-picker-list">
@@ -16909,6 +16926,7 @@ function App() {
             onOpenFinish={(t) => setFinishTour(t)}
             unifiedFinish={!!finishSettings.unified_finish}
             deviationCodes={finishSettings.codes || []}
+            canAddStop={!!driverCaps.stops}
           />
         )}
 

@@ -9,7 +9,7 @@ import {
   BarChart3, TrendingUp, Truck, Calendar, Activity, FileSpreadsheet,
   CheckCircle2, XCircle, Clock, AlertCircle, Globe, Recycle, Power, PowerOff,
   GitMerge, FileText, FileDown, Copy, Pause, Send, Megaphone,
-  Archive, History,
+  Archive, History, ArrowUpCircle, ArrowDownCircle,
 } from "lucide-react";
 import { useAuth } from "../auth/AuthContext";
 import { API, formatApiError } from "../auth/api";
@@ -579,6 +579,7 @@ function CompaniesPanel() {
   const [editing, setEditing] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
   const [statsFor, setStatsFor] = useState(null);
+  const [downgrade, setDowngrade] = useState(null);
   const [resendingId, setResendingId] = useState(null);
   // Brugerkrav 2026-06-15 (runde 7): Default filtrér på aktive kunder.
   // Toggle-knap kan vise alle (inkl. inaktive).
@@ -810,6 +811,11 @@ function CompaniesPanel() {
                     <Building className="w-5 h-5" />
                   </div>
                   <div className="flex gap-1">
+                    {c.company_type === "logistics" && !c.from_library && (
+                      <button onClick={() => setDowngrade(c)} className="p-2 rounded-lg hover:bg-amber-50 dark:hover:bg-amber-950/40" title="Nedgradér til logistikpartner" data-testid={`downgrade-company-${c.id}`}>
+                        <ArrowDownCircle className="w-4 h-4 text-amber-600" />
+                      </button>
+                    )}
                     <button onClick={() => setStatsFor(c)} className="p-2 rounded-lg hover:bg-blue-50 dark:hover:bg-blue-950/40" title="Statistik" data-testid={`stats-company-${c.id}`}>
                       <BarChart3 className="w-4 h-4 text-blue-500" />
                     </button>
@@ -1043,6 +1049,7 @@ function CompaniesPanel() {
         onCancel={() => setDeletingId(null)}
       />
       {statsFor && <CompanyStatsModal company={statsFor} onClose={() => setStatsFor(null)} />}
+      {downgrade && <TierSwitchDialog company={downgrade} to="partner" onClose={() => setDowngrade(null)} onDone={() => { setDowngrade(null); fetchCompanies(); }} />}
     </section>
   );
 }
@@ -1532,6 +1539,62 @@ function CustomerAdminsPanel() {
  *   - Resend invitation on each row when admin is still pending
  *   - No delete from card; deactivation via Edit (consistent with kunder)
  */
+/* 2026-10-18: Skift et logistikfirma mellem Premium (option 1) og Partner
+   (option 2). Samme firma-id, så tilknytninger, chauffører og ture følger med;
+   premium-data skjules kun ved nedgradering. Se LOGISTICS_TIERS.md. */
+function TierSwitchDialog({ company, to, onClose, onDone }) {
+  const [info, setInfo] = useState(null);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    axios.get(`${API}/superadmin/companies/${company.id}/logistics-tier`).then(r => setInfo(r.data))
+      .catch(e => { toast.error(formatApiError(e)); onClose(); });
+  }, [company.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const up = to === "premium";
+  const save = async () => {
+    setSaving(true);
+    try {
+      await axios.put(`${API}/superadmin/companies/${company.id}/logistics-tier`, { tier: to });
+      toast.success(up ? `${company.name} er nu Premium` : `${company.name} er nu logistikpartner`);
+      onDone();
+    } catch (e) { toast.error(formatApiError(e)); }
+    finally { setSaving(false); }
+  };
+  const n = (k) => info?.[k] ?? 0;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" data-testid="tier-dialog">
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-md w-full p-6">
+        <div className={`w-12 h-12 rounded-full flex items-center justify-center mb-3 ${up ? "bg-emerald-100 text-emerald-600" : "bg-amber-100 text-amber-600"}`}>
+          {up ? <ArrowUpCircle className="w-6 h-6" /> : <ArrowDownCircle className="w-6 h-6" />}
+        </div>
+        <h3 className="text-lg font-bold text-slate-900 dark:text-white">{up ? `Opgradér ${company.name} til Premium?` : `Nedgradér ${company.name} til logistikpartner?`}</h3>
+        {!info ? <div className="py-6 text-center"><Loader2 className="w-5 h-5 animate-spin inline text-slate-400" /></div> : (
+          <div className="mt-2 space-y-3 text-sm text-slate-600 dark:text-slate-300">
+            {up ? (
+              <p>Firmaet får egne lokationer, egne ture og kunder, Fragt, ture med flere stop, gentagne ture og egne kunder i Økonomi. Det flyttes til "Kunder & Logistik".</p>
+            ) : (
+              <>
+                <p>Firmaet beholder alt til sine genbrugsplads-kunder (bestillinger, chauffører, Økonomi for kundernes ture, tidsregistrering). Det flyttes til "Logistik-partnere".</p>
+                <div className="rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 p-3 text-amber-900 dark:text-amber-100">
+                  <b>Skjules (slettes ikke):</b> {n("own_locations")} egne lokationer, {n("own_customers")} egne kunder og nye egne ture. {n("own_tours")} eksisterende egne ture kan stadig ses.
+                </div>
+              </>
+            )}
+            <p className="text-xs text-slate-500">{n("connected_customers")} tilknyttede genbrugsplads-kunde{n("connected_customers") === 1 ? "" : "r"}, chauffører og ture følger med. Ændringen gælder med det samme.</p>
+          </div>
+        )}
+        <div className="flex gap-2 justify-end mt-5">
+          <button onClick={onClose} className="px-4 py-2 rounded-lg text-sm font-semibold bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200">Annuller</button>
+          <button onClick={save} disabled={!info || saving} data-testid="tier-confirm"
+            className={`px-4 py-2 rounded-lg text-sm font-semibold text-white inline-flex items-center gap-2 disabled:opacity-60 ${up ? "bg-emerald-600 hover:bg-emerald-700" : "bg-amber-600 hover:bg-amber-700"}`}>
+            {saving && <Loader2 className="w-4 h-4 animate-spin" />} {up ? "Opgradér til Premium" : "Nedgradér"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function LogisticsPartnersPanel() {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1541,6 +1604,7 @@ function LogisticsPartnersPanel() {
   const [search, setSearch] = useState("");
   // Brugerkrav 2026-06-15 (runde 7): Default filtrér på aktive partnere.
   const [showInactive, setShowInactive] = useState(false);
+  const [upgrade, setUpgrade] = useState(null);
 
   const empty = {
     name: "", customer_id: "", active: true,
@@ -1698,6 +1762,7 @@ function LogisticsPartnersPanel() {
                   <th className="px-4 py-3">Firma</th>
                   <th className="px-4 py-3">Ref. kode</th>
                   <th className="px-4 py-3">Admin</th>
+                  <th className="px-4 py-3">Kunder</th>
                   <th className="px-4 py-3">Telefon</th>
                   <th className="px-4 py-3">Oprettet</th>
                   <th className="px-4 py-3">Status</th>
@@ -1723,6 +1788,9 @@ function LogisticsPartnersPanel() {
                         {c.first_admin?.name && (
                           <div className="text-xs text-slate-400">{c.first_admin.name}</div>
                         )}
+                      </td>
+                      <td className="px-4 py-3 text-slate-600 dark:text-slate-300" title="Tilknyttede genbrugsplads-kunder" data-testid={`logistics-customers-${c.id}`}>
+                        {(c.serves_company_ids || []).filter(Boolean).length || <span className="text-amber-600 text-xs font-semibold">Ingen endnu</span>}
                       </td>
                       <td className="px-4 py-3 text-slate-600 dark:text-slate-300">{c.first_admin?.phone || c.admin_phone || "-"}</td>
                       <td className="px-4 py-3 text-xs text-slate-500">
@@ -1753,6 +1821,11 @@ function LogisticsPartnersPanel() {
                               {resendingId === c.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Mail className="w-3 h-3" />}
                             </button>
                           )}
+                          <button onClick={() => setUpgrade(c)}
+                            className="inline-flex items-center gap-1 px-2 py-1.5 rounded text-[11px] font-bold bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300"
+                            title="Opgradér til Premium" data-testid={`logistics-upgrade-${c.id}`}>
+                            <ArrowUpCircle className="w-3.5 h-3.5" /> Premium
+                          </button>
                           <button onClick={() => openEdit(c)}
                             className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700"
                             title="Rediger"
@@ -1863,6 +1936,7 @@ function LogisticsPartnersPanel() {
           </div>
         </div>
       )}
+      {upgrade && <TierSwitchDialog company={upgrade} to="premium" onClose={() => setUpgrade(null)} onDone={() => { setUpgrade(null); fetchAll(); }} />}
     </section>
   );
 }

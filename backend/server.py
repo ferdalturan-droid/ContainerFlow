@@ -112,6 +112,15 @@ PUBLIC_PATH_PREFIXES = (
     "/api/push/vapid-public-key",
 )
 PUBLIC_PATH_EXACT = {"/api/", "/api"}
+# 2026-10-18: Adresser som QR-bestillingen (kiosk, uden login) læser ud over de
+# offentlige præfikser ovenfor. De kører som før (uden firma-bypass) - de er
+# blot undtaget fra login-kravet i TenantContextMiddleware.
+ANON_ALLOWED_ROUTES = [
+    ({"GET"}, re.compile(r"^/api/materials$")),
+    ({"GET"}, re.compile(r"^/api/locations/[^/]+/(partners|materials|materials/active|containers)$")),
+    ({"GET"}, re.compile(r"^/api/container-orders/by-location/(?!grouped$)[^/]+$")),
+    ({"POST"}, re.compile(r"^/api/auth/logout$")),
+]
 
 
 class TenantAwareCollection:
@@ -1604,6 +1613,26 @@ def _remark_says_haster(remark: str) -> bool:
     return bool(_HASTER_RE.search(remark or ""))
 
 
+async def _require_plads_allowed(payload: Optional[dict], plads_name: str) -> None:
+    """2026-10-18: Et logistikfirma (admin eller chauffør) må kun oprette eller
+    flytte ture til pladser, det har adgang til: egne lokationer eller kunders
+    pladser, hvor firmaet er tildelt. Efter P0 ejes en tur af pladsens firma,
+    så uden dette tjek kunne en tur havne i en fremmed kundes arkiv og priser.
+    Ukendte pladsnavne (fritekst) tilhører ingen og er fortsat tilladt."""
+    role = (payload or {}).get("role")
+    if role not in ("logistics_admin", "driver") or not plads_name:
+        return
+    pl = await _raw_db.plads.find_one(
+        {"name": plads_name}, {"_id": 0, "company_id": 1, "assigned_logistics_company_ids": 1})
+    if not pl:
+        return
+    la = (payload or {}).get("company_id") or ""
+    allowed = {la, current_company_id.get(), *((payload or {}).get("managed_company_ids") or [])} - {"", None}
+    if pl.get("company_id") in allowed or la in (pl.get("assigned_logistics_company_ids") or []):
+        return
+    raise HTTPException(status_code=403, detail=f'Du har ikke adgang til pladsen "{plads_name}"')
+
+
 async def _normalize_tour_doc(td: dict, payload: Optional[dict], profile_cache: dict) -> dict:
     """2026-10-17: Ensretter en ny tur efter hvor den hører til.
     - Tur på en genbrugsplads-kundes plads (B2B) eller hos et partner-firma
@@ -1612,13 +1641,15 @@ async def _normalize_tour_doc(td: dict, payload: Optional[dict], profile_cache: 
     - Opgavetypen skal passe til typen; fraktion udfyldes fra indholdslinjer."""
     role = (payload or {}).get("role")
     la = (payload or {}).get("company_id") if role in ("logistics_admin", "driver") else None
-    premium = False
+    premium = partner = False
     if la:
         if la not in profile_cache:
             profile_cache[la] = await _logistics_profile(la)
         premium = bool(profile_cache[la].get("is_premium"))
+        partner = profile_cache[la].get("tier") == "partner"
     customer_site = False
     if td.get("plads"):
+        await _require_plads_allowed(payload, td["plads"])
         pl = await _raw_db.plads.find_one({"name": td["plads"]}, {"_id": 0, "company_id": 1})
         customer_site = bool(pl and la and pl.get("company_id") != la)
         # 2026-10-18 (P0): Ejerskab følger lokationen. En tur på en
@@ -1633,6 +1664,11 @@ async def _normalize_tour_doc(td: dict, payload: Optional[dict], profile_cache: 
                 td["customer_name"] = owner.get("name") or ""
                 td["customer_code"] = owner.get("customer_id") or ""
                 td["private_company"], td["is_private"] = "", False
+    # 2026-10-18: En partner (option 2) kører for sine genbrugsplads-kunder -
+    # egne ture (uden plads eller på egen lokation) er premium.
+    if partner and not customer_site:
+        raise HTTPException(status_code=403, detail="Som logistikpartner opretter I ture på jeres kunders "
+                                                    "genbrugspladser. Egne ture er en del af ContainerFlow Premium.")
     kind = td.get("tour_kind") if td.get("tour_kind") in ("container", "goods") else "container"
     if not premium or customer_site:
         kind = "container"
@@ -1663,7 +1699,7 @@ async def _normalize_tour_doc(td: dict, payload: Optional[dict], profile_cache: 
     for key in ("address_parts", "facility_parts"):
         parts = td.get(key) or {}
         td[key] = {k: str(parts.get(k) or "").strip()[:120] for k in ("street", "postal", "city") if parts.get(k)}
-    cap = td.get("capture") or {}
+    cap = {} if partner else (td.get("capture") or {})
     td["capture"] = {"quantity": bool(cap.get("quantity")), "photo": bool(cap.get("photo"))} if cap else {}
     # Kunde fra registret: kun firmaets egne kunder, og kun på egne ture.
     ref = str(td.get("customer_ref_id") or "")
@@ -1673,8 +1709,8 @@ async def _normalize_tour_doc(td: dict, payload: Optional[dict], profile_cache: 
         td["customer_ref_id"] = ref if reg else ""
         if reg and not (td.get("private_company") or "").strip():
             td["private_company"], td["is_private"] = reg["name"], True
-    td["series_id"] = str(td.get("series_id") or "")[:64]
-    td["stops"] = _clean_stops(td.get("stops"))
+    td["series_id"] = "" if partner else str(td.get("series_id") or "")[:64]
+    td["stops"] = [] if partner else _clean_stops(td.get("stops"))
     # Én stop er ikke en stop-liste - så er address/facility nok. Undtagelse:
     # stoppet har en note eller kontakt, som chaufføren skal se.
     if len(td["stops"]) <= 1 and not any(s_.get("note") or s_.get("contact_name") or s_.get("contact_phone") for s_ in td["stops"]):
@@ -2410,7 +2446,13 @@ async def _driver_serves_customer(driver_payload: dict, customer_id: str) -> boo
     if not drv_company_id or not customer_id:
         return False
     if drv_company_id == customer_id:
-        return True  # ad-hoc own-company tours
+        # Egne ture findes kun for premium-logistikfirmaer (og ikke-logistik-
+        # firmaer med egne chauffører). En partner (option 2) kører kun for
+        # sine genbrugsplads-kunder - ellers kunne en partner-chauffør få
+        # "Egne ture" frem ved at sende sit eget firma-id (2026-10-18).
+        own_co = await _raw_db.companies.find_one(
+            {"id": drv_company_id}, {"_id": 0, "company_type": 1, "from_library": 1})
+        return _logistics_tier(own_co) != "partner"
     drv_co = await _raw_db.companies.find_one(
         {"id": drv_company_id},
         {"_id": 0, "serves_company_ids": 1},
@@ -2444,6 +2486,45 @@ def _logistics_tier(company: Optional[dict]) -> str:
     return "partner" if company.get("from_library") else "premium"
 
 
+# 2026-10-18: Det et premium-firma har UD OVER kernen. Kernen (begge typer) er
+# alt der gavner genbrugsplads-kunden: bestillinger, planlægning, chauffører,
+# rapportering, arkiv, tidsregistrering og Økonomi for kundernes ture. Premium
+# er vognmandens egen forretning uden for genbrugspladserne. Serveren håndhæver
+# det (se _PREMIUM_ROUTES og _normalize_tour_doc); frontend bruger samme liste.
+PREMIUM_CAPABILITIES = {
+    "own_locations": "Egne lokationer",
+    "own_tours": "Egne ture",
+    "own_customers": "Egne kunder",
+    "goods": "Fragt",
+    "trailer_cargo": "Hængere med indhold pr. hænger",
+    "stops": "Ture med flere stop",
+    "series": "Gentagne ture",
+    "capture": "Krav ved afslutning",
+}
+_tier_cache: Dict[str, tuple] = {}
+
+
+async def _company_tier(cid: str) -> str:
+    """"premium" | "partner" | "" (ikke et logistikfirma). Cache 15 s."""
+    if not cid:
+        return ""
+    hit = _tier_cache.get(cid)
+    if hit and hit[0] > _time.time():
+        return hit[1]
+    co = await _raw_db.companies.find_one({"id": cid}, {"_id": 0, "company_type": 1, "from_library": 1})
+    tier = _logistics_tier(co)
+    _tier_cache[cid] = (_time.time() + 15, tier)
+    return tier
+
+
+def _la_plads_query(la: str, partner: bool) -> dict:
+    """Pladser et logistikfirma arbejder på. En partner har ingen egne
+    lokationer (heller ikke efter en nedgradering fra premium)."""
+    if partner:
+        return {"active": True, "assigned_logistics_company_ids": la, "company_id": {"$ne": la}}
+    return {"active": True, "$or": [{"company_id": la}, {"assigned_logistics_company_ids": la}]}
+
+
 async def _logistics_profile(cid: str) -> dict:
     comp = await _raw_db.companies.find_one(
         {"id": cid}, {"_id": 0, "id": 1, "name": 1, "company_type": 1, "from_library": 1,
@@ -2464,6 +2545,7 @@ async def _logistics_profile(cid: str) -> dict:
         "is_premium": tier == "premium",
         "connected_customers": customers,
         "has_connections": bool(customers),
+        "capabilities": {k: tier == "premium" for k in PREMIUM_CAPABILITIES},
     }
 
 
@@ -2597,13 +2679,7 @@ async def _resolve_la_pladser_for_template(payload: dict) -> list:
     la_company = payload.get("company_id") or ""
     if not la_company or la_company == SUPER_ADMIN_BYPASS:
         return []
-    q = {
-        "active": True,
-        "$or": [
-            {"company_id": la_company},
-            {"assigned_logistics_company_ids": la_company},
-        ],
-    }
+    q = _la_plads_query(la_company, await _company_tier(la_company) == "partner")
     return await _raw_db.plads.find(q, {"_id": 0}).to_list(500)
 
 
@@ -2893,6 +2969,13 @@ async def update_tour(tour_id: str, update: TourUpdate, payload: dict = Depends(
     update_data = {k: v for k, v in update.model_dump().items() if v is not None}
     if not update_data:
         raise HTTPException(status_code=400, detail="No update data provided")
+    # 2026-10-18: Hængere/indhold, stop og krav ved afslutning er premium.
+    if payload.get("role") in ("logistics_admin", "driver") and \
+            await _company_tier(payload.get("company_id") or "") == "partner":
+        for k in ("trailer_count", "cargo_lines", "stops", "capture", "series_id", "customer_ref_id"):
+            update_data.pop(k, None)
+        if not update_data:
+            raise HTTPException(status_code=403, detail="Det er en del af ContainerFlow Premium")
     if "date" in update_data:
         update_data["date"] = normalize_date(update_data["date"])
     if "stops" in update_data:
@@ -2934,6 +3017,8 @@ async def update_tour(tour_id: str, update: TourUpdate, payload: dict = Depends(
         partners = existing_tour.get("assigned_logistics_company_ids") or []
         if not (tour_cid == la_company or la_company in partners):
             raise HTTPException(status_code=403, detail="Tur tilhører anden virksomhed")
+        if update_data.get("plads") and update_data["plads"] != existing_tour.get("plads"):
+            await _require_plads_allowed(payload, update_data["plads"])
 
     # 2026-10-18: En faktureret tur er frosset. Registreringen (vægt, mængde,
     # status, tider, hængere) må ikke ændres bagefter, ellers passer den ikke
@@ -3717,7 +3802,7 @@ async def get_tour_image(tour_id: str):
 
 
 @api_router.delete("/tours/report/{report_id}")
-async def delete_tours_by_report(report_id: str):
+async def delete_tours_by_report(report_id: str, payload: dict = Depends(require_role("super_admin"))):
     result = await db.tours.delete_many({"report_id": report_id})
     return {"message": f"Deleted {result.deleted_count} tours"}
 
@@ -4578,7 +4663,7 @@ async def driver_end_shift(data: dict):
     return {"id": archive.id, "message": "Dagrapport gemt"}
 
 @api_router.post("/admin/cleanup")
-async def admin_cleanup(credentials: dict):
+async def admin_cleanup(credentials: dict, payload: dict = Depends(require_role("super_admin"))):
     """Admin-triggered cleanup of old data."""
     password = credentials.get("password", "")
     admin_pw = await get_admin_password()
@@ -4944,13 +5029,7 @@ async def get_plads(payload: Optional[dict] = Depends(get_optional_user_payload)
         # indeholder deres company_id). De skal IKKE oprette plads manuelt —
         # plads strømmer ind fra customer-admin's /api/org/locations.
         la_company = payload.get("company_id")
-        q = {
-            "active": True,
-            "$or": [
-                {"company_id": la_company},
-                {"assigned_logistics_company_ids": la_company},
-            ],
-        }
+        q = _la_plads_query(la_company, await _company_tier(la_company) == "partner")
         plads_list = await _raw_db.plads.find(q, {"_id": 0}).to_list(500)
     else:
         plads_list = await db.plads.find({"active": True}, {"_id": 0}).to_list(500)
@@ -8020,8 +8099,10 @@ async def get_daily_overview(date: Optional[str] = None):
 
 # ============= SEED DATA =============
 
+# 2026-10-18: Ubrugte demo-/vedligeholdelsesendpoints kun for super admin
+# (før kunne enhver - også uden login - kalde dem).
 @api_router.post("/seed")
-async def seed_data():
+async def seed_data(payload: dict = Depends(require_role("super_admin"))):
     existing = await db.drivers.count_documents({})
     if existing > 0:
         # Still seed plads if not seeded
@@ -10184,7 +10265,7 @@ async def set_active_vehicle_trailer(body: DriverSelectionUpdate,
 
 # Seed default locations
 @api_router.post("/seed-locations")
-async def seed_locations():
+async def seed_locations(payload: dict = Depends(require_role("super_admin"))):
     default_locations = [
         {"code": "3030", "name": "Skipstrup Genbrugsplads", "address": "Skibstrupvej 1, 3140 Ålsgårde", "city": "Ålsgårde"},
         {"code": "3131", "name": "Cireklen Genbrugsplads", "address": "Energivej 1, 3000 Helsingør", "city": "Helsingør"},
@@ -10267,8 +10348,21 @@ async def delete_receipt(receipt_id: str):
 
 # ============= DRIVER ARCHIVE ENDPOINT =============
 
+async def _archive_driver_scope(payload: dict) -> Optional[dict]:
+    """2026-10-18: Chauffør-arkivet læser på tværs af kunder (_raw_db), men en
+    logistik-admin må kun se SINE EGNE chaufførers data. Før så fx ILK også
+    Hansens chauffører. Returnerer None for super admin (ser alt)."""
+    if payload.get("role") == "super_admin":
+        return None
+    la = payload.get("company_id") or ""
+    users = await _raw_db.users.find(
+        {"company_id": la, "role": "driver"}, {"_id": 0, "id": 1, "name": 1, "display_name": 1}).to_list(1000)
+    names = {n for u in users for n in (u.get("name"), u.get("display_name")) if n}
+    return {"la": la, "ids": [u["id"] for u in users], "names": names}
+
+
 @api_router.get("/driver-archive")
-async def get_driver_archive():
+async def get_driver_archive(payload: dict = Depends(require_role("logistics_admin", "super_admin"))):
     """Get all drivers with their daily work data grouped by date.
 
     Fase 17.11 (2026-02-27): Bruger _raw_db i alle queries. Ture/kvitteringer
@@ -10276,6 +10370,9 @@ async def get_driver_archive():
     skal kunne se ALLE deres chaufførers data uanset hvilken kunde
     de var udsendt til. Driver-archive er admin-only.
     """
+    scope = await _archive_driver_scope(payload)
+    if scope is not None:
+        return {"drivers": sorted(scope["names"], key=lambda n: n.lower())}
     driver_names = set()
 
     sessions = await _raw_db.driver_sessions.find({}, {"_id": 0, "driver_name": 1}).to_list(2000)
@@ -10322,7 +10419,8 @@ async def get_driver_archive():
     return {"drivers": sorted(canonical, key=lambda n: n.lower())}
 
 @api_router.get("/driver-archive/{driver_name}")
-async def get_driver_archive_detail(driver_name: str):
+async def get_driver_archive_detail(driver_name: str,
+                                    payload: dict = Depends(require_role("logistics_admin", "super_admin"))):
     """Get a specific driver's daily archive: sessions, tours, receipts grouped by date.
 
     Fase 17.9 (2026-02-27): Token-baseret matching der merger
@@ -10344,13 +10442,23 @@ async def get_driver_archive_detail(driver_name: str):
         {"driver_name": name_re},
         {"claimed_by": name_re},
     ]
+    # 2026-10-18: Kun firmaets egne chauffører og deres data hos firmaet.
+    scope = await _archive_driver_scope(payload)
+    own_q: Dict[str, Any] = {}
+    tour_scope: Dict[str, Any] = {}
+    if scope is not None:
+        if raw.lower() not in {n.lower() for n in scope["names"]}:
+            raise HTTPException(status_code=404, detail="Chauffør ikke fundet")
+        own_q = {"company_id": scope["la"]}
+        tour_scope = {"$or": [{"company_id": scope["la"]}, {"assigned_logistics_company_ids": scope["la"]}]}
 
     sessions = await _raw_db.driver_sessions.find(
-        {"driver_name": name_re}, {"_id": 0}
+        {"driver_name": name_re, **own_q}, {"_id": 0}
     ).to_list(2000)
 
     reports = await _raw_db.reports.find(
-        {"driver_name": name_re}, {"_id": 0}
+        {"driver_name": name_re, **({"$or": [own_q, {"driver_id": {"$in": scope["ids"]}}]} if scope else {})},
+        {"_id": 0}
     ).sort("report_date", -1).to_list(2000)
 
     # Fase 17.11 (2026-02-27): Brug _raw_db for tours, sessions, reports,
@@ -10360,12 +10468,15 @@ async def get_driver_archive_detail(driver_name: str):
     # Driver-archive er admin-only og skal vise chaufførens DATA samlet
     # uanset hvilken kunde turen var for.
     tours = await _raw_db.tours.find(
-        {"$or": or_filter, "tour_type": {"$ne": "estimat"}},
+        {"$and": [{"$or": or_filter}, tour_scope]} if tour_scope else {"$or": or_filter, "tour_type": {"$ne": "estimat"}},
         {"_id": 0, "receipt_image": 0}
     ).to_list(5000)
+    if tour_scope:
+        tours = [t for t in tours if t.get("tour_type") != "estimat"]
 
     receipts = await _raw_db.receipts.find(
-        {"driver_name": name_re},
+        {"driver_name": name_re,
+         **({"$or": [own_q, {"tour_id": {"$in": [t.get("id") for t in tours]}}]} if scope else {})},
         {"_id": 0, "image_data": 0}
     ).sort("created_at", -1).to_list(2000)
 
@@ -10376,7 +10487,7 @@ async def get_driver_archive_detail(driver_name: str):
     # som turene/sessions ovenfor.
     user_docs = await _raw_db.users.find(
         {"$or": [{"name": name_re}, {"display_name": name_re}],
-         "role": "driver"},
+         "role": "driver", **own_q},
         {"_id": 0, "id": 1, "name": 1, "display_name": 1},
     ).to_list(50)
     driver_ids = [u["id"] for u in user_docs if u.get("id")]
@@ -10422,7 +10533,7 @@ async def get_driver_archive_detail(driver_name: str):
     # Get tour IDs that have receipt images (same case-insensitive filter, raw DB)
     tour_ids_with_images = set()
     tours_with_imgs = await _raw_db.tours.find(
-        {"$or": or_filter, "receipt_image": {"$ne": ""}},
+        {"$and": [{"$or": or_filter}, {"receipt_image": {"$ne": ""}}, *( [tour_scope] if tour_scope else [])]},
         {"_id": 0, "id": 1}
     ).to_list(5000)
     for t in tours_with_imgs:
@@ -11158,8 +11269,25 @@ _PERM_ROUTES = [
     ({"GET", "POST", "PUT", "DELETE"}, re.compile(r"^/api/logistics/team"), "team"),
     ({"POST", "PUT", "DELETE"}, re.compile(r"^/api/logistics/customers"), "tours_edit"),
     ({"GET", "POST"}, re.compile(r"^/api/admin/day-report"), "archive"),
+    # 2026-10-18: Før kun håndhævet i skærmbilledet.
+    ({"GET", "POST", "PUT", "PATCH", "DELETE"}, re.compile(r"^/api/admin/(time-entries|missing-clock)"), "planning"),
+    ({"POST"}, re.compile(r"^/api/driver/time-entries/manual-punch"), "planning"),
+    ({"PUT", "PATCH"}, re.compile(r"^/api/company/(payroll-settings|punch-reason-settings|finish-settings)"), "settings"),
+    ({"GET", "POST"}, re.compile(r"^/api/(pdf-archive|receipts-archive|receipts-location-documents|driver-archive)"), "archive"),
+    ({"PUT"}, re.compile(r"^/api/receipts/[^/]+/weight-override$"), "archive"),
+    ({"POST"}, re.compile(r"^/api/messages$"), "messages"),
 ]
 _perm_cache: Dict[str, tuple] = {}
+
+# 2026-10-18: Premium-adresser (gælder logistik-admins OG chauffører i et
+# partner-firma). GET på egne kunder svarer tom liste, så fælles skærmbilleder
+# ikke fejler; ændringer afvises med 403.
+_PREMIUM_ROUTES = [
+    ({"GET", "POST", "PUT", "DELETE", "PATCH"}, re.compile(r"^/api/logistics/customers(/|$)"), "own_customers"),
+    ({"PUT", "DELETE"}, re.compile(r"^/api/tours/series/[^/]+$"), "series"),
+    ({"POST"}, re.compile(r"^/api/tours/[^/]+/stops$"), "stops"),
+    ({"PUT", "DELETE"}, re.compile(r"^/api/plads/[^/]+$"), "own_locations"),
+]
 
 
 async def _coordinator_perms(uid: str) -> Optional[dict]:
@@ -11251,6 +11379,17 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
             except HTTPException:
                 pass
 
+        # 2026-10-18: Afvis som standard. Alle /api-kald kræver et gyldigt login,
+        # undtagen de offentlige (login, invitation, nulstil kode, QR-bestilling).
+        # Før svarede ~80 ældre endpoints uden login - fx oprettede
+        # POST /tours/bulk ture, og chauffør-arkivet viste alle firmaers
+        # chauffører, vogne og arbejdstider.
+        if (uid is None and path.startswith("/api") and not is_public
+                and request.method != "OPTIONS"
+                and not any(request.method in m and rx.match(path) for m, rx in ANON_ALLOWED_ROUTES)):
+            from starlette.responses import JSONResponse
+            return JSONResponse(status_code=401, content={"detail": "Ikke logget ind"})
+
         # Acting-Company override: a logistics_admin (or super_admin) may pass
         # an X-Acting-Company-Id header to operate on a different company's
         # data (e.g. tours/pladser for a managed client company).
@@ -11292,6 +11431,18 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
                     return JSONResponse(status_code=403, content={
                         "detail": f"Du har ikke rettighed til: {COORDINATOR_PERM_LABEL.get(needed, needed)}",
                         "missing_permission": needed})
+
+        # 2026-10-18: Premium-funktioner er ikke en del af partner-pakken.
+        if role in ("logistics_admin", "driver") and uid and path.startswith("/api/") and not is_public:
+            cap = next((c for methods, rx, c in _PREMIUM_ROUTES
+                        if request.method in methods and rx.match(path)), None)
+            if cap and await _company_tier(user_company_id or "") == "partner":
+                from starlette.responses import JSONResponse
+                if request.method == "GET":
+                    return JSONResponse(status_code=200, content=[])
+                return JSONResponse(status_code=403, content={
+                    "detail": f"{PREMIUM_CAPABILITIES[cap]} er en del af ContainerFlow Premium",
+                    "premium_required": cap})
 
         # Company suspension check: block any non-super-admin user whose company is inactive.
         # We allow auth endpoints (login/logout/me) so users can still authenticate / log out
@@ -12023,6 +12174,42 @@ async def patch_payroll_settings(
     settings["require_driver_punch_reason"] = bool((refreshed or {}).get("require_driver_punch_reason") or False)
     settings["require_admin_punch_reason"] = bool((refreshed or {}).get("require_admin_punch_reason") or False)
     return {"company_id": cid, "company_name": (refreshed or {}).get("name", ""), **settings}
+
+
+@sa_router.get("/companies/{company_id}/logistics-tier")
+async def sa_get_logistics_tier(company_id: str):
+    """2026-10-18: Hvad firmaet har, som skjules ved en nedgradering til partner
+    (intet slettes - det kommer igen ved en opgradering)."""
+    co = await _raw_db.companies.find_one({"id": company_id}, {"_id": 0})
+    tier = _logistics_tier(co)
+    if not tier:
+        raise HTTPException(status_code=404, detail="Logistikfirma ikke fundet")
+    return {
+        "tier": tier,
+        "connected_customers": len([c for c in (co.get("serves_company_ids") or []) if c]),
+        "own_locations": await _raw_db.plads.count_documents({"company_id": company_id}),
+        "own_customers": await _raw_db.logistics_customers.count_documents({"company_id": company_id}),
+        "own_tours": await _raw_db.tours.count_documents({"company_id": company_id, "deleted": {"$ne": True}}),
+    }
+
+
+@sa_router.put("/companies/{company_id}/logistics-tier")
+async def sa_set_logistics_tier(company_id: str, body: dict, payload: dict = Depends(get_current_user_payload)):
+    """Opgradér en partner til premium eller nedgradér. Samme firma-id, så
+    tilknytninger, chauffører og ture følger med; premium-data skjules kun."""
+    tier = body.get("tier")
+    if tier not in ("premium", "partner"):
+        raise HTTPException(status_code=400, detail="Vælg premium eller partner")
+    co = await _raw_db.companies.find_one({"id": company_id}, {"_id": 0, "company_type": 1, "from_library": 1, "name": 1})
+    old = _logistics_tier(co)
+    if not old:
+        raise HTTPException(status_code=404, detail="Logistikfirma ikke fundet")
+    await _raw_db.companies.update_one({"id": company_id}, {"$set": {"from_library": tier == "partner"}})
+    _tier_cache.pop(company_id, None)
+    invalidate_company_cache(company_id)
+    await _audit("logistics_tier_changed", payload, {"company_id": company_id, "name": co.get("name"),
+                                                     "from": old, "to": tier})
+    return {"tier": tier}
 
 
 @sa_router.get("/companies")
@@ -13846,11 +14033,13 @@ async def org_set_location_logistics(location_id: str,
     loc = await _raw_db.plads.find_one({"id": location_id}, {"_id": 0})
     if not loc or loc.get("company_id") != caller["company_id"]:
         raise HTTPException(status_code=404, detail="Lokation ikke fundet")
-    # Validate every id refers to an actual logistics company
+    # Validate every id refers to a logistics company THIS customer has linked
+    # (2026-10-18: før kunne en plads tildeles et vilkårligt logistikfirma).
     ids = [x for x in (body.logistics_company_ids or []) if x]
     if ids:
         valid = await _raw_db.companies.find(
-            {"id": {"$in": ids}, "company_type": COMPANY_TYPE_LOGISTICS},
+            {"id": {"$in": ids}, "company_type": COMPANY_TYPE_LOGISTICS,
+             "serves_company_ids": caller["company_id"]},
             {"_id": 0, "id": 1},
         ).to_list(1000)
         valid_ids = {c["id"] for c in valid}
@@ -13865,6 +14054,14 @@ async def org_set_location_logistics(location_id: str,
         {"id": location_id},
         {"$set": {"assigned_logistics_company_ids": ids}},
     )
+    # 2026-10-18: Åbne ture på pladsen, som står uden logistikfirma (fordi den
+    # tidligere partner blev fjernet), går til de nye partnere.
+    if ids and loc.get("name"):
+        await _raw_db.tours.update_many(
+            {"company_id": caller["company_id"], "plads": loc["name"],
+             "assigned_logistics_company_ids": {"$in": [[], None]},
+             "completed": {"$ne": True}, "on_way": {"$ne": True}, "deleted": {"$ne": True}},
+            {"$set": {"assigned_logistics_company_ids": ids}})
     await _audit("org_location_logistics_set", payload,
                  {"location_id": location_id, "logistics_company_ids": ids})
     res = await _raw_db.plads.find_one({"id": location_id}, {"_id": 0})
@@ -14257,13 +14454,20 @@ async def org_list_logistics_companies(payload: dict = Depends(require_role("cus
     """List logistics-type companies the customer can partner with."""
     comps = await _raw_db.companies.find(
         {"company_type": COMPANY_TYPE_LOGISTICS},
-        {"_id": 0, "id": 1, "name": 1, "serves_company_ids": 1},
+        {"_id": 0, "id": 1, "name": 1, "serves_company_ids": 1, "active": 1},
     ).sort("name", 1).to_list(1000)
     caller = await _org_caller(payload)
     cid = caller["company_id"]
+    # 2026-10-18: Kun navn + om VI er tilknyttet. Før fulgte listen over andre
+    # kunder, firmaet kører for, med (serves_company_ids). Inaktive firmaer
+    # vises kun, hvis vi stadig er tilknyttet (så de kan fjernes).
+    out = []
     for c in comps:
-        c["linked"] = cid in (c.get("serves_company_ids") or [])
-    return comps
+        linked = cid in (c.get("serves_company_ids") or [])
+        if c.get("active") is False and not linked:
+            continue
+        out.append({"id": c["id"], "name": c.get("name") or "", "linked": linked})
+    return out
 
 
 @org_router.get("/my-partners")
@@ -14285,7 +14489,7 @@ async def org_link_logistics_partner(body: LogisticsPartnerLink,
     caller = await _org_caller(payload)
     cid = caller["company_id"]
     logi = await _raw_db.companies.find_one({"id": body.logistics_company_id}, {"_id": 0})
-    if not logi or logi.get("company_type") != COMPANY_TYPE_LOGISTICS:
+    if not logi or logi.get("company_type") != COMPANY_TYPE_LOGISTICS or logi.get("active") is False:
         raise HTTPException(status_code=404, detail="Logistik-firma ikke fundet")
 
     serves = list(logi.get("serves_company_ids") or [])
@@ -14296,43 +14500,11 @@ async def org_link_logistics_partner(body: LogisticsPartnerLink,
         )
         invalidate_company_cache(logi["id"])
 
+    # 2026-10-18: `admin` ignoreres (som modellen altid har sagt). Før oprettede
+    # feltet en fuld logistik-admin med en adgangskode, kunden selv valgte - i
+    # et hvilket som helst logistikfirma, også premium-firmaer. Logistik-admins
+    # oprettes kun af super admin (invitation).
     created_admin = None
-    if body.admin and (body.admin.email or "").strip():
-        # Multi-tenant rule: EVERY customer that links a logistics partner
-        # may seed their OWN admin user for that partner — possibly with the
-        # same email and a customer-specific password. The system records
-        # them as separate users (different passwords), so when Bo logs in
-        # with ARGO's password he gets ARGO context, with MARTO's password
-        # MARTO context. We just ensure (email, customer_link) is unique to
-        # avoid double-creating the same admin from the same customer.
-        email = body.admin.email.strip().lower()
-        if not body.admin.password or len(body.admin.password) < 4:
-            raise HTTPException(status_code=400, detail="Admin password skal være mindst 4 tegn")
-        # Block: same email already exists under THIS logistics company with the
-        # SAME linked_customer_id (i.e. this same customer already invited them).
-        dup = await _raw_db.users.find_one({
-            "email": email,
-            "company_id": logi["id"],
-            "linked_customer_id": cid,
-        })
-        if dup:
-            raise HTTPException(
-                status_code=409,
-                detail=f"Du har allerede tilføjet en admin med email {email} for dette logistik-firma",
-            )
-        admin_user = AuthUser(
-            email=email,
-            name=(body.admin.name or "").strip() or email,
-            role="logistics_admin",
-            company_id=logi["id"],
-        )
-        adoc = admin_user.model_dump()
-        adoc["password_hash"] = hash_password(body.admin.password)
-        # Track which customer invited this admin (for audit + per-customer disambiguation)
-        adoc["linked_customer_id"] = cid
-        await _raw_db.users.insert_one(adoc)
-        created_admin = {"email": email, "role": "logistics_admin"}
-
     await _audit("org_logistics_linked", payload,
                  {"customer_company_id": cid, "logistics_company_id": logi["id"],
                   "logistics_name": logi["name"], "created_admin": bool(created_admin)})
@@ -14353,9 +14525,35 @@ async def org_unlink_logistics_partner(logistics_company_id: str,
         {"id": logistics_company_id}, {"$set": {"serves_company_ids": serves}}
     )
     invalidate_company_cache(logistics_company_id)
+    # 2026-10-18: Fjernes partneren, mister den også adgangen til kundens
+    # pladser og til ture, der ikke er startet (før så den dem fortsat).
+    # Igangværende og kørte ture forbliver synlige for logistikfirmaet:
+    # chaufføren kan køre turen færdig, og kørte ture er firmaets dokumentation.
+    plads_res = await _raw_db.plads.update_many(
+        {"company_id": cid, "assigned_logistics_company_ids": logistics_company_id},
+        {"$pull": {"assigned_logistics_company_ids": logistics_company_id}})
+    drv_ids = {u["id"] async for u in _raw_db.users.find(
+        {"company_id": logistics_company_id, "role": "driver"}, {"_id": 0, "id": 1})}
+    released = 0
+    async for t in _raw_db.tours.find(
+            {"company_id": cid, "assigned_logistics_company_ids": logistics_company_id,
+             "completed": {"$ne": True}, "on_way": {"$ne": True}, "not_completed": {"$ne": True},
+             "deleted": {"$ne": True}},
+            {"_id": 0, "id": 1, "driver_id": 1, "claimed_by_id": 1}):
+        upd: Dict[str, Any] = {"$pull": {"assigned_logistics_company_ids": logistics_company_id}}
+        st = {}
+        if t.get("driver_id") in drv_ids:
+            st.update({"driver_id": "", "driver_name": ""})
+        if t.get("claimed_by_id") in drv_ids:
+            st.update({"claimed_by": "", "claimed_by_id": "", "claimed_at": ""})
+        if st:
+            upd["$set"] = st
+        await _raw_db.tours.update_one({"id": t["id"]}, upd)
+        released += 1
     await _audit("org_logistics_unlinked", payload,
-                 {"customer_company_id": cid, "logistics_company_id": logistics_company_id})
-    return {"success": True}
+                 {"customer_company_id": cid, "logistics_company_id": logistics_company_id,
+                  "plads_updated": plads_res.modified_count, "open_tours_released": released})
+    return {"success": True, "plads_updated": plads_res.modified_count, "open_tours_released": released}
 
 
 app.include_router(auth_router)
@@ -17832,12 +18030,21 @@ async def pricing_holidays(year: int, payload: dict = Depends(get_current_user_p
 async def pricing_options(payload: dict = Depends(get_current_user_payload)):
     me = await _pricing_caller(payload)
     cid = me["company_id"]
+    profile = await _logistics_profile(cid)
+    # 2026-10-18: En partner (option 2) har Økonomi for sine tilknyttede
+    # genbrugsplads-kunder - ikke egne kunder eller egne lokationer.
+    partner = profile.get("tier") == "partner"
+    plads_q: Dict[str, Any] = {"assigned_logistics_company_ids": cid}
+    if partner:
+        plads_q["company_id"] = {"$in": [c["id"] for c in profile.get("connected_customers") or []]}
     plads = await _raw_db.plads.find(
-        {"assigned_logistics_company_ids": cid},
+        plads_q,
         {"_id": 0, "name": 1, "location_code": 1, "company_id": 1, "materials": 1, "partner_materials": 1},
     ).to_list(5000)
     comp = await _raw_db.companies.find_one({"id": cid}, {"_id": 0, "serves_company_ids": 1}) or {}
     cust_ids = set(comp.get("serves_company_ids") or []) | {p.get("company_id") for p in plads}
+    if partner:
+        cust_ids = {c["id"] for c in profile.get("connected_customers") or []}
     customers = await _raw_db.companies.find(
         {"id": {"$in": [c for c in cust_ids if c]}, "company_type": COMPANY_TYPE_CUSTOMER},
         {"_id": 0, "id": 1, "name": 1},
@@ -17852,7 +18059,6 @@ async def pricing_options(payload: dict = Depends(get_current_user_payload)):
         pm = (p.get("partner_materials") or {}).get(cid)
         materials.update(pm if pm else (p.get("materials") or []))
     legacy = await _raw_db.tour_prices.count_documents({"company_id": cid})
-    profile = await _logistics_profile(cid)
     customers = sorted(customers, key=lambda c: c["name"])
     # Egne ture (premium / manuelle): kunden er firmaet på turen.
     own_names: Dict[str, str] = {}
@@ -17868,12 +18074,19 @@ async def pricing_options(payload: dict = Depends(get_current_user_payload)):
         reg_keys[k] = d
         if d.get("active", True) or k in own_names:
             own_names[k] = d["name"]
+    if partner:
+        own_names = {}
     if own_names or profile.get("is_premium"):
         customers.append({"id": cid, "name": "Egne ture uden kunde", "own": True})
         customers += [{"id": f"firma:{k}", "name": v, "own": True,
                        "registered_id": (reg_keys.get(k) or {}).get("id"),
                        "inactive": (reg_keys.get(k) or {}).get("active") is False}
                       for k, v in sorted(own_names.items(), key=lambda kv: kv[1].lower())]
+    # Koordinator begrænset til bestemte kunder ser kun dem (2026-10-18).
+    scope = await _la_scope(payload)
+    if scope:
+        customers = [c for c in customers if c["id"] in scope or (c.get("own") and "own" in scope)]
+        plads = [p for p in plads if p.get("company_id") in scope or (p.get("company_id") == cid and "own" in scope)]
     return {
         "profile": profile,
         "customers": customers,
@@ -17906,6 +18119,25 @@ def _parse_dk_number(x) -> float:
     elif re.match(r"^\d{1,3}(\.\d{3})+$", s):
         s = s.replace(".", "")  # "1.000" = tusind (dansk), ikke 1,000
     return float(s)
+
+
+async def _check_rule_customers(cid: str, payload: dict, rules: List[dict]) -> None:
+    """2026-10-18: En partner kan kun lave priser for sine tilknyttede
+    genbrugsplads-kunder (ingen egne kunder). En koordinator med
+    kundeafgrænsning kun for sine kunder. Regler uden kunde er generelle."""
+    ids = {c for r in rules for c in ((r.get("conditions") or {}).get("customer_ids") or []) if c}
+    if not ids:
+        return
+    if await _company_tier(cid) == "partner":
+        allowed = {c["id"] for c in (await _logistics_profile(cid)).get("connected_customers") or []}
+        if ids - allowed:
+            raise HTTPException(status_code=403, detail="Som logistikpartner kan I lave priser for jeres "
+                                                        "tilknyttede genbrugsplads-kunder. Egne kunder er en del af ContainerFlow Premium.")
+    scope = await _la_scope(payload)
+    if scope:
+        own_ok = "own" in scope
+        if any(not (c in scope or (own_ok and (c == cid or str(c).startswith("firma:")))) for c in ids):
+            raise HTTPException(status_code=403, detail="Du kan kun lave priser for de kunder, du har adgang til")
 
 
 def _clean_rule(body: dict) -> dict:
@@ -18021,6 +18253,7 @@ async def pricing_create_rule(body: dict, payload: dict = Depends(get_current_us
     me = await _pricing_caller(payload)
     now = datetime.now(timezone.utc).isoformat()
     rid = str(uuid.uuid4())
+    await _check_rule_customers(me["company_id"], payload, [_clean_rule(body)])
     doc = {**_clean_rule(body), "id": rid, "version_group": rid, "company_id": me["company_id"],
            "created_at": now, "updated_at": now, "updated_by": me.get("name") or me.get("email"),
            "version_from": _effective_ts(body.get("effective"))}
@@ -18038,6 +18271,7 @@ async def pricing_update_rule(rule_id: str, body: dict, payload: dict = Depends(
     old = await _raw_db.price_rules.find_one({"id": rule_id, "company_id": me["company_id"]}, {"_id": 0})
     if not old:
         raise HTTPException(status_code=404, detail="Regel ikke fundet")
+    await _check_rule_customers(me["company_id"], payload, [_clean_rule(body)])
     return await _save_rule_version(me, old, _clean_rule(body), body.get("effective"))
 
 
@@ -18182,6 +18416,7 @@ async def pricing_save_bundle(body: dict, payload: dict = Depends(get_current_us
     bid = body.get("bundle_id") or str(uuid.uuid4())
     name = str(body.get("name") or "").strip()
     items = [(raw, _clean_rule(raw)) for raw in _bundle_rule_bodies(body)]
+    await _check_rule_customers(cid, payload, [c for _, c in items])
     now_dt = datetime.now(timezone.utc)
     current = [r for r in await _active_rules(cid) if _rule_is_current(r)]
     mine = {r["id"]: r for r in current if r.get("bundle_id") == bid or r["id"] in set(body.get("adopt_ids") or [])}
@@ -18360,6 +18595,9 @@ async def pricing_report(date_from: str, date_to: str, customer_id: str = "", lo
     except ValueError:
         raise HTTPException(status_code=400, detail="Ugyldig periode")
     tours = await _billable_tours(cid, date_from, date_to)
+    scope = await _la_scope(payload)
+    if scope:
+        tours = [t for t in tours if _scope_ok(t, scope, cid)]
     settings = await _price_settings(cid)
     ctx = _PricingContext(cid, settings, await _active_rules(cid))
     await ctx.load(tours)
@@ -18403,9 +18641,11 @@ async def pricing_report(date_from: str, date_to: str, customer_id: str = "", lo
     }
 
 
-async def _owned_tour(cid: str, tour_id: str) -> dict:
+async def _owned_tour(cid: str, tour_id: str, payload: Optional[dict] = None) -> dict:
     t = await _raw_db.tours.find_one({"id": tour_id}, {"_id": 0, "receipt_image": 0})
     if not t:
+        raise HTTPException(status_code=404, detail="Tur ikke fundet")
+    if payload is not None and not _scope_ok(t, await _la_scope(payload), cid):
         raise HTTPException(status_code=404, detail="Tur ikke fundet")
     # 2026-10-18: Også firmaets egne/tildelte ture der endnu ikke er taget af
     # en chauffør (prisstatus på Ture-siden, "Prøv prisen" før turen køres).
@@ -18431,6 +18671,9 @@ async def pricing_status(ids: str, payload: dict = Depends(get_current_user_payl
     dids, dnames = {d["id"] for d in drivers}, {d["name"] for d in drivers if d.get("name")}
     tours = [t for t in tours if t.get("company_id") == cid or cid in (t.get("assigned_logistics_company_ids") or [])
              or t.get("claimed_by_id") in dids or t.get("claimed_by") in dnames]
+    scope = await _la_scope(payload)
+    if scope:
+        tours = [t for t in tours if _scope_ok(t, scope, cid)]
     ctx = _PricingContext(cid, await _price_settings(cid), await _active_rules(cid))
     await ctx.load(tours)
     pending = await _pending_counts([t["id"] for t in tours])
@@ -18462,7 +18705,7 @@ async def pricing_status(ids: str, payload: dict = Depends(get_current_user_payl
 @pricing_router.get("/tours/{tour_id}")
 async def pricing_tour_detail(tour_id: str, payload: dict = Depends(get_current_user_payload)):
     me = await _pricing_caller(payload)
-    t = await _owned_tour(me["company_id"], tour_id)
+    t = await _owned_tour(me["company_id"], tour_id, payload)
     ctx = _PricingContext(me["company_id"], await _price_settings(me["company_id"]),
                           await _active_rules(me["company_id"]))
     await ctx.load([t])
@@ -18482,7 +18725,7 @@ async def pricing_tour_detail(tour_id: str, payload: dict = Depends(get_current_
 @pricing_router.put("/tours/{tour_id}/adjust")
 async def pricing_adjust_tour(tour_id: str, body: dict, payload: dict = Depends(get_current_user_payload)):
     me = await _pricing_caller(payload)
-    t = await _owned_tour(me["company_id"], tour_id)
+    t = await _owned_tour(me["company_id"], tour_id, payload)
     if t.get("price_locked"):
         raise HTTPException(status_code=409, detail="Turen er faktureret. Fjern markeringen før du ændrer.")
     note = str(body.get("note") or "").strip()
@@ -18538,7 +18781,7 @@ async def pricing_mark_invoiced(body: dict, payload: dict = Depends(get_current_
         raise HTTPException(status_code=400, detail="Ingen ture valgt")
     tours = []
     for tid in ids:
-        tours.append(await _owned_tour(cid, tid))
+        tours.append(await _owned_tour(cid, tid, payload))
     if not body.get("invoiced", True):
         await _raw_db.tours.update_many({"id": {"$in": ids}}, {"$unset": {"price_locked": ""}})
         return {"updated": len(ids)}
@@ -18602,7 +18845,7 @@ async def pricing_decide_request(req_id: str, body: dict, payload: dict = Depend
         raise HTTPException(status_code=400, detail="Skriv hvorfor anmodningen afvises")
     now, by = datetime.now(timezone.utc).isoformat(), me.get("name") or me.get("email")
     if approve:
-        t = await _owned_tour(me["company_id"], r["tour_id"])
+        t = await _owned_tour(me["company_id"], r["tour_id"], payload)
         if t.get("price_locked"):
             raise HTTPException(status_code=409, detail="Turen er faktureret. Fjern markeringen før du godkender.")
         fo = {**(t.get("fact_overrides") or {}), **(r.get("changes") or {})}
@@ -18762,6 +19005,33 @@ async def tour_finish(tour_id: str, body: dict, payload: dict = Depends(get_curr
         await _raw_db.finish_ops.insert_one({"op_id": op_id, "tour_id": tour_id, "result": result,
                                              "created_at": datetime.now(timezone.utc).isoformat()})
     return result
+
+
+# 2026-10-18: Afvigelseskoder og "ét afslutningsark" er drift (bruges af
+# chaufføren uanset priser) og ligger nu under Indstillinger med rettigheden
+# "settings" - før kun i Økonomi › Indstillinger (kræver "ændre priser").
+@api_router.get("/company/finish-settings")
+async def company_finish_settings(payload: dict = Depends(require_role("logistics_admin"))):
+    st = await _price_settings(payload.get("company_id") or "")
+    return {"deviation_codes": st.get("deviation_codes") or list(_DEFAULT_DEVIATION_CODES),
+            "unified_finish": bool(st.get("unified_finish"))}
+
+
+@api_router.put("/company/finish-settings")
+async def company_put_finish_settings(body: dict, payload: dict = Depends(require_role("logistics_admin"))):
+    cid = payload.get("company_id") or ""
+    upd: Dict[str, Any] = {}
+    if body.get("unified_finish") in (True, False):
+        upd["unified_finish"] = body["unified_finish"]
+    if isinstance(body.get("deviation_codes"), list):
+        codes = list(dict.fromkeys(str(x).strip()[:40] for x in body["deviation_codes"] if str(x).strip()))[:20]
+        upd["deviation_codes"] = codes or list(_DEFAULT_DEVIATION_CODES)
+    if upd:
+        await _raw_db.price_settings.update_one(
+            {"company_id": cid},
+            {"$set": {**upd, "company_id": cid, "updated_at": datetime.now(timezone.utc).isoformat()}},
+            upsert=True)
+    return await company_finish_settings(payload)
 
 
 @api_router.get("/driver/finish-settings")

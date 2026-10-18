@@ -815,6 +815,7 @@ function PartnersTab() {
   const [companies, setCompanies] = useState([]);
   const [loading, setLoading] = useState(true);
   const [linkFor, setLinkFor] = useState(null); // company being linked (confirmation only)
+  const [unlinkFor, setUnlinkFor] = useState(null);
   const [saving, setSaving] = useState(false);
 
   const fetchCompanies = useCallback(async () => {
@@ -836,9 +837,17 @@ function PartnersTab() {
     } catch (e) { toast.error(formatApiError(e)); }
     finally { setSaving(false); }
   };
+  // 2026-10-18: Frakobling fjerner også partnerens adgang til jeres pladser og
+  // til ture, der ikke er startet (de skal gives til en anden partner).
   const unlink = async (companyId) => {
-    try { await axios.delete(`${API}/org/logistics-partners/${companyId}`); toast.success("Frakoblet"); fetchCompanies(); }
-    catch (e) { toast.error(formatApiError(e)); }
+    setSaving(true);
+    try {
+      const { data } = await axios.delete(`${API}/org/logistics-partners/${companyId}`);
+      const n = data?.open_tours_released || 0;
+      toast.success(n ? `Frakoblet - ${n} tur${n === 1 ? "" : "e"}, der ikke var startet, er taget fra partneren` : "Frakoblet");
+      setUnlinkFor(null); fetchCompanies();
+    } catch (e) { toast.error(formatApiError(e)); }
+    finally { setSaving(false); }
   };
 
   return (
@@ -859,7 +868,7 @@ function PartnersTab() {
               {c.linked && <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300">Tilknyttet</span>}
             </div>
             {c.linked ? (
-              <button onClick={() => unlink(c.id)} data-testid={`unlink-partner-${c.id}`} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-lg text-xs font-semibold">
+              <button onClick={() => setUnlinkFor(c)} data-testid={`unlink-partner-${c.id}`} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-lg text-xs font-semibold">
                 <Link2Off className="w-3.5 h-3.5" /> Frakobl
               </button>
             ) : (
@@ -870,6 +879,23 @@ function PartnersTab() {
           </div>
         ))}
       </div>
+
+      {unlinkFor && (
+        <Modal title={`Frakobl ${unlinkFor.name}?`} onClose={() => setUnlinkFor(null)}>
+          <p className="text-sm text-slate-600 dark:text-slate-300 mb-2">
+            <span className="font-bold">{unlinkFor.name}</span> mister adgangen til jeres pladser og bestillinger.
+          </p>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">
+            Ture, der ikke er startet, fjernes fra dem - tildel pladsen til en anden partner, så får den partner turene. Ture, der er i gang eller kørt, kan de stadig se.
+          </p>
+          <div className="flex gap-2 justify-end">
+            <button onClick={() => setUnlinkFor(null)} disabled={saving} className="px-4 py-2 rounded-lg text-sm font-semibold bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200">Annuller</button>
+            <button onClick={() => unlink(unlinkFor.id)} disabled={saving} data-testid="confirm-unlink-partner-btn" className="px-4 py-2 rounded-lg text-sm font-semibold bg-rose-600 hover:bg-rose-700 text-white inline-flex items-center gap-2">
+              {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Link2Off className="w-4 h-4" />} Frakobl
+            </button>
+          </div>
+        </Modal>
+      )}
 
       {linkFor && (
         <Modal title={`Tilknyt ${linkFor.name}`} onClose={() => setLinkFor(null)}>

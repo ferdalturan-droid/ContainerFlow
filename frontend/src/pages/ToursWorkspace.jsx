@@ -267,7 +267,11 @@ function StopExtras({ value, onChange }) {
  *    antal/enhed, ingen containerfelter.
  * Hængere og indhold pr. hænger er premium-funktioner.
  */
-function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, defaultPlads, onCreated, siteWord, canPrice = false, customers = [], isPremium = false }) {
+// 2026-10-18: `caps` = firmaets premium-evner fra /logistics/profile (se
+// LOGISTICS_TIERS.md). En partner (option 2) har ingen af dem: én adresse ind
+// og ud, ingen Gentag, intet Kunde-felt og intet "Ved afslutning" - turen
+// opfører sig som en bestilling fra genbrugspladsen.
+function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, defaultPlads, onCreated, siteWord, canPrice = false, customers = [], caps = {} }) {
   const [f, setF] = useState(() => blankForm(initialDate, defaultPlads));
   const [saving, setSaving] = useState(false);
   const [more, setMore] = useState(false);
@@ -279,15 +283,16 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
   const set = (k, v) => setF(prev => ({ ...prev, [k]: v }));
   const plads = pladsList.find(p => p.name === f.plads);
   // Egen lokation hos et premium-firma = frit valg af type. Kundens plads = container (B2B).
-  const canChooseKind = isPremium && (!plads || !!plads.own_location);
+  const canChooseKind = !!caps.goods && (!plads || !!plads.own_location);
   const kind = canChooseKind ? f.kind : "container";
   const goods = kind === "goods";
   const types = goods ? GOODS_TYPES : TOUR_TYPES;
-  const tc = isPremium ? Number(f.trailer_count || 0) : 0;
+  const tc = caps.trailer_cargo ? Number(f.trailer_count || 0) : 0;
   const multiLines = goods || tc >= 2;
-  const dates = repeatDates(f);
-  const stops = f.stops.filter(addrFilled);
-  const deliveries = f.deliveries.filter(stopFilled);
+  const dates = repeatDates(caps.series ? f : { ...f, repeat: "none" });
+  const oneOrMany = (arr) => (caps.stops ? arr : arr.slice(0, 1));
+  const stops = oneOrMany(f.stops).filter(addrFilled);
+  const deliveries = oneOrMany(f.deliveries).filter(stopFilled);
   // Én opgave = én tur. Kun hvis brugeren beder om det, laves én tur pr. afhentningsadresse.
   const separate = f.separate && stops.length > 1;
   const total = dates.length * (separate ? stops.length : 1);
@@ -344,7 +349,7 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
     // Ved deling får den sidste tur resten, så summen passer præcist.
     const prices = Array.from({ length: nTours }, (_, k) => (perTour == null ? null
       : split && k === nTours - 1 ? Math.round((agreedN - perTour * (nTours - 1)) * 100) / 100 : perTour));
-    const seriesId = dates.length > 1 ? (window.crypto?.randomUUID?.() || `s-${Date.now()}`) : "";
+    const seriesId = caps.series && dates.length > 1 ? (window.crypto?.randomUUID?.() || `s-${Date.now()}`) : "";
     let idx = 0;
     const cargo = (multiLines || tc >= 1) ? lines.map(l => ({
       text: l.text.trim(), trailer: tc >= 2 && l.trailer ? Number(l.trailer) : (tc === 1 ? 1 : null),
@@ -359,12 +364,12 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
       address: formatAddress(pickups[0]), address_parts: addrOnly(pickups[0]),
       facility, facility_parts: lastDel ? addrOnly(lastDel) : {},
       customer_ref_id: customerRef, series_id: seriesId,
-      stops: stopList(pickups),
+      stops: caps.stops ? stopList(pickups) : [],
       container: goods ? "" : f.container.trim(), capacity_label: goods ? "" : f.capacity_label.trim(),
       open_from: f.open_from, open_to: f.open_to, priority: f.priority, remark: f.remark.trim(),
       is_private: !!firma, private_company: firma, sort_order: i,
       loose_estimated_count: f.tour_type === "loes_afhentning" ? (parseInt(f.loose_count, 10) || 0) : 0,
-      capture: { quantity: captureQty, photo: !!f.capture_photo },
+      ...(caps.capture ? { capture: { quantity: captureQty, photo: !!f.capture_photo } } : {}),
       ...(perTour != null ? { agreed_price: prices[idx++], agreed_add_waiting: !!f.agreed_add_waiting } : {}),
     })));
     setSaving(true);
@@ -399,7 +404,7 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
   const chip = (on, extra = "") => `px-3 py-2 rounded-lg text-sm font-semibold border ${on ? "bg-emerald-600 border-emerald-600 text-white" : "border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300"} ${extra}`;
 
   return (
-    <Sheet open={open} onClose={onClose} title="Ny tur" subtitle="Én opgave er én tur - også med flere stop. Gentagelse giver én tur pr. dag." testid="tour-form"
+    <Sheet open={open} onClose={onClose} title="Ny tur" subtitle={caps.stops ? "Én opgave er én tur - også med flere stop. Gentagelse giver én tur pr. dag." : "Én opgave er én tur."} testid="tour-form"
       footer={
         <div className="flex items-center gap-2">
           <div className="text-xs text-slate-500 flex-1">{total > 0 ? `${total} tur${total === 1 ? "" : "e"} oprettes` : ""}</div>
@@ -424,7 +429,7 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
             <input type="date" className={inputCls} value={f.date} onChange={(e) => set("date", e.target.value)} data-testid="tf-date" />
           </div>
         </div>
-        {(!plads || plads.own_location) && (
+        {caps.own_customers && (!plads || plads.own_location) && (
           <div>
             <label className={labelCls}>Kunde <span className="normal-case font-normal">(valgfri)</span></label>
             <input className={inputCls} list="tf-customers" value={f.firma} onChange={(e) => { set("firma", e.target.value); setFirmaBlurred(false); }}
@@ -529,7 +534,7 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
             <div><label className={labelCls}>Kapacitet</label><input className={inputCls} value={f.capacity_label} onChange={(e) => set("capacity_label", e.target.value)} placeholder="Fx 20 m³" /></div>
           </div>
         )}
-        <div className="rounded-xl bg-slate-50 dark:bg-slate-900 p-3 space-y-3" data-testid="tf-capture">
+        {caps.capture && <div className="rounded-xl bg-slate-50 dark:bg-slate-900 p-3 space-y-3" data-testid="tf-capture">
           <div className="text-[11px] font-bold uppercase tracking-wide text-slate-500">Ved afslutning</div>
           {[
             ["capture_qty", "Skal chaufføren registrere mængde?", captureQty,
@@ -550,14 +555,14 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
             </div>
           ))}
           <p className="text-[11px] text-slate-400">Chaufføren får en påmindelse hvis det mangler, men kan altid afslutte.</p>
-        </div>
+        </div>}
       </section>
 
       <section className={`${card} p-4 space-y-4`}>
         {[["stops", "Afhentning", "Tilføj afhentning"], ["deliveries", "Aflevering", "Tilføj aflevering"]].map(([key, title, addLabel]) => (
           <div key={key} className="space-y-3">
-            <span className={labelCls}>{title}{f[key].length > 1 ? ` (${f[key].length} stop)` : ""}</span>
-            {f[key].map((st, i) => (
+            <span className={labelCls}>{title}{caps.stops && f[key].length > 1 ? ` (${f[key].length} stop)` : ""}</span>
+            {oneOrMany(f[key]).map((st, i) => (
               <div key={i} className="relative rounded-xl border border-slate-100 dark:border-slate-700 p-3">
                 {f[key].length > 1 && (
                   <div className="flex items-center justify-between mb-2">
@@ -568,11 +573,11 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
                 <AddressField value={st} onChange={(v) => set(key, f[key].map((x, j) => (j === i ? { ...x, ...v } : x)))}
                   placeholder={key === "deliveries" && f.plads ? `Tom = ${f.plads}` : "Vej og nr."}
                   testid={key === "stops" ? `tf-stop-${i}` : `tf-delivery-${i}`} inputCls={inputCls} />
-                <StopExtras value={st} onChange={(v) => set(key, f[key].map((x, j) => (j === i ? v : x)))} />
+                {caps.stops && <StopExtras value={st} onChange={(v) => set(key, f[key].map((x, j) => (j === i ? v : x)))} />}
               </div>
             ))}
-            <button type="button" className="text-sm font-semibold text-emerald-700 dark:text-emerald-400 inline-flex items-center gap-1"
-              onClick={() => set(key, [...f[key], { street: "", postal: "", city: "" }])}><Plus className="w-4 h-4" /> {addLabel}</button>
+            {caps.stops && <button type="button" className="text-sm font-semibold text-emerald-700 dark:text-emerald-400 inline-flex items-center gap-1"
+              onClick={() => set(key, [...f[key], { street: "", postal: "", city: "" }])}><Plus className="w-4 h-4" /> {addLabel}</button>}
           </div>
         ))}
         {stops.length > 1 && (
@@ -608,7 +613,7 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
               <div><label className={labelCls}>Tidligst</label><input type="time" className={inputCls} value={f.open_from} onChange={(e) => set("open_from", e.target.value)} /></div>
               <div><label className={labelCls}>Senest</label><input type="time" className={inputCls} value={f.open_to} onChange={(e) => set("open_to", e.target.value)} /></div>
             </div>
-            {isPremium && (
+            {caps.trailer_cargo && (
               <div>
                 <label className={labelCls}>Hængere</label>
                 <div className="flex flex-wrap gap-1.5" data-testid="tf-trailers">
@@ -654,7 +659,7 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
                 )}
               </div>
             )}
-            <div className="space-y-2">
+            {caps.series && <div className="space-y-2">
               <label className={labelCls}>Gentag</label>
               <div className="grid grid-cols-3 gap-1.5 max-w-sm">
                 {[["none", "Ingen"], ["daily", "Hverdage"], ["weekly", "Valgte dage"]].map(([id, l]) => (
@@ -678,7 +683,7 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
                   <div className="text-xs text-slate-500 pb-2">{dates.length} dag{dates.length === 1 ? "" : "e"}</div>
                 </div>
               )}
-            </div>
+            </div>}
           </div>
         )}
       </section>
@@ -774,7 +779,7 @@ function Registration({ tour }) {
   );
 }
 
-function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnreadChanged, ownName, siteWord, askConfirm, can = () => true, isPremium = false, priceStatus = null }) {
+function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnreadChanged, ownName, siteWord, askConfirm, can = () => true, caps = {}, priceStatus = null }) {
   const [audit, setAudit] = useState(null);
   const [edit, setEdit] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -985,7 +990,7 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
               ) : (
                 <div><label className={labelCls}>Materiale</label><input className={inputCls} value={edit.fraction} onChange={(e) => setEdit({ ...edit, fraction: e.target.value })} /></div>
               )}
-              {isPremium && (
+              {caps.trailer_cargo && (
                 <div>
                   <label className={labelCls}>Hængere</label>
                   <select className={inputCls} value={edit.trailer_count} onChange={(e) => {
@@ -1020,9 +1025,9 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
                 <>
                   <div className="sm:col-span-2"><AddressField label="Afhentning" value={edit.addr} onChange={(v) => setEdit({ ...edit, addr: v })} inputCls={inputCls} /></div>
                   <div className="sm:col-span-2"><AddressField label="Aflevering" value={edit.deliv} onChange={(v) => setEdit({ ...edit, deliv: v })} inputCls={inputCls} /></div>
-                  <button type="button" className="sm:col-span-2 text-left text-sm font-semibold text-emerald-700 inline-flex items-center gap-1"
+                  {caps.stops && <button type="button" className="sm:col-span-2 text-left text-sm font-semibold text-emerald-700 inline-flex items-center gap-1"
                     onClick={() => setEdit({ ...edit, stops: [{ kind: "pickup", ...edit.addr }, ...((edit.deliv?.street || edit.deliv?.city) ? [{ kind: "delivery", ...edit.deliv }] : []), { kind: "pickup", street: "", postal: "", city: "" }] })}>
-                    <Plus className="w-4 h-4" /> Tilføj et stop mere på turen</button>
+                    <Plus className="w-4 h-4" /> Tilføj et stop mere på turen</button>}
                 </>
               )}
               {!isGoods(tour) && <div><label className={labelCls}>Container nr.</label><input className={inputCls} value={edit.container} onChange={(e) => setEdit({ ...edit, container: e.target.value })} /></div>}
@@ -1326,7 +1331,7 @@ function PlanBoard({ tours, drivers, canAssign, selected, setSelected, onAssign,
 
 // ─────────────────────────── Arbejdsfladen ───────────────────────────
 
-export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord = "Lokation", perms = {}, profile = null }) {
+export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord = "Lokation", perms = {}, profile = null, onGoDrivers }) {
   // 2026-10-17: Koordinator-rettigheder - mangler en nøgle, er den tilladt.
   const can = useCallback((k) => perms[k] !== false, [perms]);
   const canSelect = can("tours_assign") || can("tours_edit") || can("tours_delete");
@@ -1613,6 +1618,25 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
   const resetFilters = () => { setQ(""); setFPlads(""); setFCustomer(""); setFDriver(""); setFSource(""); setOnlyHaster(false); setAttnFilter(""); setStatus("all"); };
 
   // ───────── render ─────────
+  // 2026-10-18: En partner (option 2) uden tilknyttede genbrugsplads-kunder
+  // har intet at planlægge endnu - forklar hvad der sker, i stedet for tomme lister.
+  if (profile?.tier === "partner" && !profile?.has_connections) {
+    return (
+      <div className={`${card} p-6 sm:p-8 max-w-2xl`} data-testid="partner-welcome">
+        <div className="w-11 h-11 rounded-full bg-emerald-50 dark:bg-emerald-950/40 flex items-center justify-center mb-4"><Building2 className="w-5 h-5 text-emerald-600" /></div>
+        <h2 className="text-xl font-bold text-slate-900 dark:text-white">Velkommen, {profile.company_name}</h2>
+        <p className="text-sm text-slate-600 dark:text-slate-300 mt-1">I er oprettet som logistikpartner. Når en genbrugsplads-kunde tilknytter jer, kommer deres pladser og bestillinger her automatisk - så kan I planlægge og køre dem.</p>
+        <ol className="mt-5 space-y-3 text-sm">
+          <li className="flex gap-3"><span className="w-6 h-6 rounded-full bg-emerald-600 text-white text-xs font-bold flex items-center justify-center shrink-0">1</span>
+            <span><b>Opret jeres chauffører</b>, så de er klar. De får en invitation på mail.</span></li>
+          <li className="flex gap-3"><span className="w-6 h-6 rounded-full bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-200 text-xs font-bold flex items-center justify-center shrink-0">2</span>
+            <span><b>Bed jeres genbrugsplads-kunde tilknytte jer</b> i ContainerFlow (Kunde admin › Logistik-partnere).</span></li>
+        </ol>
+        {onGoDrivers && perms.drivers !== false && <button className={`${btnPrimary} mt-6`} onClick={onGoDrivers} data-testid="partner-welcome-drivers"><Users className="w-4 h-4" /> Opret chauffører</button>}
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4" data-testid="tours-workspace">
       {/* Topbar */}
@@ -1916,12 +1940,12 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
         </>
       )}
 
-      <TourForm open={formOpen} canPrice={can("economy_edit")} customers={registry} isPremium={!!profile?.is_premium} onClose={() => setFormOpen(false)} initialDate={showOverdue ? todayStr() : date} pladsList={pladsList}
+      <TourForm open={formOpen} canPrice={can("economy_edit")} customers={registry} caps={profile?.capabilities || {}} onClose={() => setFormOpen(false)} initialDate={showOverdue ? todayStr() : date} pladsList={pladsList}
         drivers={drivers} materials={materials} defaultPlads={fPlads || (pladsList.length === 1 ? pladsList[0].name : "")}
         siteWord={siteWord}
         onCreated={(d) => { setShowOverdue(false); if (d && d !== date) setDate(d); else refresh(); }} />
       <TourPanel tour={openTour} onClose={() => setOpenId(null)} drivers={drivers} load={load} onAssign={assign}
-        onChanged={refresh} onUnreadChanged={fetchUnread} ownName={ownName} siteWord={siteWord} askConfirm={setConfirm} can={can} isPremium={!!profile?.is_premium}
+        onChanged={refresh} onUnreadChanged={fetchUnread} ownName={ownName} siteWord={siteWord} askConfirm={setConfirm} can={can} caps={profile?.capabilities || {}}
         priceStatus={openTour ? priceStatus[openTour.id] : null} />
       <Confirm state={confirm} onClose={() => setConfirm(null)} />
     </div>

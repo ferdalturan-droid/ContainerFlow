@@ -15,7 +15,7 @@ import { enqueueOp, isNetworkError } from "../lib/tourOpQueue";
  *    det før det tæller i prisen).
  *  - Uden net: krydset gemmes på telefonen og sendes når der er forbindelse.
  */
-export default function DriverStopList({ tour, stops, canTick, onChanged, codes = [] }) {
+export default function DriverStopList({ tour, stops, canTick, onChanged, codes = [], canAdd = true }) {
   const [receiver, setReceiver] = useState({});
   const [issueFor, setIssueFor] = useState(null);
   const [issueText, setIssueText] = useState("");
@@ -116,7 +116,7 @@ export default function DriverStopList({ tour, stops, canTick, onChanged, codes 
           </div>
         </>
       )}
-      {canTick && !tour.completed && tour.source !== "customer_order" && (
+      {canAdd && canTick && !tour.completed && tour.source !== "customer_order" && (
         adding ? (
           <div className="mt-2 rounded-xl border border-slate-200 bg-white p-3 space-y-2" data-testid="stop-add-form">
             <div className="inline-flex p-0.5 rounded-lg bg-slate-100">

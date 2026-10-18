@@ -8,7 +8,8 @@ import { MoreHorizontal, ChevronDown, Check, Menu as MenuIcon, X } from "lucide-
  * "Mere"-menu (portal, så den ikke klippes af den vandrette scroll). På
  * mobil vises den aktive fane + en menu-knap der åbner en side-skuffe.
  */
-export default function AdminTabNav({ tabs, moreTabs, active, onChange, badges = {}, title = "" }) {
+// moreNote: en diskret tekstlinje nederst i "Mere" (fx at Premium findes for en partner).
+export default function AdminTabNav({ tabs, moreTabs, active, onChange, badges = {}, title = "", moreNote = "" }) {
   const [moreOpen, setMoreOpen] = useState(false);
   const [drawer, setDrawer] = useState(false);
   const [rect, setRect] = useState(null);
@@ -95,6 +96,7 @@ export default function AdminTabNav({ tabs, moreTabs, active, onChange, badges =
               </button>
             );
           })}
+          {moreNote && <p className="mt-1 mx-3 mb-1 pt-2.5 border-t border-slate-100 dark:border-slate-700 text-[11px] leading-snug text-slate-400" data-testid="admin-more-note">{moreNote}</p>}
         </div>,
         document.body
       )}
@@ -119,6 +121,7 @@ export default function AdminTabNav({ tabs, moreTabs, active, onChange, badges =
                   <span className="flex-1 text-left">{t.label}</span><Badge id={t.id} />
                 </button>
               ))}
+              {moreNote && <p className="mx-4 mt-3 pt-3 border-t border-slate-800 text-[11px] leading-snug text-slate-500">{moreNote}</p>}
             </nav>
           </div>
         </div>,

@@ -19,6 +19,39 @@ Data must be strictly isolated per company.
   and `/api/health` bypass tenant filtering so the QR-code customer flow continues to work.
 
 ## What's been implemented (2026-02-15)
+## What's new in 2026-10-18 (Sikkerhed + Premium/Partner)
+Se `LOGISTICS_TIERS.md`. Princip: alt der gavner genbrugsplads-kunden er i kernen (begge typer); premium er vognmandens egen forretning uden for genbrugspladserne.
+
+**Sikkerhed:**
+- **Login-krav som standard:** alle `/api`-kald kræver login, undtagen login/invitation og QR-bestillingens læseadresser (`ANON_ALLOWED_ROUTES`). Før svarede ~80 gamle endpoints uden login, bl.a.:
+  - `POST /tours/bulk` oprettede ture;
+  - chauffør-arkivet viste alle firmaers chauffører, vogne og arbejdstider.
+- **Seed og oprydning:** `/seed`, `/seed-locations`, `/admin/cleanup` og `DELETE /tours/report/{id}` kan kun bruges af super admin.
+- **Kunde-admin:**
+  - kan ikke længere oprette en logistik-admin med egen adgangskode (feltet `admin` ignoreres);
+  - listen over logistikfirmaer viser ikke længere, hvilke andre kunder de kører for;
+  - en plads kan kun tildeles tilknyttede partnere.
+- **Frakobling af en partner** fjerner også adgangen til kundens pladser og til ture, der ikke er startet. Igangværende og kørte ture kan partneren stadig se. Åbne ture uden partner går til pladsens nye partnere.
+- **Ture kun på egne pladser:** et logistikfirma kan kun oprette eller flytte ture til pladser, det har adgang til. Efter P0 kunne en tur ellers havne i en fremmed kundes arkiv.
+- **Chauffør-arkivet** viser kun firmaets egne chauffører. Før kunne ILK se Hansens.
+- **Koordinatorer:**
+  - rettighederne til planlægning/tidsregistrering, indstillinger, arkiv og beskeder håndhæves nu også på serveren;
+  - kundeafgrænsningen gælder nu også i Økonomi (rapport, prisstatus, prisregler).
+- **Partner-chauffør** kan ikke få "Egne ture" frem.
+
+**Premium/Partner:**
+- **Én liste over premium-evner:** `PREMIUM_CAPABILITIES`. Den håndhæves på serveren og styrer skærmbillederne.
+- **Partner:**
+  - Ny tur kun på kunders pladser, container, én adresse;
+  - ingen Gentag, stop, Kunde-felt, "Ved afslutning", Fragt eller hængere med indhold;
+  - Økonomi kun for tilknyttede kunder, ingen egne kunder.
+- **Partner uden kunder** får en velkomstside på Ture. En diskret Premium-linje står i "Mere".
+- **Afvigelseskoder og "ét afslutningsark"** er flyttet fra Økonomi til Indstillinger (`/company/finish-settings`, rettigheden "Indstillinger").
+- **Super admin:** "Premium" (opgradér) i partnerlisten og "Nedgradér" på premium-kortet. Samme id; data skjules, men slettes ikke. Partnerlisten viser antal tilknyttede kunder.
+- **Chauffør:** blindgyden "Ingen kunder tildelt endnu" har nu "Prøv igen" og "Log ud". En kunde vælges stadig aktivt (fase 11-beslutning).
+
+**Tests:** nye e2e-flows `security` og `tiers` (143 PASS i alt).
+
 ## What's new in 2026-10-18 (Chauffører-fanen i nyt design)
 - Logistik admin › Chauffører er bygget om i samme stil som Medarbejdere (lokations-admin) og Team & rettigheder. Koden ligger nu i `frontend/src/pages/DriversPanel.jsx`, og den gamle kode i App.js er fjernet.
 - Fanen har fire afsnit med samme vælger som Ture: Chauffører · Vogne · Hængere · Beskeder (med antal).
