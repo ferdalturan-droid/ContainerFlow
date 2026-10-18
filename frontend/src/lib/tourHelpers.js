@@ -129,8 +129,29 @@ export const parseDk = (v) => {
 /** 2026-10-18 (E2/E3): Hvad planlæggeren bør kigge på efter turen -
  *  registreret ≠ planlagt, manglende registrering, stop der ikke blev
  *  gennemført, ekstra stop fra chaufføren og afvigelser ved afslutning. */
-export const deviationsOf = (t) => {
+const hhmm = (v) => { const m = /^(\d{1,2}):(\d{2})/.exec(v || ""); return m ? Number(m[1]) * 60 + Number(m[2]) : -1; };
+const dkDay = (iso) => { try { const d = new Date(iso); return isNaN(d) ? "" : d.toLocaleDateString("sv-SE", { timeZone: "Europe/Copenhagen" }); } catch (_) { return ""; } };
+
+/** 2026-10-18 (P8): Tidsfejl der giver forkert pris på timepris - fx Start
+ *  ved ankomst og Afslut et minut senere, eller glemt Afslut til næste dag.
+ *  opts.hourly = turen afregnes på timepris (fra prisstatus). */
+export const timeDeviations = (t, opts = {}) => {
   const out = [];
+  if (!t?.completed || !t.on_way_time || !t.time) return out;
+  const st = hhmm(t.on_way_time), en = hhmm(t.time);
+  if (st < 0 || en < 0) return out;
+  const startDay = t.on_way_at ? dkDay(t.on_way_at) : "";
+  const endDay = t.completed_at ? dkDay(t.completed_at) : "";
+  const otherDay = (startDay && endDay && startDay !== endDay) || (!startDay && en < st);
+  if (otherDay) { out.push("Afsluttet en anden dag end startet"); return out; }
+  const dur = en - st;
+  if (dur < 2) out.push("Startet under 2 min før afsluttet");
+  else if (dur < 5 && opts.hourly) out.push("Varighed under 5 min (timepris)");
+  return out;
+};
+
+export const deviationsOf = (t, opts = {}) => {
+  const out = [...timeDeviations(t, opts)];
   if (!t) return out;
   const lines = Array.isArray(t.cargo_lines) ? t.cargo_lines : [];
   const cap = t.capture || {};

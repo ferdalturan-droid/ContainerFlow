@@ -164,6 +164,15 @@ Ud for hver kunde står, om den følger de generelle priser eller har en egen pr
 ## 3g. Hvem er kunden på en tur? (2026-10-18)
 Ejerskab følger lokationen. Tur på en genbrugsplads-kundes plads → kunden er pladsens firma (`company_id`), og kundens prisaftaler gælder. Tur på egen lokation → registerkunden (`firma:<navn>` eller `customer_ref_id`). Ældre manuelle ture på kunders pladser er rettet ved opstart (ikke fakturerede). Se TURE_REDESIGN "Ejerskab følger lokationen".
 
+## 3h. Tid på timeprisede ture (2026-10-18, P8)
+- **Kørselsdatoen er den dag turen blev startet** (`on_way_at`, ellers regnet ud fra start- og sluttid). Før var det afslutningsdagen, så en lørdagstur, der først blev afsluttet søndag (glemt "Afslut"), fik søndags-/weekendpris. Påvirker kun ikke-fakturerede ture; fakturerede er frosset.
+- **Ture-siden markerer tidsfejl som afvigelse:**
+  - "Afsluttet en anden dag end startet";
+  - "Startet under 2 min før afsluttet";
+  - "Varighed under 5 min (timepris)", kun når turen afregnes på timepris (`hourly` i prisstatus).
+- **Afslutningsarket:** på timepris, når turen er under 5 min gammel, spørges "Er starttiden rigtig?". En rettet starttid sendes som rettelse til godkendelse i samme `/finish`-kald.
+- **"Afslut dag"** advarer, når chaufføren stadig har ture "På vej" ("Gå til turen" / "Afslut dagen alligevel").
+
 ## 4. Sider (logistik admin → "Økonomi")
 
 Rapport · Kunder & priser · Prisregler · Godkendelser · Helligdage · Indstillinger

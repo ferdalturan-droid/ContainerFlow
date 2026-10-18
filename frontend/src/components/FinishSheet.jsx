@@ -83,6 +83,10 @@ export default function FinishSheet({ tour, onClose, onDone, driverName, myId, c
   });
   const [receipt, setReceipt] = useState(null);
   const [issueCode, setIssueCode] = useState("");
+  // 2026-10-18 (P8): Timepris + under 5 min siden start = typisk "Start ved
+  // ankomst". Spørg om starttiden (sendes som rettelse til godkendelse).
+  const [model, setModel] = useState(null);
+  const [startFix, setStartFix] = useState(tour?.on_way_time || "");
   const opId = useRef(newOpId());
   const receiptRef = useRef(null);
   const plannedTrailers = Number(tour?.trailer_count || 0);
@@ -98,6 +102,11 @@ export default function FinishSheet({ tour, onClose, onDone, driverName, myId, c
   const stops = Array.isArray(tour?.stops) ? tour.stops : [];
   const openStops = stops.filter(s => !s.done_at).length;
 
+  useEffect(() => {
+    if (!tour?.id || tour.completed) return;
+    axios.get(`${API}/driver/tour-pricing`, { params: { ids: tour.id } })
+      .then(r => setModel((r.data || {})[tour.id]?.model || null)).catch(() => {});
+  }, [tour?.id, tour?.completed]);
   useEffect(() => {
     if (!tour?.id || !(tour.photo_count > 0)) return;
     axios.get(`${API}/tours/${tour.id}/photos`).then(r => setPhotos(r.data || [])).catch(() => {});
@@ -141,6 +150,14 @@ export default function FinishSheet({ tour, onClose, onDone, driverName, myId, c
     try { await axios.delete(`${API}/tours/${tour.id}/photos/${pid}`); setPhotos(p => p.filter(x => x.id !== pid)); }
     catch (err) { toast.error(formatApiError(err)); }
   };
+
+  const minsSinceStart = (() => {
+    const m = /^(\d{1,2}):(\d{2})/.exec(tour?.on_way_time || "");
+    if (!m) return -1;
+    const now = new Date();
+    return now.getHours() * 60 + now.getMinutes() - (Number(m[1]) * 60 + Number(m[2]));
+  })();
+  const askStart = !editMode && model === "hourly" && minsSinceStart >= 0 && minsSinceStart < 5;
 
   const missing = [];
   const loadNums = loads.map(num).filter(v => v != null && v > 0);
@@ -191,6 +208,7 @@ export default function FinishSheet({ tour, onClose, onDone, driverName, myId, c
         const body = {
           ...regs, trailer_count: trailers, used_trailer: trailers > 0, time: new Date().toTimeString().slice(0, 5),
           issue_code: issueCode, message: note.trim(), waiting_min: parseInt(waiting, 10) || 0,
+          ...(askStart && startFix && startFix !== tour.on_way_time ? { start_time: startFix } : {}),
           waiting_comment: `Ventetid oplyst ved afslutning${note.trim() ? `: ${note.trim()}` : ""}`,
         };
         try {
@@ -243,6 +261,15 @@ export default function FinishSheet({ tour, onClose, onDone, driverName, myId, c
         </div>
 
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+          {askStart && (
+            <section className="rounded-xl bg-sky-50 border border-sky-200 px-3 py-3 space-y-2" data-testid="finish-start-check">
+              <div className="text-sm text-sky-900"><b>Du startede turen kl. {tour.on_way_time}.</b> Er starttiden rigtig? Turen afregnes på tid.</div>
+              <div className="flex items-center gap-2">
+                <input type="time" className={`${ic} max-w-[140px] py-2`} value={startFix} onChange={(e) => setStartFix(e.target.value)} data-testid="finish-start-time" />
+                <span className="text-xs text-sky-800">{startFix && startFix !== tour.on_way_time ? "Sendes til godkendelse hos planlæggeren" : "Ret hvis du startede tidligere"}</span>
+              </div>
+            </section>
+          )}
           {openStops > 0 && !editMode && (
             <div className="flex gap-2 rounded-xl bg-amber-50 border border-amber-200 px-3 py-2.5 text-sm text-amber-900">
               <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" /> {openStops} af {stops.length} stop er ikke krydset af. Kryds dem af i turen, eller skriv hvorfor nedenfor.

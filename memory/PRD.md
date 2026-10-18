@@ -19,6 +19,12 @@ Data must be strictly isolated per company.
   and `/api/health` bypass tenant filtering so the QR-code customer flow continues to work.
 
 ## What's been implemented (2026-02-15)
+## What's new in 2026-10-18 (P8: tid på timeprisede ture)
+- Startdatoen er kørselsdato (`_service_date`, `on_way_at` stemples ved start). `completed_at`/`on_way_at` er med i Tour-modellen.
+- Tidsafvigelser på Ture (`timeDeviations`) og "Er starttiden rigtig?" i FinishSheet (rettelse via `/finish` → godkendelse).
+- "Afslut dag" advarer om ture, der stadig er "På vej".
+- Prisstatus har `hourly`. Test: `flow_time.py`.
+
 ## What's new in 2026-10-18 (P1: én planlægningsside)
 - "Planlægning › Planlæg ture" er fjernet (død kode slettet), og fanen hedder "Tid & ressourcer".
 - Ture: "Pr. lokation | Pr. chauffør" plus overblikslinjen. `TOUR_TYPE_LABELS` kender gods-typerne.

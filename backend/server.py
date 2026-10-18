@@ -439,6 +439,10 @@ class Tour(BaseModel):
     # Afvigelseskode ved afslutning / forgæves (C3).
     finish_issue: Dict[str, Any] = Field(default_factory=dict)
     not_completed_code: str = ""
+    # 2026-10-18 (P8): fulde tidsstempler, så "afsluttet en anden dag" og
+    # kørselsdatoen kan afgøres (on_way_time/time er kun HH:MM).
+    completed_at: str = ""
+    on_way_at: str = ""
 
 class TourCreate(BaseModel):
     date: str = Field(default_factory=get_dk_date_str)
@@ -3021,6 +3025,7 @@ async def update_tour(tour_id: str, update: TourUpdate, payload: dict = Depends(
         # efterlader en orphan-tur der ser "PÅ VEJ" ud for andre chauffører.
         update_data["on_way"] = False
         update_data["on_way_time"] = ""
+        update_data["on_way_at"] = ""
         # Fase 15 (2026-06-19): Når admin frigør en tildelt tur, fjern også
         # assigned_by_*-sporet så turen igen kan claimes frit af chauffører.
         # Fase 15.11 (2026-02-XX): MEN — hvis det er chaufføren SELV der
@@ -3188,6 +3193,8 @@ async def update_tour(tour_id: str, update: TourUpdate, payload: dict = Depends(
     # 2026-10-16: "Med hænger" er et prisgrundlag pr. tur. Når turen startes
     # (på vej) foreslås værdien ud fra om chaufføren har valgt en hænger ved
     # login; chaufføren kan ændre den på turen bagefter.
+    if update_data.get("on_way") is True and not existing_tour.get("on_way"):
+        update_data["on_way_at"] = datetime.now(DK_TZ).isoformat()
     if (update_data.get("on_way") is True and not existing_tour.get("on_way")
             and existing_tour.get("used_trailer") is None):
         starter_id = update_data.get("claimed_by_id") or existing_tour.get("claimed_by_id") or ""
@@ -17212,9 +17219,22 @@ def _to_dk_date(iso: str) -> str:
 
 
 def _service_date(t: dict) -> str:
-    """Den dag turen køres: afslutningsdato, forgæves-dato eller planlagt dato."""
+    """Den dag turen køres = den dag den blev STARTET (2026-10-18, P8).
+    Før var det afslutningsdagen, så en lørdagstur, der først blev afsluttet
+    søndag (glemt Afslut), fik weekend-/søndagspris. Uden start-tidsstempel
+    (ældre ture) regnes startdagen ud fra afslutningen: er sluttiden før
+    starttiden, gik turen over midnat og startede dagen før."""
     if t.get("completed") and t.get("completed_at"):
-        return _to_dk_date(t["completed_at"])
+        if t.get("on_way_at"):
+            return _to_dk_date(t["on_way_at"])
+        end_day = _to_dk_date(t["completed_at"])
+        st, en = _pricing.hhmm_to_min(t.get("on_way_time") or ""), _pricing.hhmm_to_min(t.get("time") or "")
+        if st >= 0 and en >= 0 and en < st:
+            try:
+                return (_date.fromisoformat(end_day) - timedelta(days=1)).isoformat()
+            except ValueError:
+                return end_day
+        return end_day
     if t.get("not_completed") and t.get("not_completed_at"):
         return _to_dk_date(t["not_completed_at"])
     return t.get("date") or ""
@@ -17484,7 +17504,7 @@ class _PricingContext:
                                {"not_completed": True, "not_completed_at": {"$gte": lo, "$lt": hi}}]},
                       {"$or": [{"deleted": {"$exists": False}}, {"deleted": False}]}]},
             {"_id": 0, "id": 1, "claimed_by_id": 1, "on_way_time": 1, "time": 1, "completed": 1,
-             "completed_at": 1, "fact_overrides": 1, "date": 1, "not_completed": 1, "not_completed_at": 1},
+             "completed_at": 1, "fact_overrides": 1, "date": 1, "not_completed": 1, "not_completed_at": 1, "on_way_at": 1},
         ).to_list(20000)
         pauses = await _raw_db.driver_time_entries.find(
             {"driver_id": {"$in": driver_ids}, "date": {"$in": dates}, "slice_type": "pause",
@@ -18382,6 +18402,8 @@ async def pricing_status(ids: str, payload: dict = Depends(get_current_user_payl
             st["pending"] = pending[t["id"]]
         if any(f.startswith("Hænger: automatisk") for f in p.get("flags") or []):
             st["trailer_unconfirmed"] = True
+        if p.get("model") == "hourly" and (t.get("price_override") or {}).get("mode") != "fixed":
+            st["hourly"] = True  # Ture-siden: kort varighed er en afvigelse på timepris
         out[t["id"]] = st
     return out
 
@@ -18662,12 +18684,22 @@ async def tour_finish(tour_id: str, body: dict, payload: dict = Depends(get_curr
         if code:
             await _raw_db.tours.update_one({"id": tour_id}, {"$set": {"finish_issue": {"code": code, "text": text[:300]}}})
         steps["message"] = await post_tour_message(tour_id, TourMessageIn(text=(f"{code}: {text}" if code and text else (code or text))[:1000]), payload)
-    # 4) Ventetid -> rettelse til godkendelse (eller automatisk ved kort ventetid)
+    # 4) Ventetid og/eller rettet starttid -> én rettelse til godkendelse
+    # (kort ventetid alene godkendes automatisk, hvis firmaet har valgt det).
+    cr: Dict[str, Any] = {}
     if body.get("waiting_min") not in (None, "", 0, "0"):
+        cr["waiting_min"] = body["waiting_min"]
+    st_fix = str(body.get("start_time") or "").strip()
+    if st_fix and _pricing.hhmm_to_min(st_fix) >= 0 and st_fix != (t.get("on_way_time") or ""):
+        cr["start_time"] = st_fix
+    if cr:
+        why = []
+        if "start_time" in cr:
+            why.append(f"Starttid rettet fra {t.get('on_way_time') or '?'} til {st_fix} ved afslutning")
+        if "waiting_min" in cr:
+            why.append(str(body.get("waiting_comment") or "Ventetid registreret ved afslutning"))
         try:
-            steps["waiting"] = await driver_change_request(tour_id, {
-                "waiting_min": body["waiting_min"],
-                "comment": str(body.get("waiting_comment") or "Ventetid registreret ved afslutning")}, payload)
+            steps["waiting"] = await driver_change_request(tour_id, {**cr, "comment": " · ".join(why)}, payload)
         except HTTPException as e:
             steps["waiting_error"] = e.detail
     result = {"ok": True, "tour_id": tour_id, "waiting": (steps.get("waiting") or {}).get("status"),

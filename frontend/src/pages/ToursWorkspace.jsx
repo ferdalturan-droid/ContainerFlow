@@ -12,7 +12,7 @@ import { ArchiveTab } from "./LocationAdminPage";
 import TourChat from "../components/TourChat";
 import AddressField, { formatAddress, parseAddress } from "../components/AddressField";
 import {
-  TOUR_TYPES, GOODS_TYPES, TOUR_TYPE_LABEL, SOURCE_LABEL, cargoSummary, isGoods, stopsOf, stopsDone, parseDk, todayStr, addDays, fmtDayLong, fmtClock, deviationsOf,
+  TOUR_TYPES, GOODS_TYPES, TOUR_TYPE_LABEL, SOURCE_LABEL, cargoSummary, isGoods, stopsOf, stopsDone, parseDk, todayStr, addDays, fmtDayLong, fmtClock, deviationsOf, timeDeviations,
   isHaster, openHours, capacityText, assigneeName, tourStatus, daysLate, mapsUrl,
 } from "../lib/tourHelpers";
 
@@ -857,10 +857,10 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
           {fact("Vægt", tour.weight ? `${tour.weight} kg` : "")}
         </div>
         <Registration tour={tour} />
-        {(priceStatus?.status === "missing" || deviationsOf(tour).length > 0) && (
+        {(priceStatus?.status === "missing" || deviationsOf(tour, { hourly: priceStatus?.hourly }).length > 0) && (
           <div className="mt-3 flex flex-col gap-1.5" data-testid="panel-attention">
             {priceStatus?.status === "missing" && <div className="text-xs rounded-lg bg-red-50 dark:bg-red-950/30 text-red-800 dark:text-red-200 px-3 py-2"><b>{priceStatus.label}:</b> {priceStatus.why || "ingen prisregel passer"} - opret prisen under Økonomi › Rapport.</div>}
-            {deviationsOf(tour).length > 0 && <div className="text-xs rounded-lg bg-amber-50 dark:bg-amber-950/30 text-amber-900 dark:text-amber-100 px-3 py-2"><b>Afvigelse:</b> {deviationsOf(tour).join(" · ")}</div>}
+            {deviationsOf(tour, { hourly: priceStatus?.hourly }).length > 0 && <div className="text-xs rounded-lg bg-amber-50 dark:bg-amber-950/30 text-amber-900 dark:text-amber-100 px-3 py-2"><b>Afvigelse:</b> {deviationsOf(tour, { hourly: priceStatus?.hourly }).join(" · ")}{timeDeviations(tour, { hourly: priceStatus?.hourly }).length > 0 ? " - tiden bruges til timeprisen; ret den under Økonomi › Rapport hvis den er forkert." : ""}</div>}
           </div>
         )}
         {stopsOf(tour).length > 0 && (
@@ -1088,6 +1088,7 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
   // 2026-10-18 (E1/E3): prisstatus pr. tur (uden beløb) og afvigelser.
   const [priceStatus, setPriceStatus] = useState({});
   const [attnFilter, setAttnFilter] = useState(""); // "" | "price" | "deviation"
+  const devs = useCallback((t) => deviationsOf(t, { hourly: priceStatus[t.id]?.hourly }), [priceStatus]);
   // 2026-10-18 (P1): Ture grupperes pr. lokation eller pr. chauffør (erstatter
   // "Planlægning › Planlæg ture" - samme dato, filtre, rækker og panel).
   const [groupBy, setGroupByState] = useState(() => { try { return localStorage.getItem("cf_tours_group_by") === "driver" ? "driver" : "plads"; } catch (_) { return "plads"; } });
@@ -1211,14 +1212,14 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
       if (fDriver && fDriver !== "__none" && t.driver_id !== fDriver && t.claimed_by_id !== fDriver) return false;
       if (fSource && (t.source || "manual") !== fSource) return false;
       if (attnFilter === "price" && priceStatus[t.id]?.status !== "missing") return false;
-      if (attnFilter === "deviation" && !deviationsOf(t).length) return false;
+      if (attnFilter === "deviation" && !devs(t).length) return false;
       if (needle) {
         const hay = [t.fraction, t.address, t.facility, t.plads, t.tour_number, t.container, t.private_company, t.customer_name, assigneeName(t), t.remark].join(" ").toLowerCase();
         if (!hay.includes(needle)) return false;
       }
       return true;
     });
-  }, [source, status, onlyHaster, fPlads, fCustomer, fDriver, fSource, q, ownName, attnFilter, priceStatus]);
+  }, [source, status, onlyHaster, fPlads, fCustomer, fDriver, fSource, q, ownName, attnFilter, priceStatus, devs]);
 
   const NO_DRIVER = "Uden chauffør";
   const groups = useMemo(() => {
@@ -1256,7 +1257,7 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
       noDriver: list.filter(t => !t.completed && !t.not_completed && !assigneeName(t)).length,
     };
   }, [tours]);
-  const withDeviation = (tours || []).filter(t => deviationsOf(t).length > 0);
+  const withDeviation = (tours || []).filter(t => devs(t).length > 0);
   const openTour = source.find(t => t.id === openId) || (tours || []).find(t => t.id === openId) || overdue.find(t => t.id === openId) || null;
   const activeFilters = !!(q || fPlads || fCustomer || fDriver || fSource || onlyHaster || attnFilter || status !== "all");
 
@@ -1585,7 +1586,7 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
                                   {priceStatus[t.id]?.status === "missing" && <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300" title={priceStatus[t.id].why || ""} data-testid={`row-price-${t.id}`}>{priceStatus[t.id].label}</span>}
                                   {priceStatus[t.id]?.status === "invoiced" && <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 dark:bg-slate-700 dark:text-slate-300">Faktureret</span>}
                                   {priceStatus[t.id]?.pending > 0 && <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">Rettelse venter</span>}
-                                  {deviationsOf(t).length > 0 && <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200" title={deviationsOf(t).join(" · ")} data-testid={`row-deviation-${t.id}`}>Afvigelse</span>}
+                                  {devs(t).length > 0 && <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200" title={devs(t).join(" · ")} data-testid={`row-deviation-${t.id}`}>Afvigelse</span>}
                                 </div>
                                 <div className="text-sm text-slate-600 dark:text-slate-300 truncate">{t.address || "Ingen adresse"}{t.facility && t.facility !== t.plads && t.facility !== t.address ? <span className="text-slate-400"> → {t.facility}</span> : null}</div>
                                 {groupBy === "driver" && <div className="text-[11px] text-slate-400 truncate inline-flex items-center gap-1"><Building2 className="w-3 h-3" />{t.plads || "Uden lokation"} · {customerOf(t, ownName)}</div>}

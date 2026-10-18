@@ -15405,8 +15405,18 @@ function App() {
   });
   const closeTimeRegModal = () => setTimeRegModal({ open: false, scenario: 0, autoTime: "", onProceed: null });
 
-  const handleEndOfShift = async () => {
+  // 2026-10-18 (P8): Ture der stadig er "På vej" når dagen afsluttes - typisk
+  // en glemt "Afslut". Ellers bliver turen afsluttet næste morgen, og tiden
+  // (og dermed timeprisen) bliver forkert.
+  const [onWayWarn, setOnWayWarn] = useState(null);
+  const handleEndOfShift = async (opts = {}) => {
     if (isEndingShift) return;
+    if (!opts.skipOnWay) {
+      const myId = selectedDriver?.id || authUser?.id || "";
+      const stillOnWay = (tours || []).filter(t => t.on_way && !t.completed && !t.not_completed && !t.is_pause
+        && ((myId && t.claimed_by_id === myId) || (driverName && t.claimed_by === driverName)));
+      if (stillOnWay.length) { setOnWayWarn(stillOnWay); return; }
+    }
 
     // Fase 18.2: Tjek today's driver_time_entries FØR shift-flow startes.
     const todayWork = (timeEntries || []).filter(e =>
@@ -17684,6 +17694,23 @@ function App() {
           Scenarie 1: Ingen IND-stempel - opfordrer chauffør til at registrere.
           Scenarie 2: Auto-stemplet ud - bekræfter til chauffør.
           Modal er fullscreen-mobil-venlig (full width på sm-, store knapper). */}
+      {onWayWarn && (
+        <div className="fixed inset-0 z-[60] bg-black/60 flex items-end sm:items-center justify-center p-4" onClick={() => setOnWayWarn(null)} data-testid="onway-warn">
+          <div className="w-full sm:max-w-sm rounded-2xl bg-white dark:bg-slate-900 p-5 space-y-3" onClick={(e) => e.stopPropagation()}>
+            <div className="text-lg font-bold text-slate-900 dark:text-white">{onWayWarn.length === 1 ? "1 tur er stadig På vej" : `${onWayWarn.length} ture er stadig På vej`}</div>
+            <p className="text-sm text-slate-600 dark:text-slate-300">Afslut turen nu, så tiden passer. Afsluttes den først i morgen, bliver tiden (og prisen) forkert.</p>
+            <ul className="text-sm text-slate-700 dark:text-slate-200 space-y-1">
+              {onWayWarn.slice(0, 4).map(t => <li key={t.id}>• {t.fraction || "Tur"} · {t.address} <span className="text-slate-400">(siden {t.on_way_time})</span></li>)}
+            </ul>
+            <div className="grid grid-cols-1 gap-2 pt-1">
+              <button type="button" className="py-3 rounded-xl bg-emerald-600 text-white font-bold" data-testid="onway-warn-goto"
+                onClick={() => { const t = onWayWarn[0]; setOnWayWarn(null); setActiveTab("ture"); setSelectedTourForPanel(t); }}>Gå til turen</button>
+              <button type="button" className="py-3 rounded-xl border border-slate-200 dark:border-slate-700 font-semibold text-slate-700 dark:text-slate-200" data-testid="onway-warn-continue"
+                onClick={() => { setOnWayWarn(null); handleEndOfShift({ skipOnWay: true }); }}>Afslut dagen alligevel</button>
+            </div>
+          </div>
+        </div>
+      )}
       {timeRegModal.open && (
         <div
           className="fixed inset-0 z-[60] bg-black/60 backdrop-blur-sm flex items-end sm:items-center justify-center p-4"
