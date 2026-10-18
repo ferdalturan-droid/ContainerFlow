@@ -51,6 +51,39 @@ def run():
         tt = db.tours.find_one({"id": t2}, {"_id": 0})
         ok(tt["completed"] and tt.get("claimed_by_id") == nik_id and tt.get("trailer_count_actual") == 1,
            "7a tildelt tur (ikke startet) kan afsluttes - hængere gemmes også")
+        t3 = call("POST", "/tours/bulk", [{**body, "trailer_count": 0}], t=ha)[0]["id"]
+        c.tours.append(t3)
+        call("PUT", f"/tours/{t3}", {"driver_id": nik_id, "driver_name": nik}, t=ha)
+        call("POST", f"/tours/{t3}/finish", {"op_id": new_id(), "cargo_actuals": [8], "trailer_count": 0, "used_trailer": False,
+                                            "trailer_source": "none"}, t=drv)
+        t3d = db.tours.find_one({"id": t3}, {"_id": 0})
+        ok(t3d.get("trailer_source") == "none" and t3d.get("trailer_confirmed") is True and t3d.get("trailer_count_actual") == 0,
+           "7a2 hænger-spørgsmålet ikke stillet (ingen planlagt/profil-hænger): 0 hængere, kilde 'none', bekræftet")
+
+        # P9: dublet-advarsel (samme dag, samme adresse + materiale / plads + container-nr.)
+        dup_body = {"date": today(), "plads": "Hansen Depot Køge", "tour_kind": "goods", "tour_type": "levering",
+                    "private_company": "E2E Dublet ApS", "is_private": True, "address": "E2E Dubletvej 1, 4600 Køge",
+                    "cargo_lines": [{"text": "E2E Dublet", "qty": 1, "unit": "stk"}]}
+        d1 = call("POST", "/tours/bulk", [dup_body], t=ha)[0]["id"]
+        c.tours.append(d1)
+        try:
+            call("POST", "/tours/bulk", [dup_body], t=ha)
+            dup_ok = False
+        except ApiError as e:
+            dup_ok = e.status == 409 and (e.body.get("detail") or {}).get("duplicates", [{}])[0].get("id") == d1
+        ok(dup_ok, "7b samme adresse + materiale samme dag -> 409 med den eksisterende tur")
+        d2 = call("POST", "/tours/bulk?force=true", [dup_body], t=ha)[0]["id"]
+        c.tours.append(d2)
+        ok(bool(d2), "7c 'Opret alligevel' (force) opretter turen")
+        cont = {"date": today(), "plads": "Hansen Depot Køge", "tour_kind": "container", "tour_type": "normal",
+                "fraction": "E2E Restaffald", "container": "E2E-9999", "address": "E2E Containervej 1"}
+        c1 = call("POST", "/tours/bulk", [cont], t=ha)[0]["id"]
+        c.tours.append(c1)
+        ok(status_of("POST", "/tours/bulk", [{**cont, "address": "En anden vej"}], t=ha) == 409,
+           "7d samme plads + container-nr. samme dag -> 409")
+        ok(status_of("POST", "/tours/bulk", [{**cont, "date": in_days(1)}], t=ha) == 200, "7e samme container en anden dag er ikke en dublet")
+        for x in db.tours.find({"container": "E2E-9999"}, {"_id": 0, "id": 1}):
+            c.tours.append(x["id"])
 
         ps = call("GET", "/pricing/status", t=ha, params={"ids": tid})
         ok(ps.get(tid, {}).get("status") == "missing" and ps[tid].get("pending") == 1,

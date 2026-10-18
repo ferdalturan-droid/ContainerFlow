@@ -1465,6 +1465,33 @@ async def get_tours(report_id: Optional[str] = None, plads: Optional[str] = None
     tours = await db.tours.find(query, {"_id": 0, "receipt_image": 0}).to_list(min(limit, 500))
     return tours
 
+async def _duplicate_tours(docs: List[dict]) -> List[dict]:
+    """Ikke-færdige ture samme dag med samme plads + container-nr. (container)
+    eller samme adresse + materiale (gods)."""
+    out: List[dict] = []
+    seen = set()
+    for d in docs:
+        base = {"date": d.get("date"), "completed": {"$ne": True}, "not_completed": {"$ne": True},
+                "deleted": {"$ne": True}, "is_pause": {"$ne": True}}
+        if (d.get("tour_kind") or "container") == "goods":
+            if not (d.get("address") and d.get("fraction")):
+                continue
+            q = {**base, "address": d["address"], "fraction": d["fraction"], "plads": d.get("plads")}
+        else:
+            if not (d.get("container") or "").strip() or not d.get("plads"):
+                continue
+            q = {**base, "plads": d["plads"], "container": d["container"]}
+        async for t in _raw_db.tours.find(q, {"_id": 0, "id": 1, "date": 1, "address": 1, "fraction": 1, "container": 1,
+                                              "plads": 1, "on_way": 1, "claimed_by": 1, "tour_number": 1}).limit(5):
+            if t["id"] in seen:
+                continue
+            seen.add(t["id"])
+            out.append({"id": t["id"], "date": t.get("date"), "address": t.get("address") or "", "fraction": t.get("fraction") or "",
+                        "container": t.get("container") or "", "plads": t.get("plads") or "", "tour_number": t.get("tour_number") or "",
+                        "status": "På vej" if t.get("on_way") else ("Taget af " + t["claimed_by"] if t.get("claimed_by") else "Ikke startet")})
+    return out
+
+
 def _with_owner(doc: dict, td: dict) -> dict:
     """Tour-modellen har ikke company_id - uden dette satte TenantAwareDB altid
     logistikfirmaets id ved insert (også på kundens plads)."""
@@ -1676,8 +1703,12 @@ async def create_tour(tour: TourCreate, payload: dict = Depends(get_current_user
     return tour_obj
 
 @api_router.post("/tours/bulk", response_model=List[Tour])
-async def create_tours_bulk(tours: List[TourCreate], payload: Optional[dict] = Depends(get_optional_user_payload)):
-    """Optimized bulk insert using insert_many"""
+async def create_tours_bulk(tours: List[TourCreate], force: bool = False,
+                            payload: Optional[dict] = Depends(get_optional_user_payload)):
+    """Optimized bulk insert using insert_many.
+    2026-10-18 (P9): Findes der samme dag allerede en ikke-færdig tur med samme
+    plads + container-nr. (container) eller samme adresse + materiale (gods),
+    svares 409 med listen - medmindre force=true ("Opret alligevel")."""
     if not tours:
         return []
     try:
@@ -1705,6 +1736,12 @@ async def create_tours_bulk(tours: List[TourCreate], payload: Optional[dict] = D
                 agreed[tour_objs[-1].id] = (float(ap), add_wait)
         docs = [_stamp_logistics_creator(_with_owner(t.model_dump(), {"company_id": o}), payload)
                 for t, o in zip(tour_objs, owners)]
+        if not force:
+            dups = await _duplicate_tours(docs)
+            if dups:
+                raise HTTPException(status_code=409, detail={
+                    "message": "Der findes allerede en tur der ligner" if len(dups) == 1 else f"Der findes allerede {len(dups)} ture der ligner",
+                    "duplicates": dups})
         if agreed:
             who = (payload or {}).get("email") or ""
             now_iso = datetime.now(timezone.utc).isoformat()
@@ -18655,7 +18692,10 @@ async def tour_finish(tour_id: str, body: dict, payload: dict = Depends(get_curr
     steps: Dict[str, Any] = {}
     # 1) Hængere (mens turen ikke er afsluttet - bagefter via rettelse)
     if not t.get("completed") and (body.get("trailer_count") not in (None, "") or body.get("used_trailer") in (True, False)):
-        tu: Dict[str, Any] = {"trailer_confirmed": True, "trailer_source": "driver"}
+        # "none" = spørgsmålet blev ikke stillet (ingen planlagt hænger og ingen
+        # hænger i profilen) - 0 hængere, regnet som bekræftet (P7).
+        tu: Dict[str, Any] = {"trailer_confirmed": True,
+                              "trailer_source": "none" if body.get("trailer_source") == "none" else "driver"}
         if body.get("trailer_count") not in (None, ""):
             n = max(0, min(int(float(body["trailer_count"])), 9))
             tu.update({"trailer_count_actual": n, "used_trailer": n > 0})

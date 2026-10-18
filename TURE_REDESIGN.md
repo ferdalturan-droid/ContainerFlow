@@ -151,3 +151,14 @@ Begge dele er rettet. Desuden:
 - **Fanen hedder "Tid & ressourcer"** (Tidsregistrering og Planlæg ressourcer).
 - **Gruppens kunde-tekst** viser alle kunder i gruppen (før kun den første tur, fx "Hansen Depot Køge · Helsingør Forsyning").
 
+### Chaufføren og Ny tur, finpudsning (2026-10-18)
+- **Næste stop på kortet (P6):** når turen er "På vej", viser kortet det næste åbne stop med adresse, note (gul) og ring-knap, hvis stoppet har telefon. Kort-knappen navigerer til næste stop.
+- **Hænger kun når relevant (P7):** afslutningsarket spørger kun om hængere ved planlagt hænger, hænger i profilen eller en hænger foreslået ved start. Ellers gemmes 0 hængere med `trailer_source="none"` (bekræftet).
+- **B2B uden modal (P5):** i det gamle vægt-flow står "Hænger: Ja · ret" (forudfyldt) som en linje øverst i vægtarket. Modalen bruges kun, når turen afsluttes uden vægtark.
+- **"Venter på net" (P10):** gråt mærke på kortet, når en handling ligger i offline-køen.
+- **Rettesteder efter afslutning:** "Ret mængde eller billede" (afslutningsarket) og "Ret tid, hænger eller ventetid (godkendes)". Hænger, tid og ventetid rettes kun det sidste sted.
+- **Ny kunde (P2):** "Opret som ny kunde" vises først, når man forlader feltet, med mindst 3 tegn, og ikke mens "Mente du …?" venter på svar ("Nej, det er en ny kunde").
+- **Dubletter (P9):** `POST /tours/bulk` svarer 409 med listen, hvis der samme dag findes en ikke-færdig tur med samme plads + container-nr. (container) eller samme adresse + materiale (gods). Ny tur og Kopiér spørger "Opret alligevel?" (`force=true`).
+- **Ingen "A → A" (P3):** pilen vises ikke, når aflevering = afhentning.
+- **Ingen økonomi-ret (P4):** panelet siger "Bed din administrator om at oprette prisen".
+

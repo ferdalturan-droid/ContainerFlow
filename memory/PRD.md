@@ -19,6 +19,21 @@ Data must be strictly isolated per company.
   and `/api/health` bypass tenant filtering so the QR-code customer flow continues to work.
 
 ## What's been implemented (2026-02-15)
+## What's new in 2026-10-18 (Chauffør, Ny tur og Økonomi: finpudsning)
+- **Chauffør:**
+  - Næste stop på kortet (P6).
+  - Hænger kun når relevant, ellers `trailer_source="none"` (P7).
+  - B2B-hænger som linje i vægtarket (P5).
+  - "Venter på net" (P10).
+  - Tydelige rettesteder.
+- **Ny tur:**
+  - "Opret som ny kunde" først efter blur, ≥ 3 tegn, og ikke mens "Mente du" venter (P2).
+  - Dublet-advarsel 409 + "Opret alligevel" (P9, `_duplicate_tours`).
+  - Ingen "A → A" (P3).
+- **Økonomi:**
+  - "Nye + ture uden pris" er standard for alle nye aftaler (P11).
+  - Tekst uden `economy_edit` (P4).
+
 ## What's new in 2026-10-18 (P8: tid på timeprisede ture)
 - Startdatoen er kørselsdato (`_service_date`, `on_way_at` stemples ved start). `completed_at`/`on_way_at` er med i Tour-modellen.
 - Tidsafvigelser på Ture (`timeDeviations`) og "Er starttiden rigtig?" i FinishSheet (rettelse via `/finish` → godkendelse).

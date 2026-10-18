@@ -1354,7 +1354,11 @@ function PriceTester({ bundle, options }) {
 function BundleEditor({ bundle: initial, options, onClose, onSaved, firstRule = false, fromReport = false }) {
   // 2026-10-18: "Opret pris" fra Rapport gælder også ture UDEN pris (ellers
   // fik turen man kom fra stadig ingen pris). Ture med pris ændres ikke.
-  const [effective, setEffective] = useState(fromReport ? "unpriced" : firstRule ? "all" : "now");
+  // P11: Nye aftaler gælder som standard "nye + ture uden pris" - ufarligt,
+  // for en tur der allerede har en pris ændres aldrig. Ved redigering er
+  // standarden "kun ture oprettet fra nu".
+  const isEdit = !!(initial.bundle_id || (initial.adopt_ids || []).length);
+  const [effective, setEffective] = useState(isEdit ? "now" : "unpriced");
   const [effDate, setEffDate] = useState(() => localDate());
   const [b, setB] = useState(() => JSON.parse(JSON.stringify(initial)));
   const [more, setMore] = useState(() => {
@@ -1596,7 +1600,7 @@ function BundleEditor({ bundle: initial, options, onClose, onSaved, firstRule = 
           <div className="space-y-2" data-testid="rule-effective">
             <h4 className="text-sm font-bold">Hvilke ture gælder {editing ? "ændringen" : "aftalen"} for?</h4>
             <Segmented value={effective} onChange={setEffective} options={[
-              ...(fromReport && !editing ? [{ value: "unpriced", label: "Nye + ture uden pris" }] : []),
+              ...(!editing ? [{ value: "unpriced", label: "Nye + ture uden pris" }] : []),
               { value: "driven", label: "Ture kørt fra en dato" },
               { value: "now", label: "Kun ture oprettet fra nu" },
               { value: "all", label: "Alle, også eksisterende" },
@@ -1605,7 +1609,7 @@ function BundleEditor({ bundle: initial, options, onClose, onSaved, firstRule = 
               <div className="max-w-xs"><span className={label}>Kørt fra og med</span><input type="date" className={input} value={effDate} onChange={e => setEffDate(e.target.value)} data-testid="rule-driven-from" /></div>
             )}
             <p className="text-xs text-slate-500">
-              {effective === "unpriced" && "Gælder nye ture - og de eksisterende ture der i dag mangler pris (fx den tur du kom fra). Ture der allerede har en pris, ændres ikke."}
+              {effective === "unpriced" && `Gælder nye ture - og de eksisterende ture der i dag mangler pris${fromReport ? " (fx den tur du kom fra)" : ""}. Ture der allerede har en pris, ændres ikke.`}
               {effective === "driven" && (editing
                 ? "Anbefalet ved prisstigning: ture der køres fra datoen får den nye pris - også ture der allerede er oprettet (fx en serie). Ture kørt før datoen beholder den gamle pris."
                 : "Gælder ture der køres fra datoen - også ture der allerede er oprettet.")}

@@ -12267,7 +12267,7 @@ const TourBillingBox = ({ tour }) => {
           {!form && !info.invoiced && (
             <button type="button" onClick={() => setForm({ start_time: tour.on_way_time || "", end_time: tour.time || "", trailer_count: String(info.trailer_count ?? (trailer ? 1 : 0)), waiting_min: "", comment: "" })}
               className="w-full px-3 py-2 rounded-lg text-sm font-semibold bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 flex items-center justify-center gap-2" data-testid="tour-change-request-btn">
-              <Edit2 className="w-4 h-4" /> Ret tid, hænger eller ventetid
+              <Edit2 className="w-4 h-4" /> Ret tid, hænger eller ventetid (godkendes)
             </button>
           )}
           {form && (
@@ -12300,8 +12300,10 @@ const TourBillingBox = ({ tour }) => {
 const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onToggleComplete, currentDriverName, onChat, onRefresh, onOpenFinish, unifiedFinish = false, deviationCodes = [] }) => {
   const [weightInput, setWeightInput] = useState("");
   const [trailerAsk, setTrailerAsk] = useState(null);
+  const [trailerChoice, setTrailerChoice] = useState(null); // P5: valgt i vægtarket (null = forslaget)
   const [notCompletedCode, setNotCompletedCode] = useState("");
   const [trailerAnswered, setTrailerAnswered] = useState(false);
+  useEffect(() => { setTrailerAnswered(false); setTrailerChoice(null); }, [tour?.id]);
   const [askingWeight, setAskingWeight] = useState(false);
   // Fase 15.52 (2026-02-22): "Kan ikke gennemføres"-dialog state.
   const [showNotCompletedDialog, setShowNotCompletedDialog] = useState(false);
@@ -12580,13 +12582,42 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
       onClose?.();
     } catch (_) { /* parent toasts errors */ }
   };
+  const needTrailerConfirm = !trailerAnswered && tour.used_trailer === true && tour.trailer_source === "auto" && !tour.trailer_confirmed;
+  // P5: Gem hænger-svaret fra linjen i vægtarket lige før turen afsluttes.
+  const confirmTrailerFromSheet = async () => {
+    if (!needTrailerConfirm) return true;
+    const v = trailerChoice == null ? true : trailerChoice;
+    try { await axios.put(`${API}/driver/tours/${tour.id}/trailer`, { used_trailer: v }); }
+    catch (e) { toast.error(formatApiError(e)); return false; }
+    setTrailerAnswered(true);
+    return true;
+  };
+  const trailerLine = needTrailerConfirm ? (
+    <div className="mb-2.5 flex items-center justify-between gap-2 rounded-lg bg-white/70 dark:bg-slate-900/40 px-2.5 py-2" data-testid="weight-sheet-trailer">
+      <span className="text-sm text-slate-700 dark:text-slate-200"><b>Hænger:</b> {(trailerChoice == null ? true : trailerChoice) ? "Ja" : "Nej"}
+        <span className="block text-[11px] text-slate-500">Forudfyldt fra din profil - bruges til afregningen</span></span>
+      <div className="inline-flex p-0.5 rounded-lg bg-slate-200 dark:bg-slate-800">
+        {[[true, "Ja"], [false, "Nej"]].map(([v, l]) => (
+          <button key={l} type="button" onClick={() => setTrailerChoice(v)} data-testid={`weight-sheet-trailer-${v ? "yes" : "no"}`}
+            className={`px-3 py-1.5 rounded-md text-xs font-bold ${(trailerChoice == null ? true : trailerChoice) === v ? "bg-white dark:bg-slate-700 shadow-sm text-slate-900 dark:text-white" : "text-slate-500"}`}>{l}</button>
+        ))}
+      </div>
+    </div>
+  ) : null;
   const handleCompleteClick = async () => {
     // Fase 13 (2026-06-18): Hard-stop hvis allerede afsluttet - knappen
     // skal ALDRIG kunne nulstille en afsluttet tur via "Afslut" igen.
     if (tour.completed) return;
     // 2026-10-18: Hængeren blev foreslået ud fra profilen da turen startede.
     // Spørg med svaret forudfyldt, så der ikke faktureres hænger blindt.
-    if (!trailerAnswered && tour.used_trailer === true && tour.trailer_source === "auto" && !tour.trailer_confirmed) {
+    // P5: Vises vægtarket, står spørgsmålet som en linje dér (én skærm) -
+    // modalen bruges kun når turen afsluttes uden vægtark.
+    const _tt = tour.tour_type || "normal";
+    const _hasLoads = (Array.isArray(tour.container_weights) ? tour.container_weights : []).some(w => parseFloat(w) > 0);
+    const _hasWeight = tour.weight != null && tour.weight !== "" && parseFloat(tour.weight) > 0;
+    const _sheetNext = (isMultiLoadTour && !_hasLoads && !isGoodsTour) || (!isMultiLoadTour && isGoodsTour)
+      || (!isMultiLoadTour && _tt === "normal" && !_hasWeight);
+    if (needTrailerConfirm && !askingWeight && !_sheetNext) {
       const v = await new Promise(res => setTrailerAsk({ resolve: res }));
       setTrailerAsk(null);
       if (v === null) return;
@@ -12613,6 +12644,7 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
         // Flere læs: vægtene indtastes i felterne ovenfor. Gods må afsluttes uden vægt.
         if (isGoodsTour) {
           if (!askConfirm(`Afslut uden vægt?\n\n${tour.fraction || ""}`)) return;
+          if (!(await confirmTrailerFromSheet())) return;
           const r = await onToggleComplete?.(tour.id, { skipWeight: true });
           if (r?.ok) onClose?.();
           return;
@@ -12630,6 +12662,7 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
         `Du kan IKKE tilføje flere vægte efter afslutning.`
       );
       if (!ok) return;
+      if (!(await confirmTrailerFromSheet())) return;
       const result = await onToggleComplete?.(tour.id);
       if (result?.ok) onClose?.();
       return;
@@ -12643,6 +12676,7 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
       const typeLabel = TOUR_TYPE_LABELS[tt] || tt;
       const ok = askConfirm(`Afslut "${typeLabel}"?\n\nMateriale: ${tour.fraction || "?"}`);
       if (!ok) return;
+      if (!(await confirmTrailerFromSheet())) return;
       const result = await onToggleComplete?.(tour.id, { skipWeight: true });
       if (result?.ok) onClose?.();
       return;
@@ -12658,6 +12692,7 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
       `Vægt: ${parseFloat(tour.weight).toLocaleString("da-DK")} kg`
     );
     if (!ok) return;
+    if (!(await confirmTrailerFromSheet())) return;
     const result = await onToggleComplete?.(tour.id);
     if (result?.ok) onClose?.();
   };
@@ -12669,6 +12704,7 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
     if (!val || val <= 0) {
       setIsSubmittingWeight(true);
       try {
+        if (!(await confirmTrailerFromSheet())) return;
         const r = await onToggleComplete?.(tour.id, { skipWeight: true });
         if (r?.ok) onClose?.();
       } finally { setIsSubmittingWeight(false); }
@@ -12679,6 +12715,7 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
       // Fase 17.13: Luk panelet straks når turen er marked completed.
       // Receipt-upload sker via persistent kø i baggrunden - overlever
       // browser-luk, dårlig dækning og iOS reload.
+      if (!(await confirmTrailerFromSheet())) return;
       const result = await onToggleComplete?.(tour.id, { weight: val });
       if (result?.ok) {
         const imageToUpload = pendingReceiptImage;
@@ -12981,6 +13018,7 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
             beregnes live. */}
         {askingWeight && !isClaimedByOther && isMultiLoadTour && (
           <div className="mx-4 mb-2 p-3 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-800" data-testid="mobile-tour-panel-loose-prompt">
+            {trailerLine}
             <label className="block text-xs uppercase tracking-wide text-amber-700 dark:text-amber-300 mb-2 font-semibold">
               {cargoLines.length > 1 ? `Vægt pr. læs (kg)${isGoodsTour ? " - valgfri" : " - mindst én påkrævet"}` : "Container-vægte (kg) - mindst én påkrævet"}
             </label>
@@ -13153,6 +13191,7 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
         {/* Inline weight prompt - shown when user clicked "Afslut" but no weight yet */}
         {askingWeight && !isClaimedByOther && !isMultiLoadTour && (
           <div className="mx-4 mb-2 p-3 rounded-lg bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-300 dark:border-emerald-800" data-testid="mobile-tour-panel-weight-prompt">
+            {trailerLine}
             <label className="block text-xs uppercase tracking-wide text-emerald-700 dark:text-emerald-300 mb-1.5 font-semibold">
               {isGoodsTour ? "Vægt (kg) - valgfri" : "Vægt (kg) - påkrævet for at afslutte"}
             </label>
@@ -13269,12 +13308,12 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
               <div className="px-3 py-2.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 text-sm text-emerald-800 dark:text-emerald-200 flex items-start gap-2"
                 data-testid="mobile-tour-panel-completed-notice">
                 <CheckCircle2 className="w-4 h-4 mt-0.5 flex-shrink-0" />
-                <span>Turen er afsluttet. Forkert tid, hænger eller ventetid? Brug "Ret" ovenfor.</span>
+                <span>Turen er afsluttet. Forkert tid, hænger eller ventetid? Brug "Ret tid, hænger eller ventetid" ovenfor (godkendes af planlæggeren).{hasCapture ? " Mængde og billede rettes her under." : ""}</span>
               </div>
               {hasCapture && onOpenFinish && (
                 <button onClick={() => onOpenFinish(tour)} data-testid="mobile-tour-panel-edit-registration"
                   className="w-full px-3 py-2.5 rounded-lg font-semibold text-sm bg-slate-100 text-slate-700 flex items-center justify-center gap-2">
-                  <Edit2 className="w-4 h-4" /> Ret registrering
+                  <Edit2 className="w-4 h-4" /> Ret mængde eller billede
                 </button>
               )}
               {!hasCapture && ((tour.tour_type || "normal") === "normal" || isMultiLoadTour || isGoodsTour) && !editingWeight && (
@@ -17429,7 +17468,7 @@ function App() {
         <DriverChatSheet tour={chatTour} onClose={() => setChatTour(null)} onChanged={fetchDriverTourUnread} />
         {finishTour && (
           <FinishSheet tour={finishTour} onClose={() => setFinishTour(null)}
-            capture={effectiveCapture(finishTour, finishSettings.unified_finish)} codes={finishSettings.codes}
+            capture={effectiveCapture(finishTour, finishSettings.unified_finish)} codes={finishSettings.codes} hasTrailer={!!activeTrailerId}
             onDone={(r) => {
               setSelectedTourForPanel(null);
               // Uden net: vis turen som afsluttet med det samme (køen sender den).

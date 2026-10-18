@@ -173,6 +173,9 @@ Ejerskab følger lokationen. Tur på en genbrugsplads-kundes plads → kunden er
 - **Afslutningsarket:** på timepris, når turen er under 5 min gammel, spørges "Er starttiden rigtig?". En rettet starttid sendes som rettelse til godkendelse i samme `/finish`-kald.
 - **"Afslut dag"** advarer, når chaufføren stadig har ture "På vej" ("Gå til turen" / "Afslut dagen alligevel").
 
+## 3i. Standard for nye prisaftaler (2026-10-18, P11)
+Nye prisaftaler gælder som standard "Nye + ture uden pris" (`effective="unpriced"`), ikke kun fra Rapport. Det er ufarligt: en tur, der allerede har en pris, ændres aldrig. Ved redigering af en eksisterende aftale er standarden stadig "Kun ture oprettet fra nu".
+
 ## 4. Sider (logistik admin → "Økonomi")
 
 Rapport · Kunder & priser · Prisregler · Godkendelser · Helligdage · Indstillinger

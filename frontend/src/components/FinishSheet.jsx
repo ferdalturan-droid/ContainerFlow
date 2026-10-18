@@ -71,7 +71,7 @@ const num = (v) => {
   return Number.isFinite(n) && n >= 0 ? n : null;
 };
 
-export default function FinishSheet({ tour, onClose, onDone, driverName, myId, capture, codes }) {
+export default function FinishSheet({ tour, onClose, onDone, driverName, myId, capture, codes, hasTrailer = false }) {
   const cap = capture || tour?.capture || {};
   const lines = Array.isArray(tour?.cargo_lines) ? tour.cargo_lines : [];
   const editMode = !!tour?.completed;
@@ -90,6 +90,9 @@ export default function FinishSheet({ tour, onClose, onDone, driverName, myId, c
   const opId = useRef(newOpId());
   const receiptRef = useRef(null);
   const plannedTrailers = Number(tour?.trailer_count || 0);
+  // 2026-10-18 (P7): Spørg kun om hænger når det er relevant - planlagt
+  // hænger, hænger i profilen, eller hænger foreslået da turen startede.
+  const askTrailers = plannedTrailers > 0 || hasTrailer || tour?.used_trailer === true;
   const [qty, setQty] = useState(() => lines.map(l => (l.actual_qty != null ? String(l.actual_qty) : "")));
   const [weight, setWeight] = useState(() => (tour?.weight ? String(tour.weight) : ""));
   const [photos, setPhotos] = useState([]);
@@ -206,7 +209,8 @@ export default function FinishSheet({ tour, onClose, onDone, driverName, myId, c
       if (!editMode) {
         // Hele afslutningen i ét kald - sikker at gentage (op_id).
         const body = {
-          ...regs, trailer_count: trailers, used_trailer: trailers > 0, time: new Date().toTimeString().slice(0, 5),
+          ...regs, ...(askTrailers ? { trailer_count: trailers, used_trailer: trailers > 0 } : { trailer_count: 0, used_trailer: false, trailer_source: "none" }),
+          time: new Date().toTimeString().slice(0, 5),
           issue_code: issueCode, message: note.trim(), waiting_min: parseInt(waiting, 10) || 0,
           ...(askStart && startFix && startFix !== tour.on_way_time ? { start_time: startFix } : {}),
           waiting_comment: `Ventetid oplyst ved afslutning${note.trim() ? `: ${note.trim()}` : ""}`,
@@ -253,7 +257,7 @@ export default function FinishSheet({ tour, onClose, onDone, driverName, myId, c
           <div className="mx-auto mb-2 w-10 h-1.5 rounded-full bg-slate-200 sm:hidden" />
           <div className="flex items-start gap-3">
             <div className="min-w-0 flex-1">
-              <h3 className="text-lg font-extrabold text-slate-900">{editMode ? "Ret registrering" : "Afslut tur"}</h3>
+              <h3 className="text-lg font-extrabold text-slate-900">{editMode ? "Ret mængde eller billede" : "Afslut tur"}</h3>
               <p className="text-sm text-slate-500 truncate">{tour.fraction} · {tour.address}</p>
             </div>
             <button onClick={onClose} className="p-2 -mr-2 text-slate-500" aria-label="Luk"><X className="w-5 h-5" /></button>
@@ -350,7 +354,7 @@ export default function FinishSheet({ tour, onClose, onDone, driverName, myId, c
             </section>
           )}
 
-          {!editMode && (
+          {!editMode && askTrailers && (
             <section>
               <div className={sectionTitle}>Hængere</div>
               <div className="rounded-xl bg-white border border-slate-200 p-3">

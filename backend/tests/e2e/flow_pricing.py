@@ -15,7 +15,7 @@ def tour(t, c, customer, task="levering", date_=None, lines=None, **extra):
     body = {"date": date_ or next_weekday(), "plads": "Hansen Depot Køge", "tour_kind": "goods", "tour_type": task,
             "private_company": customer, "is_private": True, "address": "Industrivej 22, 4600 Køge",
             "facility": "Nordhavn Etape 2", "cargo_lines": lines or [{"text": "Gods", "qty": 1, "unit": "stk"}], **extra}
-    tid = call("POST", "/tours/bulk", [body], t=t)[0]["id"]
+    tid = call("POST", "/tours/bulk?force=true", [body], t=t)[0]["id"]  # testene opretter bevidst ens ture
     c.tours.append(tid)
     return tid
 

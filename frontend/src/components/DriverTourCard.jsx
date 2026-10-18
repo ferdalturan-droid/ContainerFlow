@@ -24,9 +24,14 @@ export default function DriverTourCard({ tour, index, routeInfo, unread = 0, min
   const ap = tour.address_parts || {};
   const street = ap.street || (tour.address || "").split(",")[0] || tour.facility || "Ingen adresse";
   const town = ap.street ? [ap.postal, ap.city].filter(Boolean).join(" ") : (tour.address || "").split(",").slice(1).join(",").trim();
-  const delivery = tour.facility && tour.facility !== tour.plads ? tour.facility : "";
+  // Ingen "A → A" når afleveringen er samme adresse som afhentningen.
+  const delivery = tour.facility && tour.facility !== tour.plads && tour.facility !== tour.address ? tour.facility : "";
   const stops = Array.isArray(tour.stops) ? tour.stops : [];
   const stopsDoneN = stops.filter(x => x.done_at).length;
+  // 2026-10-18 (P6): Når turen kører, er det næste åbne stop det chaufføren
+  // skal bruge i førerhuset - adresse, note og telefon.
+  const nextStop = onWay ? stops.find(x => !x.done_at) : null;
+  const navTarget = nextStop?.address || tour.address || tour.facility;
   const cap = tour.tour_type === "loes_afhentning"
     ? (tour.loose_estimated_count ? `${tour.loose_estimated_count} containere` : "")
     : capacityText(tour);
@@ -57,6 +62,7 @@ export default function DriverTourCard({ tour, index, routeInfo, unread = 0, min
               <UserCheck className="w-3 h-3" /> Tildelt dig
             </span>
           )}
+          {tour.queued && <span className="px-2 py-0.5 rounded-md bg-slate-200 text-slate-600 text-[11px] font-bold" data-testid={`tour-queued-${tour.id}`}>Venter på net</span>}
           {tour.tour_number && <span className="ml-auto text-[11px] font-mono text-slate-400">{tour.tour_number}</span>}
         </div>
 
@@ -103,6 +109,21 @@ export default function DriverTourCard({ tour, index, routeInfo, unread = 0, min
         )}
       </button>
 
+      {nextStop && (
+        <div className="mx-4 mb-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 flex items-start gap-2" data-testid={`tour-next-stop-${tour.id}`}>
+          <div className="min-w-0 flex-1">
+            <div className="text-[11px] font-bold uppercase tracking-wide text-slate-500">Næste stop · {nextStop.kind === "delivery" ? "aflevering" : "afhentning"} ({stops.indexOf(nextStop) + 1}/{stops.length})</div>
+            <div className="text-[15px] font-bold text-slate-900 break-words">{nextStop.address}</div>
+            {nextStop.note && <div className="mt-1 text-[13px] text-amber-900 bg-amber-50 rounded-lg px-2 py-1.5">{nextStop.note}</div>}
+            {nextStop.contact_name && <div className="text-[12px] text-slate-500 mt-0.5">{nextStop.contact_name}</div>}
+          </div>
+          {nextStop.contact_phone && (
+            <a href={`tel:${nextStop.contact_phone.replace(/\s/g, "")}`} aria-label={`Ring til ${nextStop.contact_name || "kontakt"}`}
+              className="min-h-[44px] min-w-[44px] rounded-xl border border-emerald-200 bg-white text-emerald-700 inline-flex items-center justify-center"><Phone className="w-5 h-5" /></a>
+          )}
+        </div>
+      )}
+
       <div className="flex items-stretch gap-2 px-4 pb-3.5">
         {!done && (
           onWay ? (
@@ -117,8 +138,8 @@ export default function DriverTourCard({ tour, index, routeInfo, unread = 0, min
             </button>
           )
         )}
-        {!done && (tour.address || tour.facility) && (
-          <a href={mapsUrl(tour.address || tour.facility)} target="_blank" rel="noreferrer" data-testid={`maps-btn-${tour.id}`} aria-label="Åbn kort"
+        {!done && navTarget && (
+          <a href={mapsUrl(navTarget)} target="_blank" rel="noreferrer" data-testid={`maps-btn-${tour.id}`} aria-label={nextStop ? "Navigér til næste stop" : "Åbn kort"}
             className="min-h-[50px] min-w-[50px] rounded-xl border border-slate-200 text-slate-700 inline-flex items-center justify-center active:bg-slate-50">
             <Navigation className="w-5 h-5" />
           </a>

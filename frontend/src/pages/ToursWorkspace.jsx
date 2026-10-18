@@ -203,6 +203,23 @@ function repeatDates(f) {
   return out;
 }
 
+/** 2026-10-18 (P9): Opret ture - findes der allerede en ens tur samme dag
+ *  (samme plads + container-nr., eller samme adresse + materiale), spørges
+ *  der før de oprettes alligevel. Returnerer null hvis brugeren fortryder. */
+async function postToursBulk(body) {
+  try {
+    return await axios.post(`${API}/tours/bulk`, body);
+  } catch (e) {
+    const d = e?.response?.data?.detail;
+    if (e?.response?.status !== 409 || !d?.duplicates) throw e;
+    const lines = d.duplicates.slice(0, 5).map(x => `• ${x.tour_number ? `${x.tour_number} ` : ""}${x.fraction || ""} · ${x.address || x.plads}${x.container ? ` · #${x.container}` : ""} (${x.date}, ${x.status})`).join("\n");
+    let go = false;
+    try { go = window.confirm(`${d.message} samme dag:\n\n${lines}${d.duplicates.length > 5 ? "\n…" : ""}\n\nOpret alligevel?`); } catch (_) { go = false; }
+    if (!go) return null;
+    return axios.post(`${API}/tours/bulk`, body, { params: { force: true } });
+  }
+}
+
 const addrFilled = (a) => !!((a?.street || "").trim() || (a?.city || "").trim());
 // Et stop med note/kontakt tæller også (fx aflevering på lokationen med "port 3").
 const stopFilled = (a) => addrFilled(a) || !!((a?.note || "").trim() || (a?.contact_name || "").trim() || (a?.contact_phone || "").trim());
@@ -254,7 +271,11 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
   const [f, setF] = useState(() => blankForm(initialDate, defaultPlads));
   const [saving, setSaving] = useState(false);
   const [more, setMore] = useState(false);
-  useEffect(() => { if (open) { setF(blankForm(initialDate, defaultPlads)); setMore(false); } }, [open, initialDate, defaultPlads]);
+  // P2: "Opret som ny kunde" først når man har forladt feltet (ikke mens man
+  // skriver "li" på vej til "Life"), og ikke mens et "Mente du"-forslag venter.
+  const [firmaBlurred, setFirmaBlurred] = useState(false);
+  const [lookDismissed, setLookDismissed] = useState("");
+  useEffect(() => { if (open) { setF(blankForm(initialDate, defaultPlads)); setMore(false); setFirmaBlurred(false); setLookDismissed(""); } }, [open, initialDate, defaultPlads]);
   const set = (k, v) => setF(prev => ({ ...prev, [k]: v }));
   const plads = pladsList.find(p => p.name === f.plads);
   // Egen lokation hos et premium-firma = frit valg af type. Kundens plads = container (B2B).
@@ -286,6 +307,8 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
   const firmaTrim = f.firma.trim();
   const regMatch = customers.find(c => c.name.toLowerCase() === firmaTrim.toLowerCase());
   const lookAlikes = firmaTrim && !regMatch ? similarCustomers(firmaTrim, customers) : [];
+  const lookPending = lookAlikes.length > 0 && lookDismissed !== firmaTrim;
+  const showCreate = !!firmaTrim && !regMatch && firmaBlurred && firmaTrim.length >= 3 && !lookPending;
   const agreedN = canPrice && f.agreed_price !== "" && !isNaN(parseDk(f.agreed_price)) ? parseDk(f.agreed_price) : null;
 
   const submit = async () => {
@@ -299,7 +322,7 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
     // 2026-10-18: Kunden kobles til kunderegistret, så en stavefejl ikke giver
     // en "ny" kunde uden pris. Nye navne oprettes i registret (valgfrit).
     let customerRef = regMatch ? regMatch.id : "";
-    if (firma && !regMatch && (!plads || plads.own_location) && f.create_customer) {
+    if (firma && showCreate && (!plads || plads.own_location) && f.create_customer) {
       try {
         const { data } = await axios.post(`${API}/logistics/customers`, { name: firma });
         customerRef = data.id;
@@ -346,7 +369,8 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
     })));
     setSaving(true);
     try {
-      const r = await axios.post(`${API}/tours/bulk`, body);
+      const r = await postToursBulk(body);
+      if (!r) { setSaving(false); return; }
       const ids = (r.data || []).map(t => t.id);
       if (f.driver_id && ids.length) {
         await axios.post(`${API}/tours/bulk-assign`, { tour_ids: ids, driver_id: f.driver_id });
@@ -403,21 +427,25 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
         {(!plads || plads.own_location) && (
           <div>
             <label className={labelCls}>Kunde <span className="normal-case font-normal">(valgfri - bruges til priser i Økonomi)</span></label>
-            <input className={inputCls} list="tf-customers" value={f.firma} onChange={(e) => set("firma", e.target.value)} placeholder={customers.length ? "Vælg eller skriv en kunde" : "Fx Carlsberg Byen A/S"} data-testid="tf-firma" />
+            <input className={inputCls} list="tf-customers" value={f.firma} onChange={(e) => { set("firma", e.target.value); setFirmaBlurred(false); }}
+              onBlur={() => setFirmaBlurred(true)} placeholder={customers.length ? "Vælg eller skriv en kunde" : "Fx Carlsberg Byen A/S"} data-testid="tf-firma" />
             <datalist id="tf-customers">{customers.map(c => <option key={c.id} value={c.name} />)}</datalist>
             {regMatch && <p className="text-[11px] text-emerald-700 mt-1">Kunde fra kunderegistret</p>}
             {firmaTrim && !regMatch && (
               <div className="mt-1.5 space-y-1.5" data-testid="tf-firma-new">
-                {lookAlikes.length > 0 && (
+                {lookPending && (
                   <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-amber-800 dark:text-amber-200">
                     <span>Mente du:</span>
                     {lookAlikes.map(c => <button key={c.id} type="button" className="px-2 py-1 rounded-full bg-amber-100 dark:bg-amber-900/40 font-semibold" onClick={() => set("firma", c.name)} data-testid="tf-firma-suggest">{c.name}</button>)}
+                    <button type="button" className="underline text-slate-500" onClick={() => { setLookDismissed(firmaTrim); setFirmaBlurred(true); }} data-testid="tf-firma-new-anyway">Nej, det er en ny kunde</button>
                   </div>
                 )}
-                <label className="flex items-center gap-2 text-[11px] text-slate-600 dark:text-slate-300">
-                  <input type="checkbox" className="w-4 h-4 accent-emerald-600" checked={!!f.create_customer} onChange={(e) => set("create_customer", e.target.checked)} />
-                  Opret "{firmaTrim}" som ny kunde i kunderegistret (så den kan få egne priser)
-                </label>
+                {showCreate && (
+                  <label className="flex items-center gap-2 text-[11px] text-slate-600 dark:text-slate-300" data-testid="tf-firma-create">
+                    <input type="checkbox" className="w-4 h-4 accent-emerald-600" checked={!!f.create_customer} onChange={(e) => set("create_customer", e.target.checked)} />
+                    Opret "{firmaTrim}" som ny kunde i kunderegistret (så den kan få egne priser)
+                  </label>
+                )}
               </div>
             )}
           </div>
@@ -801,7 +829,7 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
   };
   const duplicate = async (date) => {
     try {
-      await axios.post(`${API}/tours/bulk`, [copyBody(tour, date)]);
+      if (!(await postToursBulk([copyBody(tour, date)]))) return;
       toast.success(`Kopieret til ${fmtDayLong(date)}`);
       onChanged();
     } catch (e) { toast.error(formatApiError(e)); }
@@ -859,7 +887,7 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
         <Registration tour={tour} />
         {(priceStatus?.status === "missing" || deviationsOf(tour, { hourly: priceStatus?.hourly }).length > 0) && (
           <div className="mt-3 flex flex-col gap-1.5" data-testid="panel-attention">
-            {priceStatus?.status === "missing" && <div className="text-xs rounded-lg bg-red-50 dark:bg-red-950/30 text-red-800 dark:text-red-200 px-3 py-2"><b>{priceStatus.label}:</b> {priceStatus.why || "ingen prisregel passer"} - opret prisen under Økonomi › Rapport.</div>}
+            {priceStatus?.status === "missing" && <div className="text-xs rounded-lg bg-red-50 dark:bg-red-950/30 text-red-800 dark:text-red-200 px-3 py-2"><b>{priceStatus.label}:</b> {priceStatus.why || "ingen prisregel passer"} - {can("economy_edit") ? "opret prisen under Økonomi › Rapport." : "bed din administrator om at oprette prisen."}</div>}
             {deviationsOf(tour, { hourly: priceStatus?.hourly }).length > 0 && <div className="text-xs rounded-lg bg-amber-50 dark:bg-amber-950/30 text-amber-900 dark:text-amber-100 px-3 py-2"><b>Afvigelse:</b> {deviationsOf(tour, { hourly: priceStatus?.hourly }).join(" · ")}{timeDeviations(tour, { hourly: priceStatus?.hourly }).length > 0 ? " - tiden bruges til timeprisen; ret den under Økonomi › Rapport hvis den er forkert." : ""}</div>}
           </div>
         )}
@@ -1295,7 +1323,7 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
   };
   const bulkCopy = async (d) => {
     try {
-      await axios.post(`${API}/tours/bulk`, selectedTours.map(t => copyBody(t, d)));
+      if (!(await postToursBulk(selectedTours.map(t => copyBody(t, d))))) return;
       toast.success(`${selectedTours.length} tur${selectedTours.length === 1 ? "" : "e"} kopieret til ${fmtDayLong(d)}`); clearSel(); refresh();
     } catch (e) { toast.error(formatApiError(e)); }
   };
