@@ -19,6 +19,14 @@ Data must be strictly isolated per company.
   and `/api/health` bypass tenant filtering so the QR-code customer flow continues to work.
 
 ## What's been implemented (2026-02-15)
+## What's new in 2026-10-18 (Chauffører-fanen i nyt design)
+- Logistik admin › Chauffører er bygget om i samme stil som Medarbejdere (lokations-admin) og Team & rettigheder. Koden ligger nu i `frontend/src/pages/DriversPanel.jsx`, og den gamle kode i App.js er fjernet.
+- Fanen har fire afsnit med samme vælger som Ture: Chauffører · Vogne · Hængere · Beskeder (med antal).
+- Oprettelse og redigering sker i et vindue (Navn/E-mail/Telefon; vognnummer; hængernummer + kapacitet). Sletning bekræftes i et vindue i stedet for browserens dialog.
+- Chauffører kan inaktiveres og aktiveres som medarbejdere. En inaktiv chauffør kan ikke logge ind og vises ikke, når man tildeler ture. Sletning ligger i Rediger-vinduet.
+- På telefon vises chaufførerne som en liste i stedet for en tabel.
+- Beskeder viser kun beskeder til chauffører og henviser til turens tråd, når beskeden handler om en tur.
+
 ## What's new in 2026-10-18 (Planlæg i Ture)
 - "Planlæg" er genskabt som visning i Ture: ikke-tildelte → chauffører → tildelte pr. chauffør. Det er det eneste sted, man tildeler; rækkens dropdown og "Pr. chauffør" er fjernet.
 - Omfordeling: tildelte ture, der ikke er startet, kan vælges i Planlæg og gives til en anden. "Tildel i Planlæg" fra Dagsplan fravælger startede og færdige ture med en besked. `/tours/bulk-assign` springer startede, færdige og forgæves ture over (`skipped`) og rydder en anden chaufførs "taget". Ved opstart rettes ture i gang, der er tildelt en anden end den, der kører dem.
