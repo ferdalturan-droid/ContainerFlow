@@ -1088,6 +1088,10 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
   // 2026-10-18 (E1/E3): prisstatus pr. tur (uden beløb) og afvigelser.
   const [priceStatus, setPriceStatus] = useState({});
   const [attnFilter, setAttnFilter] = useState(""); // "" | "price" | "deviation"
+  // 2026-10-18 (P1): Ture grupperes pr. lokation eller pr. chauffør (erstatter
+  // "Planlægning › Planlæg ture" - samme dato, filtre, rækker og panel).
+  const [groupBy, setGroupByState] = useState(() => { try { return localStorage.getItem("cf_tours_group_by") === "driver" ? "driver" : "plads"; } catch (_) { return "plads"; } });
+  const setGroupBy = (v) => { setGroupByState(v); try { localStorage.setItem("cf_tours_group_by", v); } catch (_) { /* ignore */ } };
   const [showOverdue, setShowOverdue] = useState(false);
   const [selected, setSelected] = useState(new Set());
   const [collapsed, setCollapsed] = useState({});
@@ -1216,25 +1220,42 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
     });
   }, [source, status, onlyHaster, fPlads, fCustomer, fDriver, fSource, q, ownName, attnFilter, priceStatus]);
 
+  const NO_DRIVER = "Uden chauffør";
   const groups = useMemo(() => {
     const rank = (t) => (t.not_completed ? 0 : t.completed ? 4 : t.on_way ? 2 : assigneeName(t) ? 3 : 1);
     const m = new Map();
     filtered.forEach(t => {
-      const k = t.plads || "Uden lokation";
+      const k = groupBy === "driver" ? (assigneeName(t) || NO_DRIVER) : (t.plads || "Uden lokation");
       if (!m.has(k)) m.set(k, []);
       m.get(k).push(t);
     });
-    return Array.from(m.entries()).sort((a, b) => a[0].localeCompare(b[0], "da")).map(([name, list]) => ({
-      name,
-      customer: customerOf(list[0], ownName),
-      list: list.sort((a, b) => (isHaster(b) - isHaster(a)) || (rank(a) - rank(b)) || String(a.open_from || "99").localeCompare(String(b.open_from || "99")) || ((a.sort_order || 0) - (b.sort_order || 0))),
-    }));
-  }, [filtered, ownName]);
+    const order = (a, b) => (groupBy === "driver" ? ((b[0] === NO_DRIVER) - (a[0] === NO_DRIVER)) : 0) || a[0].localeCompare(b[0], "da");
+    return Array.from(m.entries()).sort(order).map(([name, list]) => {
+      // Kunderne i gruppen (en egen lokation kan have flere kunder).
+      const custs = Array.from(new Set(list.map(t => customerOf(t, ownName))));
+      const places = Array.from(new Set(list.map(t => t.plads || "Uden lokation")));
+      return {
+        name,
+        customer: groupBy === "driver" ? places.slice(0, 2).join(", ") + (places.length > 2 ? ` +${places.length - 2}` : "")
+          : custs.slice(0, 2).join(", ") + (custs.length > 2 ? ` +${custs.length - 2}` : ""),
+        list: list.sort((a, b) => (isHaster(b) - isHaster(a)) || (rank(a) - rank(b)) || String(a.open_from || "99").localeCompare(String(b.open_from || "99")) || ((a.sort_order || 0) - (b.sort_order || 0))),
+      };
+    });
+  }, [filtered, ownName, groupBy]);
 
   const unreadTotal = Object.values(unread).reduce((s, n) => s + n, 0);
   const hasterOpen = (tours || []).filter(t => isHaster(t) && !t.completed && !assigneeName(t) && !t.not_completed);
   const blocked = (tours || []).filter(t => t.not_completed);
   const missingPrice = (tours || []).filter(t => priceStatus[t.id]?.status === "missing");
+  const dayOverview = useMemo(() => {
+    const list = (tours || []).filter(t => !t.is_pause);
+    return {
+      total: list.length,
+      done: list.filter(t => t.completed).length,
+      kg: Math.round(list.filter(t => t.completed).reduce((s, t) => s + (Number(t.weight) || 0), 0)),
+      noDriver: list.filter(t => !t.completed && !t.not_completed && !assigneeName(t)).length,
+    };
+  }, [tours]);
   const withDeviation = (tours || []).filter(t => deviationsOf(t).length > 0);
   const openTour = source.find(t => t.id === openId) || (tours || []).find(t => t.id === openId) || overdue.find(t => t.id === openId) || null;
   const activeFilters = !!(q || fPlads || fCustomer || fDriver || fSource || onlyHaster || attnFilter || status !== "all");
@@ -1381,6 +1402,16 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
         <ArchiveTab locations={(pladsList || []).filter(p => p.location_code || p.code).map(p => ({ code: p.location_code || p.code, name: p.name }))} />
       ) : (
         <>
+          {/* Overblik (2026-10-18, P1 - erstatter "Hurtigt overblik" i Planlægning) */}
+          {!showOverdue && tours && tours.length > 0 && (
+            <div className="text-sm text-slate-600 dark:text-slate-300 flex flex-wrap gap-x-3 gap-y-1" data-testid="tours-overview">
+              <span><b className="text-slate-900 dark:text-white tabular-nums">{dayOverview.total}</b> ture</span>
+              <span>· <b className="text-slate-900 dark:text-white tabular-nums">{dayOverview.done}</b> færdige</span>
+              <span>· <b className="text-slate-900 dark:text-white tabular-nums">{dayOverview.kg.toLocaleString("da-DK")}</b> kg</span>
+              <span className={dayOverview.noDriver ? "text-amber-700 dark:text-amber-300" : ""}>· <b className="tabular-nums">{dayOverview.noDriver}</b> uden chauffør</span>
+            </div>
+          )}
+
           {/* Opmærksomhed */}
           {(hasterOpen.length > 0 || overdue.length > 0 || blocked.length > 0 || unreadTotal > 0 || missingPrice.length > 0 || withDeviation.length > 0) && (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2" data-testid="tours-attention">
@@ -1434,6 +1465,12 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
               className={`shrink-0 px-3 py-2 rounded-xl text-sm font-semibold border inline-flex items-center gap-2 ${onlyHaster ? "bg-rose-600 text-white border-rose-600" : "bg-white dark:bg-slate-800 text-rose-600 border-rose-200 dark:border-rose-900"}`}>
               <Flag className="w-3.5 h-3.5" /> Haster <span className="text-xs tabular-nums">{counts.haster}</span>
             </button>
+            <div className="ml-auto shrink-0 inline-flex p-0.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800" role="tablist" aria-label="Gruppér ture" data-testid="tours-group-by">
+              {[["plads", "Pr. lokation"], ["driver", "Pr. chauffør"]].map(([v, l]) => (
+                <button key={v} type="button" role="tab" aria-selected={groupBy === v} onClick={() => setGroupBy(v)} data-testid={`tours-group-by-${v}`}
+                  className={`px-3 py-1.5 rounded-lg text-sm font-semibold ${groupBy === v ? "bg-slate-900 text-white dark:bg-white dark:text-slate-900" : "text-slate-600 dark:text-slate-300"}`}>{l}</button>
+              ))}
+            </div>
           </div>
 
           {/* Filtre */}
@@ -1501,7 +1538,8 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
           ) : (
             <div className="space-y-3">
               {groups.map(g => {
-                const isCol = !!collapsed[g.name];
+                const colKey = `${groupBy}:${g.name}`;
+                const isCol = !!collapsed[colKey];
                 const done = g.list.filter(t => t.completed).length;
                 const allSel = g.list.every(t => selected.has(t.id));
                 return (
@@ -1509,8 +1547,8 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
                     <div className="flex items-center gap-2 px-3 sm:px-4 py-2.5 bg-slate-50/80 dark:bg-slate-800/80 border-b border-slate-100 dark:border-slate-700">
                       {canSelect && <input type="checkbox" className="w-4 h-4 accent-emerald-600" checked={allSel} aria-label="Vælg alle i gruppen"
                         onChange={() => setSelected(prev => { const n = new Set(prev); g.list.forEach(t => allSel ? n.delete(t.id) : n.add(t.id)); return n; })} />}
-                      <button onClick={() => setCollapsed(c => ({ ...c, [g.name]: !isCol }))} className="flex-1 min-w-0 flex items-center gap-2 text-left">
-                        <Building2 className="w-4 h-4 text-slate-400 shrink-0" />
+                      <button onClick={() => setCollapsed(c => ({ ...c, [colKey]: !isCol }))} className="flex-1 min-w-0 flex items-center gap-2 text-left">
+                        {groupBy === "driver" ? <User className={`w-4 h-4 shrink-0 ${g.name === NO_DRIVER ? "text-amber-500" : "text-slate-400"}`} /> : <Building2 className="w-4 h-4 text-slate-400 shrink-0" />}
                         <span className="font-semibold text-slate-900 dark:text-white truncate">{g.name}</span>
                         <span className="text-xs text-slate-400 truncate hidden sm:inline">· {g.customer}</span>
                         <span className="ml-auto text-xs text-slate-500 tabular-nums shrink-0">{done}/{g.list.length} færdig</span>
@@ -1549,7 +1587,8 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
                                   {priceStatus[t.id]?.pending > 0 && <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">Rettelse venter</span>}
                                   {deviationsOf(t).length > 0 && <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200" title={deviationsOf(t).join(" · ")} data-testid={`row-deviation-${t.id}`}>Afvigelse</span>}
                                 </div>
-                                <div className="text-sm text-slate-600 dark:text-slate-300 truncate">{t.address || "Ingen adresse"}{t.facility && t.facility !== t.plads ? <span className="text-slate-400"> → {t.facility}</span> : null}</div>
+                                <div className="text-sm text-slate-600 dark:text-slate-300 truncate">{t.address || "Ingen adresse"}{t.facility && t.facility !== t.plads && t.facility !== t.address ? <span className="text-slate-400"> → {t.facility}</span> : null}</div>
+                                {groupBy === "driver" && <div className="text-[11px] text-slate-400 truncate inline-flex items-center gap-1"><Building2 className="w-3 h-3" />{t.plads || "Uden lokation"} · {customerOf(t, ownName)}</div>}
                                 {stopsOf(t).length > 0 && <div className="text-[11px] font-semibold text-slate-500">{stopsOf(t).length} stop · {stopsDone(t)} udført</div>}
                                 <div className="md:hidden mt-1 flex items-center gap-3 text-[11px] text-slate-500">
                                   {oh.from && <span className="inline-flex items-center gap-1"><Clock className="w-3 h-3" />{oh.from}–{oh.to}</span>}

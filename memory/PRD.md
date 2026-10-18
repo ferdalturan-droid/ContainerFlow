@@ -19,6 +19,10 @@ Data must be strictly isolated per company.
   and `/api/health` bypass tenant filtering so the QR-code customer flow continues to work.
 
 ## What's been implemented (2026-02-15)
+## What's new in 2026-10-18 (P1: én planlægningsside)
+- "Planlægning › Planlæg ture" er fjernet (død kode slettet), og fanen hedder "Tid & ressourcer".
+- Ture: "Pr. lokation | Pr. chauffør" plus overblikslinjen. `TOUR_TYPE_LABELS` kender gods-typerne.
+
 ## What's new in 2026-10-18 (P0: ejerskab følger lokationen)
 - **Kundens plads:** "Ny tur" og Kopiér på en genbrugsplads-kundes plads giver nu kundens tur (`company_id`, `customer_name`/`customer_code`). Logistikfirmaet står i `assigned_logistics_company_ids`.
 - **Fejlen:** Tour-modellen manglede `company_id`, så TenantAwareDB satte logistikfirmaets id ved insert (`_with_owner` retter det).

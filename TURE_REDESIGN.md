@@ -144,3 +144,10 @@ Begge dele er rettet. Desuden:
 - **Engangsrettelse ved opstart** (`_migrate_tour_owner_from_plads`): ikke-fakturerede, ikke-slettede ture på en kundes plads med et logistikfirmas id bliver kundens. Firmaet beholdes som tildelt, og antallet logges.
 - **Undtagelse ("noget på kundens plads, kunden ikke skal se"):** bygges ikke. Brug en egen lokation med samme adresse.
 
+### Én planlægningsside (2026-10-18, P1)
+- **"Planlægning › Planlæg ture" er fjernet.** Den gjorde det samme som Ture (tildel ture), men med sin egen dato, sin egen datahentning og rå koder som `afhent_lever`. Den kendte heller ikke stop, prisstatus, afvigelser eller serier.
+- **Ture har en visningsknap "Pr. lokation | Pr. chauffør":** samme dato, filtre, rækker og panel. "Uden chauffør" står øverst, og rækkerne viser lokation og kunde. Valget huskes i browseren.
+- **"Hurtigt overblik" er nu én linje øverst på Ture:** "X ture · Y færdige · Z kg · N uden chauffør". Kortet "Genbrugspladser" (der talte alle pladser, også kunders) er fjernet.
+- **Fanen hedder "Tid & ressourcer"** (Tidsregistrering og Planlæg ressourcer).
+- **Gruppens kunde-tekst** viser alle kunder i gruppen (før kun den første tur, fx "Hansen Depot Køge · Helsingør Forsyning").
+
