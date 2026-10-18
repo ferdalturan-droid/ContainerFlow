@@ -32,9 +32,16 @@ SURCHARGE_CATEGORIES = {
     "trailer": "Hænger",
     "evening": "Aften/nat",
     "waiting": "Ventetid",
+    # 2026-10-18: pr. stop ud over de inkluderede (standard 2 = én afhentning
+    # + én aflevering). Stop der ikke kunne gennemføres tæller med - chaufføren
+    # kørte derhen.
+    "stop": "Ekstra stop",
     "other": "Andet",
 }
-BASE_MODELS = {"fixed": "Fast pris", "hourly": "Timepris", "per_container": "Pris pr. container"}
+BASE_MODELS = {"fixed": "Fast pris", "hourly": "Timepris", "per_container": "Pris pr. container",
+               # 2026-10-18: pr. palle/kolli/m³/ton ... ud fra linjernes antal
+               # (registreret, ellers planlagt), med valgfrit minimumsbeløb.
+               "per_unit": "Pris pr. enhed"}
 
 # Specificity weights: a rule naming a customer beats one naming a location,
 # which beats a delivery address, and so on. Sums never collide upwards
@@ -207,22 +214,40 @@ def _in_window(start_min: int, frm: str, to: str) -> bool:
     return f <= start_min < t if f <= t else (start_min >= f or start_min < t)
 
 
-def rule_matches(rule: dict, attrs: dict) -> bool:
+def tour_materials(attrs: dict) -> List[str]:
+    """2026-10-18: Turens materialer som liste (én pr. indholdslinje). Ældre
+    attrs har kun `material` (én streng)."""
+    mats = [m for m in (attrs.get("materials") or []) if (m or "").strip()]
+    if mats:
+        return mats
+    m = (attrs.get("material") or "").strip()
+    return [m] if m else []
+
+
+CONDITION_LABELS = {
+    "active": "reglen er slået fra", "valid": "kørselsdatoen er uden for reglens periode",
+    "outcome": "udfald (gennemført/forgæves)", "customer_ids": "kunde", "location_codes": "lokation",
+    "materials": "materiale", "task_types": "opgavetype", "priorities": "prioritet",
+    "day_types": "dagtype", "container_labels": "containerstørrelse", "delivery_labels": "leveringsadresse",
+    "trailer_counts": "antal hængere", "trailer": "hænger", "time": "tidsrum",
+}
+
+
+def failing_conditions(rule: dict, attrs: dict) -> List[str]:
+    """Hvilke betingelser i reglen turen IKKE opfylder (tom liste = match)."""
     c = rule.get("conditions") or {}
+    out: List[str] = []
     if not rule.get("active", True):
-        return False
+        out.append("active")
     sd = attrs.get("service_date") or ""
-    if rule.get("valid_from") and sd and sd < rule["valid_from"]:
-        return False
-    if rule.get("valid_to") and sd and sd > rule["valid_to"]:
-        return False
+    if (rule.get("valid_from") and sd and sd < rule["valid_from"]) or (rule.get("valid_to") and sd and sd > rule["valid_to"]):
+        out.append("valid")
     outcome = c.get("outcome") or "completed"
     if outcome != "any" and outcome != attrs.get("outcome"):
-        return False
+        out.append("outcome")
     checks = {
         "customer_ids": attrs.get("customer_id"),
         "location_codes": attrs.get("location_code"),
-        "materials": attrs.get("material"),
         "task_types": attrs.get("task_type"),
         "priorities": attrs.get("priority"),
         "day_types": attrs.get("day_type"),
@@ -235,24 +260,60 @@ def rule_matches(rule: dict, attrs: dict) -> bool:
             continue
         if key in ("container_labels", "delivery_labels"):
             if value not in {norm_label(w) for w in wanted}:
-                return False
+                out.append(key)
         elif value not in wanted:
-            return False
+            out.append(key)
+    # 2026-10-18: Materiale som liste. Grundpris: ALLE turens materialer skal
+    # være i reglen (en betonpris gælder kun rene betonture). Tillæg: ét er nok.
+    wanted_m = {norm_label(w) for w in (c.get("materials") or []) if str(w).strip()}
+    if wanted_m:
+        mats = {norm_label(m) for m in tour_materials(attrs)}
+        ok = bool(mats) and (mats <= wanted_m if rule.get("kind") == "base" else bool(mats & wanted_m))
+        if not ok:
+            out.append("materials")
     # 2026-10-17: Antal hængere (fx 1 hænger = 700, 2 hængere = 1100).
     counts = [int(x) for x in (c.get("trailer_counts") or []) if str(x).isdigit()]
     if counts:
         n = int(attrs.get("trailer_count") or 0)
         if not any(n == k or (k >= 3 and n >= 3) for k in counts):
-            return False
+            out.append("trailer_counts")
     trailer = c.get("trailer") or ""
-    if trailer == "with" and not attrs.get("trailer"):
-        return False
-    if trailer == "without" and attrs.get("trailer"):
-        return False
+    if (trailer == "with" and not attrs.get("trailer")) or (trailer == "without" and attrs.get("trailer")):
+        out.append("trailer")
     if c.get("time_from") and c.get("time_to"):
         if not _in_window(attrs.get("start_min", -1), c["time_from"], c["time_to"]):
-            return False
-    return True
+            out.append("time")
+    return out
+
+
+def rule_matches(rule: dict, attrs: dict) -> bool:
+    return not failing_conditions(rule, attrs)
+
+
+def explain_missing(rules: List[dict], attrs: dict) -> Optional[dict]:
+    """Hvorfor fandt turen ingen grundpris? Den nærmeste grundpris-regel (færrest
+    betingelser der ikke passer) og hvilke betingelser der ikke passer."""
+    best = None
+    for r in rules:
+        if r.get("kind") != "base" or not r.get("active", True):
+            continue
+        fails = failing_conditions(r, attrs)
+        if not fails:
+            return None
+        key = (len(fails), -specificity(r))
+        if best is None or key < best[0]:
+            best = (key, r, fails)
+    if not best:
+        return {"rule": None, "failing": [], "text": "Der er ikke oprettet nogen grundpris endnu"}
+    _k, r, fails = best
+    parts = [CONDITION_LABELS.get(f, f) for f in fails]
+    if "materials" in fails and len(tour_materials(attrs)) > 1:
+        parts[fails.index("materials")] = (f"materiale (turen har {' + '.join(tour_materials(attrs))}, "
+                                           f"reglen gælder {', '.join((r.get('conditions') or {}).get('materials') or [])})")
+    if "outcome" in fails and attrs.get("outcome") == "not_completed":
+        parts[fails.index("outcome")] = "forgæves kørsel (ingen pris for forgæves kørsel)"
+    return {"rule": r.get("name"), "failing": fails,
+            "text": f"Nærmeste regel \"{r.get('name')}\" passer ikke på: {', '.join(parts)}"}
 
 
 def specificity(rule: dict) -> int:
@@ -328,6 +389,25 @@ def price_tour(attrs: dict, rules: List[dict], time_info: Optional[dict],
             result["lines"].append({"type": "base",
                                     "label": f"{base.get('name') or 'Pris pr. container'} ({qty} stk.)",
                                     "amount": money(base_amount), "rule_id": base.get("id")})
+        elif model == "per_unit":
+            unit = norm_label(p.get("unit") or "")
+            units = {norm_label(k): v for k, v in (attrs.get("units") or {}).items()}
+            qty = float(units.get(unit) or 0)
+            if qty <= 0:
+                result["status"] = "missing_qty"
+                result["flags"].append(f"Turen har intet antal i {p.get('unit') or 'enheden'}")
+            else:
+                rate = float(p.get("amount") or 0)
+                base_amount = rate * qty
+                src = (attrs.get("units_source") or {}).get(unit) or ""
+                result["lines"].append({"type": "base",
+                                        "label": f"{base.get('name') or 'Pris pr. enhed'} ({qty:g} {p.get('unit')} × {rate:g} kr{', ' + src if src else ''})",
+                                        "amount": money(base_amount), "rule_id": base.get("id")})
+                min_amount = float(p.get("min_amount") or 0)
+                if min_amount and base_amount < min_amount:
+                    result["lines"].append({"type": "base", "label": "Op til minimumsbeløb",
+                                            "amount": money(min_amount - base_amount), "rule_id": base.get("id")})
+                    base_amount = min_amount
         else:  # hourly
             deduct = p.get("deduct_pause", True)
             if attrs.get("deduct_pause_override") is not None:
@@ -381,7 +461,14 @@ def price_tour(attrs: dict, rules: List[dict], time_info: Optional[dict],
         for s in surcharges:
             sp = s.get("surcharge") or {}
             unit, value = sp.get("unit") or "kr", float(sp.get("value") or 0)
-            if unit == "percent":
+            if s.get("category") == "stop":
+                included = int(sp.get("included") if sp.get("included") is not None else 2)
+                extra = max(0, int(attrs.get("stops") or 0) - included)
+                if not extra:
+                    continue
+                amt = value * extra if unit != "percent" else base_amount * value / 100 * extra
+                detail = f"{extra} ekstra stop × {value:g}{'%' if unit == 'percent' else ' kr'}"
+            elif unit == "percent":
                 amt, detail = base_amount * value / 100, f"{value:g}%"
             elif unit == "per_hour":
                 if s.get("category") == "waiting":
@@ -404,8 +491,13 @@ def price_tour(attrs: dict, rules: List[dict], time_info: Optional[dict],
 
     if fixed:
         keep = [l for l in result["lines"] if l.get("category") == "waiting"] if override.get("add_waiting") else []
+        # 2026-10-18: Vis de tillæg der er indregnet i den aftalte pris (0 kr),
+        # så "hvorfor er der ingen weekend på denne tur?" besvarer sig selv.
+        included = [{"type": "included", "label": f"{l['label']} - indregnet i aftalt pris", "amount": 0.0,
+                     "category": l.get("category")}
+                    for l in result["lines"] if l.get("type") == "surcharge" and l not in keep]
         result["lines"] = [{"type": "override", "label": override.get("label") or "Manuel pris",
-                            "amount": money(float(override.get("amount") or 0))}] + keep
+                            "amount": money(float(override.get("amount") or 0))}] + keep + included
         result["status"] = "ok"
         result["flags"] = [f for f in result["flags"] if f.startswith("Minimum")]
         result["flags"].append("Manuel pris")

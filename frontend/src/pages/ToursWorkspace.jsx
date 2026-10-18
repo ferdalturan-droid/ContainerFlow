@@ -12,7 +12,7 @@ import { ArchiveTab } from "./LocationAdminPage";
 import TourChat from "../components/TourChat";
 import AddressField, { formatAddress, parseAddress } from "../components/AddressField";
 import {
-  TOUR_TYPES, GOODS_TYPES, TOUR_TYPE_LABEL, SOURCE_LABEL, cargoSummary, isGoods, stopsOf, stopsDone, parseDk, todayStr, addDays, fmtDayLong, fmtClock,
+  TOUR_TYPES, GOODS_TYPES, TOUR_TYPE_LABEL, SOURCE_LABEL, cargoSummary, isGoods, stopsOf, stopsDone, parseDk, todayStr, addDays, fmtDayLong, fmtClock, deviationsOf,
   isHaster, openHours, capacityText, assigneeName, tourStatus, daysLate, mapsUrl,
 } from "../lib/tourHelpers";
 
@@ -186,7 +186,7 @@ const blankForm = (date, plads) => ({
   lines: [{ text: "", trailer: "", qty: "", unit: "stk" }], container: "", capacity_label: "", loose_count: "",
   stops: [{ street: "", postal: "", city: "" }], deliveries: [{ street: "", postal: "", city: "" }], separate: false,
   open_from: "", open_to: "", priority: "normal", driver_id: "", remark: "", trailer_count: 0,
-  agreed_price: "", agreed_add_waiting: true, capture_qty: null, capture_photo: false,
+  agreed_price: "", agreed_add_waiting: true, agreed_split: false, capture_qty: null, capture_photo: false, create_customer: true,
   repeat: "none", repeat_days: ["1", "2", "3", "4", "5"], repeat_until: addDays(date, 28),
 });
 
@@ -204,6 +204,42 @@ function repeatDates(f) {
 }
 
 const addrFilled = (a) => !!((a?.street || "").trim() || (a?.city || "").trim());
+// Et stop med note/kontakt tæller også (fx aflevering på lokationen med "port 3").
+const stopFilled = (a) => addrFilled(a) || !!((a?.note || "").trim() || (a?.contact_name || "").trim() || (a?.contact_phone || "").trim());
+const addrOnly = (a) => ({ street: a?.street || "", postal: a?.postal || "", city: a?.city || "" });
+
+/** 2026-10-18: Kunde-navne der ligner hinanden ("Carlsberg Byen" ~ "Carlsberg byen A/S"). */
+const normCust = (s) => (s || "").toLowerCase().replace(/\b(a\/s|aps|i\/s|as|ivs|k\/s)\b/g, "").replace(/[^a-z0-9æøå]+/g, " ").trim();
+const lev = (a, b) => {
+  if (Math.abs(a.length - b.length) > 3) return 9;
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++)
+    d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return d[a.length][b.length];
+};
+const similarCustomers = (name, list) => {
+  const n = normCust(name);
+  if (n.length < 3) return [];
+  return list.filter(c => {
+    const m = normCust(c.name);
+    return m === n || (m.length >= 4 && (m.includes(n) || n.includes(m))) || (n.length > 4 && lev(m, n) <= 2);
+  }).slice(0, 3);
+};
+
+/** Note og kontakt på et stop (valgfrit, foldet sammen). */
+function StopExtras({ value, onChange }) {
+  const v = value || {};
+  const [open, setOpen] = useState(!!(v.note || v.contact_name || v.contact_phone));
+  if (!open) return <button type="button" className="mt-2 text-xs font-semibold text-slate-500 underline" onClick={() => setOpen(true)} data-testid="stop-extras-open">+ Note / kontakt på stoppet</button>;
+  return (
+    <div className="mt-2 grid grid-cols-1 sm:grid-cols-3 gap-2">
+      <input className={`${inputCls} sm:col-span-3`} value={v.note || ""} onChange={(e) => onChange({ ...v, note: e.target.value })} placeholder="Note til stoppet, fx port 3" maxLength={200} data-testid="stop-note" />
+      <input className={`${inputCls} sm:col-span-2`} value={v.contact_name || ""} onChange={(e) => onChange({ ...v, contact_name: e.target.value })} placeholder="Kontaktperson" maxLength={80} />
+      <input className={inputCls} type="tel" inputMode="tel" value={v.contact_phone || ""} onChange={(e) => onChange({ ...v, contact_phone: e.target.value })} placeholder="Telefon" maxLength={20} data-testid="stop-phone" />
+    </div>
+  );
+}
 
 /**
  * Ny tur (2026-10-17). Det man altid skal bruge står fremme; resten ligger
@@ -230,13 +266,14 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
   const multiLines = goods || tc >= 2;
   const dates = repeatDates(f);
   const stops = f.stops.filter(addrFilled);
-  const deliveries = f.deliveries.filter(addrFilled);
+  const deliveries = f.deliveries.filter(stopFilled);
   // Én opgave = én tur. Kun hvis brugeren beder om det, laves én tur pr. afhentningsadresse.
   const separate = f.separate && stops.length > 1;
   const total = dates.length * (separate ? stops.length : 1);
   const lines = f.lines.filter(l => (l.text || "").trim());
-  // Ved afslutning: standard = mængde (vægt) ved containerafhentning, ellers ikke.
-  const qtyDefault = !goods && (f.tour_type === "normal" || f.tour_type === "loes_afhentning");
+  // Ved afslutning: standard = mængde ved containerafhentning (vægt) og på
+  // gods når en linje har et antal (fx 12 paller skal afstemmes).
+  const qtyDefault = goods ? lines.some(l => parseDk(l.qty) > 0) : (f.tour_type === "normal" || f.tour_type === "loes_afhentning");
   const captureQty = f.capture_qty === null ? qtyDefault : f.capture_qty;
   const unitsInUse = Array.from(new Set(lines.map(l => (goods ? (l.unit || "stk") : "kg"))));
 
@@ -246,6 +283,11 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
   };
   const setLine = (i, patch) => set("lines", f.lines.map((l, j) => (j === i ? { ...l, ...patch } : l)));
 
+  const firmaTrim = f.firma.trim();
+  const regMatch = customers.find(c => c.name.toLowerCase() === firmaTrim.toLowerCase());
+  const lookAlikes = firmaTrim && !regMatch ? similarCustomers(firmaTrim, customers) : [];
+  const agreedN = canPrice && f.agreed_price !== "" && !isNaN(parseDk(f.agreed_price)) ? parseDk(f.agreed_price) : null;
+
   const submit = async () => {
     if (!f.plads) { toast.error(`Vælg ${siteWord.toLowerCase()}`); return; }
     if (!lines.length) { toast.error(goods ? "Skriv hvad der skal køres" : "Skriv materiale/fraktion"); return; }
@@ -254,12 +296,33 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
     if (dates.length === 0) { toast.error("Gentagelsen giver ingen datoer"); return; }
     if (total > 200) { toast.error("Højst 200 ture ad gangen"); return; }
     const firma = f.firma.trim();
-    const lastDel = deliveries[deliveries.length - 1];
+    // 2026-10-18: Kunden kobles til kunderegistret, så en stavefejl ikke giver
+    // en "ny" kunde uden pris. Nye navne oprettes i registret (valgfrit).
+    let customerRef = regMatch ? regMatch.id : "";
+    if (firma && !regMatch && (!plads || plads.own_location) && f.create_customer) {
+      try {
+        const { data } = await axios.post(`${API}/logistics/customers`, { name: firma });
+        customerRef = data.id;
+      } catch (e) {
+        if (e?.response?.status !== 409) toast.message?.("Kunden blev ikke oprettet i registret - turen gemmes alligevel");
+      }
+    }
+    const lastDel = [...deliveries].reverse().find(addrFilled);
     const facility = lastDel ? formatAddress(lastDel) : f.plads;
     const stopList = (pickups) => [
       ...pickups.map(a => ({ kind: "pickup", ...a })),
-      ...deliveries.map(a => ({ kind: "delivery", ...a })),
+      // Aflevering uden adresse = lokationen (som før), men note/kontakt bevares.
+      ...deliveries.map(a => ({ kind: "delivery", ...a, ...(addrFilled(a) ? {} : { address: f.plads }) })),
     ];
+    // Aftalt pris ved flere ture: pr. tur (standard) eller samlet beløb delt ligeligt.
+    const nTours = dates.length * (separate ? stops.length : 1);
+    const perTour = agreedN == null ? null : (f.agreed_split && nTours > 1 ? Math.floor((agreedN / nTours) * 100) / 100 : agreedN);
+    const split = !!f.agreed_split && nTours > 1;
+    // Ved deling får den sidste tur resten, så summen passer præcist.
+    const prices = Array.from({ length: nTours }, (_, k) => (perTour == null ? null
+      : split && k === nTours - 1 ? Math.round((agreedN - perTour * (nTours - 1)) * 100) / 100 : perTour));
+    const seriesId = dates.length > 1 ? (window.crypto?.randomUUID?.() || `s-${Date.now()}`) : "";
+    let idx = 0;
     const cargo = (multiLines || tc >= 1) ? lines.map(l => ({
       text: l.text.trim(), trailer: tc >= 2 && l.trailer ? Number(l.trailer) : (tc === 1 ? 1 : null),
       ...(goods ? { unit: l.unit || "stk" } : { unit: "kg" }),
@@ -270,16 +333,16 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
     dates.forEach(date => groups.forEach((pickups, i) => body.push({
       date, plads: f.plads, tour_kind: kind, tour_type: f.tour_type,
       fraction: cargo.length ? "" : lines[0].text.trim(), cargo_lines: cargo, trailer_count: tc,
-      address: formatAddress(pickups[0]), address_parts: pickups[0],
-      facility, facility_parts: lastDel || {},
+      address: formatAddress(pickups[0]), address_parts: addrOnly(pickups[0]),
+      facility, facility_parts: lastDel ? addrOnly(lastDel) : {},
+      customer_ref_id: customerRef, series_id: seriesId,
       stops: stopList(pickups),
       container: goods ? "" : f.container.trim(), capacity_label: goods ? "" : f.capacity_label.trim(),
       open_from: f.open_from, open_to: f.open_to, priority: f.priority, remark: f.remark.trim(),
       is_private: !!firma, private_company: firma, sort_order: i,
       loose_estimated_count: f.tour_type === "loes_afhentning" ? (parseInt(f.loose_count, 10) || 0) : 0,
       capture: { quantity: captureQty, photo: !!f.capture_photo },
-      ...(canPrice && f.agreed_price !== "" && !isNaN(parseDk(f.agreed_price))
-        ? { agreed_price: parseDk(f.agreed_price), agreed_add_waiting: !!f.agreed_add_waiting } : {}),
+      ...(perTour != null ? { agreed_price: prices[idx++], agreed_add_waiting: !!f.agreed_add_waiting } : {}),
     })));
     setSaving(true);
     try {
@@ -304,10 +367,7 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
 
   const moreSummary = [
     f.open_from && f.open_to ? `${f.open_from}–${f.open_to}` : "",
-    f.priority === "urgent" ? "Haster" : f.priority === "low" ? "Lav prioritet" : "",
     tc ? `${tc} hænger${tc === 1 ? "" : "e"}` : "",
-    !goods && f.container ? `Container ${f.container}` : "",
-    !goods && f.capacity_label ? f.capacity_label : "",
     f.agreed_price ? `${f.agreed_price} kr` : "",
     f.repeat !== "none" ? `Gentages ${dates.length} dage` : "",
   ].filter(Boolean);
@@ -345,8 +405,20 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
             <label className={labelCls}>Kunde <span className="normal-case font-normal">(valgfri - bruges til priser i Økonomi)</span></label>
             <input className={inputCls} list="tf-customers" value={f.firma} onChange={(e) => set("firma", e.target.value)} placeholder={customers.length ? "Vælg eller skriv en kunde" : "Fx Carlsberg Byen A/S"} data-testid="tf-firma" />
             <datalist id="tf-customers">{customers.map(c => <option key={c.id} value={c.name} />)}</datalist>
-            {f.firma.trim() && customers.length > 0 && !customers.some(c => c.name.toLowerCase() === f.firma.trim().toLowerCase()) && (
-              <p className="text-[11px] text-slate-500 mt-1">Ny kunde - opret den under Økonomi › Kunder &amp; priser for at give den egne priser.</p>
+            {regMatch && <p className="text-[11px] text-emerald-700 mt-1">Kunde fra kunderegistret</p>}
+            {firmaTrim && !regMatch && (
+              <div className="mt-1.5 space-y-1.5" data-testid="tf-firma-new">
+                {lookAlikes.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-amber-800 dark:text-amber-200">
+                    <span>Mente du:</span>
+                    {lookAlikes.map(c => <button key={c.id} type="button" className="px-2 py-1 rounded-full bg-amber-100 dark:bg-amber-900/40 font-semibold" onClick={() => set("firma", c.name)} data-testid="tf-firma-suggest">{c.name}</button>)}
+                  </div>
+                )}
+                <label className="flex items-center gap-2 text-[11px] text-slate-600 dark:text-slate-300">
+                  <input type="checkbox" className="w-4 h-4 accent-emerald-600" checked={!!f.create_customer} onChange={(e) => set("create_customer", e.target.checked)} />
+                  Opret "{firmaTrim}" som ny kunde i kunderegistret (så den kan få egne priser)
+                </label>
+              </div>
             )}
           </div>
         )}
@@ -370,6 +442,10 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
             {types.map(t => (
               <button key={t.id} type="button" onClick={() => set("tour_type", t.id)} className={chip(f.tour_type === t.id)}>{t.label}</button>
             ))}
+            <span className="w-px bg-slate-200 dark:bg-slate-700 mx-1" aria-hidden />
+            <button type="button" onClick={() => set("priority", f.priority === "urgent" ? "normal" : "urgent")} data-testid="tf-haster"
+              className={`px-3 py-2 rounded-lg text-sm font-bold border ${f.priority === "urgent" ? "bg-rose-600 border-rose-600 text-white" : "border-rose-200 text-rose-700 dark:border-rose-900 dark:text-rose-300"}`}>
+              {f.priority === "urgent" ? "✓ Haster" : "Haster"}</button>
           </div>
         </div>
         <div>
@@ -413,6 +489,12 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
             <input type="number" min="1" inputMode="numeric" className={inputCls} value={f.loose_count} onChange={(e) => set("loose_count", e.target.value)} />
           </div>
         )}
+        {!goods && (
+          <div className="grid grid-cols-2 gap-3">
+            {f.tour_type !== "loes_afhentning" && <div><label className={labelCls}>Container nr.</label><input className={inputCls} value={f.container} onChange={(e) => set("container", e.target.value)} placeholder="Valgfri" data-testid="tf-container" /></div>}
+            <div><label className={labelCls}>Kapacitet</label><input className={inputCls} value={f.capacity_label} onChange={(e) => set("capacity_label", e.target.value)} placeholder="Fx 20 m³" /></div>
+          </div>
+        )}
         <div className="rounded-xl bg-slate-50 dark:bg-slate-900 p-3 space-y-3" data-testid="tf-capture">
           <div className="text-[11px] font-bold uppercase tracking-wide text-slate-500">Ved afslutning</div>
           {[
@@ -449,9 +531,10 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
                     <button type="button" className="p-1 text-slate-400 hover:text-rose-500" aria-label="Fjern" onClick={() => set(key, f[key].filter((_, j) => j !== i))}><X className="w-4 h-4" /></button>
                   </div>
                 )}
-                <AddressField value={st} onChange={(v) => set(key, f[key].map((x, j) => (j === i ? v : x)))}
+                <AddressField value={st} onChange={(v) => set(key, f[key].map((x, j) => (j === i ? { ...x, ...v } : x)))}
                   placeholder={key === "deliveries" && f.plads ? `Tom = ${f.plads}` : "Vej og nr."}
                   testid={key === "stops" ? `tf-stop-${i}` : `tf-delivery-${i}`} inputCls={inputCls} />
+                <StopExtras value={st} onChange={(v) => set(key, f[key].map((x, j) => (j === i ? v : x)))} />
               </div>
             ))}
             <button type="button" className="text-sm font-semibold text-emerald-700 dark:text-emerald-400 inline-flex items-center gap-1"
@@ -482,7 +565,7 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
       <section className={`${card} overflow-hidden`}>
         <button type="button" onClick={() => setMore(v => !v)} className="w-full flex items-center gap-3 px-4 py-3 text-left" data-testid="tf-more">
           <span className="font-semibold text-slate-800 dark:text-slate-100">Flere detaljer</span>
-          <span className="flex-1 text-xs text-slate-500 truncate">{moreSummary.join(" · ") || "Tidsrum, prioritet, hængere, pris, gentagelse"}</span>
+          <span className="flex-1 text-xs text-slate-500 truncate">{moreSummary.join(" · ") || "Tidsrum, hængere, pris, gentagelse"}</span>
           <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${more ? "rotate-180" : ""}`} />
         </button>
         {more && (
@@ -490,17 +573,6 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
             <div className="grid grid-cols-2 gap-3">
               <div><label className={labelCls}>Tidligst</label><input type="time" className={inputCls} value={f.open_from} onChange={(e) => set("open_from", e.target.value)} /></div>
               <div><label className={labelCls}>Senest</label><input type="time" className={inputCls} value={f.open_to} onChange={(e) => set("open_to", e.target.value)} /></div>
-            </div>
-            <div>
-              <label className={labelCls}>Prioritet</label>
-              <div className="grid grid-cols-3 gap-1.5 max-w-sm">
-                {[["low", "Lav"], ["normal", "Normal"], ["urgent", "Haster"]].map(([id, l]) => (
-                  <button key={id} type="button" onClick={() => set("priority", id)}
-                    className={`py-2 rounded-lg text-sm font-semibold border ${f.priority === id
-                      ? (id === "urgent" ? "bg-rose-600 border-rose-600 text-white" : "bg-slate-800 border-slate-800 text-white dark:bg-slate-200 dark:text-slate-900")
-                      : "border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300"}`}>{l}</button>
-                ))}
-              </div>
             </div>
             {isPremium && (
               <div>
@@ -515,12 +587,7 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
                 <p className="text-[11px] text-slate-500 mt-1">{tc >= 2 ? "Skriv hvad der skal på hver hænger ovenfor. Prisen kan sættes samlet (aftalt pris) eller via prisregler for antal hængere." : "Planlagt antal hængere på turen."}</p>
               </div>
             )}
-            {!goods && (
-              <div className="grid grid-cols-2 gap-3">
-                {f.tour_type !== "loes_afhentning" && <div><label className={labelCls}>Container nr.</label><input className={inputCls} value={f.container} onChange={(e) => set("container", e.target.value)} placeholder="Valgfri" /></div>}
-                <div><label className={labelCls}>Kapacitet</label><input className={inputCls} value={f.capacity_label} onChange={(e) => set("capacity_label", e.target.value)} placeholder="Fx 20 m³" /></div>
-              </div>
-            )}
+
             {canPrice && (
               <div className="space-y-2">
                 <label className={labelCls}>Aftalt pris pr. tur (kr, ekskl. moms)</label>
@@ -528,8 +595,21 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
                 {f.agreed_price !== "" && (isNaN(parseDk(f.agreed_price))
                   ? <p className="text-[11px] text-red-600">Ugyldigt beløb - skriv fx 1.100 eller 1100,50</p>
                   : <p className="text-[11px] text-emerald-700">= {parseDk(f.agreed_price).toLocaleString("da-DK", { minimumFractionDigits: 2 })} kr</p>)}
+                {agreedN != null && total > 1 && (
+                  <div className="rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 px-3 py-2 space-y-1.5" data-testid="tf-price-total">
+                    <div className="text-sm font-semibold text-amber-900 dark:text-amber-100">
+                      {f.agreed_split
+                        ? `${agreedN.toLocaleString("da-DK")} kr i alt · deles på ${total} ture = ca. ${(agreedN / total).toLocaleString("da-DK", { maximumFractionDigits: 2 })} kr pr. tur`
+                        : `${agreedN.toLocaleString("da-DK")} kr pr. tur · ${total} ture = ${(agreedN * total).toLocaleString("da-DK")} kr i alt`}
+                    </div>
+                    <label className="flex items-center gap-2 text-xs text-amber-900 dark:text-amber-100">
+                      <input type="checkbox" className="w-4 h-4 accent-amber-600" checked={!!f.agreed_split} onChange={(e) => set("agreed_split", e.target.checked)} data-testid="tf-price-split" />
+                      Beløbet er samlet for alle {total} ture (deles ligeligt)
+                    </label>
+                  </div>
+                )}
                 <p className="text-[11px] text-slate-500">
-                  Erstatter prisreglerne for {total > 1 ? "hver af de oprettede ture" : "hele turen"}{tc >= 2 ? ` (samlet for alle ${tc} hængere)` : ""}{!separate && stops.length + deliveries.length > 2 ? " inkl. alle stop" : ""}.
+                  Erstatter prisreglerne for {total > 1 ? (f.agreed_split ? "de oprettede ture (delt)" : "hver af de oprettede ture") : "hele turen"}{tc >= 2 ? ` (samlet for alle ${tc} hængere)` : ""}{!separate && stops.length + deliveries.length > 2 ? " inkl. alle stop" : ""}.
                   Tillæg som weekend og haster er indregnet. Senere ændringer af prisreglerne påvirker den ikke.
                 </p>
                 {f.agreed_price !== "" && (
@@ -660,11 +740,20 @@ function Registration({ tour }) {
   );
 }
 
-function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnreadChanged, ownName, siteWord, askConfirm, can = () => true, isPremium = false }) {
+function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnreadChanged, ownName, siteWord, askConfirm, can = () => true, isPremium = false, priceStatus = null }) {
   const [audit, setAudit] = useState(null);
   const [edit, setEdit] = useState(null);
   const [saving, setSaving] = useState(false);
   const [copyDate, setCopyDate] = useState("");
+  // 2026-10-18 (D-serie): ture oprettet med "Gentag" deler series_id.
+  const [seriesLeft, setSeriesLeft] = useState(0);
+  const [applySeries, setApplySeries] = useState(false);
+  useEffect(() => {
+    setSeriesLeft(0); setApplySeries(false);
+    if (!tour?.series_id) return;
+    axios.get(`${API}/tours/series/${tour.series_id}`, { params: { from_date: addDays(tour.date, 1) } })
+      .then(r => setSeriesLeft(r.data?.count || 0)).catch(() => {});
+  }, [tour?.id, tour?.series_id, tour?.date]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!tour) return;
     setEdit(null);
@@ -700,7 +789,11 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
         body.fraction = body.cargo_lines.map(l => l.text.trim()).join(" + ");
       }
       await axios.put(`${API}/tours/${tour.id}`, body);
-      toast.success("Turen er gemt");
+      if (applySeries && tour.series_id && seriesLeft > 0) {
+        const { date: _d, ...fields } = body;
+        const { data } = await axios.put(`${API}/tours/series/${tour.series_id}`, { from_date: addDays(tour.date, 1), fields });
+        toast.success(`Turen og ${data.updated} kommende ture i serien er gemt${data.failed?.length ? ` · ${data.failed.length} kunne ikke rettes` : ""}`);
+      } else toast.success("Turen er gemt");
       setEdit(null);
       onChanged();
     } catch (e) { toast.error(formatApiError(e)); }
@@ -713,6 +806,20 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
       onChanged();
     } catch (e) { toast.error(formatApiError(e)); }
   };
+  const approveStop = async (st) => {
+    try { await axios.post(`${API}/tours/${tour.id}/stops/${st.id}/approve`); toast.success("Stoppet er godkendt og tæller med i prisen"); onChanged(); }
+    catch (e) { toast.error(formatApiError(e)); }
+  };
+  const deleteRestOfSeries = () => askConfirm({
+    title: "Slet resten af serien?", text: `${seriesLeft} kommende ture efter ${fmtDayLong(tour.date)} slettes (ture der er startet eller afsluttet røres ikke).`,
+    danger: true, okLabel: "Slet resten",
+    onOk: async () => {
+      try {
+        const { data } = await axios.delete(`${API}/tours/series/${tour.series_id}`, { params: { from_date: addDays(tour.date, 1) } });
+        toast.success(`${data.deleted} ture slettet`); setSeriesLeft(0); onChanged();
+      } catch (e) { toast.error(formatApiError(e)); }
+    },
+  });
   const reactivate = async () => {
     try {
       await axios.post(`${API}/tours/${tour.id}/reactivate`, { comment: "Genaktiveret fra Ture" });
@@ -750,6 +857,12 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
           {fact("Vægt", tour.weight ? `${tour.weight} kg` : "")}
         </div>
         <Registration tour={tour} />
+        {(priceStatus?.status === "missing" || deviationsOf(tour).length > 0) && (
+          <div className="mt-3 flex flex-col gap-1.5" data-testid="panel-attention">
+            {priceStatus?.status === "missing" && <div className="text-xs rounded-lg bg-red-50 dark:bg-red-950/30 text-red-800 dark:text-red-200 px-3 py-2"><b>{priceStatus.label}:</b> {priceStatus.why || "ingen prisregel passer"} - opret prisen under Økonomi › Rapport.</div>}
+            {deviationsOf(tour).length > 0 && <div className="text-xs rounded-lg bg-amber-50 dark:bg-amber-950/30 text-amber-900 dark:text-amber-100 px-3 py-2"><b>Afvigelse:</b> {deviationsOf(tour).join(" · ")}</div>}
+          </div>
+        )}
         {stopsOf(tour).length > 0 && (
           <div className="mt-4" data-testid="panel-stops">
             <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-1.5">Stop ({stopsDone(tour)}/{stopsOf(tour).length} udført)</div>
@@ -760,8 +873,14 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
                   <span className="min-w-0 flex-1">
                     <span className="text-[11px] font-semibold text-slate-500 mr-1">{st.kind === "delivery" ? "Aflevering" : "Afhentning"}</span>
                     <span className="text-slate-800 dark:text-slate-100 break-words">{st.address}</span>
-                    {st.done_at && <span className="block text-[11px] text-emerald-700">Udført kl. {st.done_at}{st.done_by ? ` · ${st.done_by}` : ""}</span>}
+                    {(st.note || st.contact_name || st.contact_phone) && <span className="block text-[11px] text-slate-500">{[st.note, [st.contact_name, st.contact_phone].filter(Boolean).join(" ")].filter(Boolean).join(" · ")}</span>}
+                    {st.done_at && <span className="block text-[11px] text-emerald-700">Udført kl. {fmtClock(st.done_at)}{st.done_by ? ` · ${st.done_by}` : ""}{st.receiver_name ? ` · modtaget af ${st.receiver_name}` : ""}</span>}
+                    {st.issue?.code && <span className="block text-[11px] font-semibold text-rose-700">Kunne ikke gennemføres: {st.issue.code}{st.issue.text ? ` - ${st.issue.text}` : ""}</span>}
+                    {st.added_by_driver && <span className="block text-[11px] font-semibold text-amber-700">Tilføjet af chaufføren{st.approved ? " · godkendt" : ""}</span>}
                   </span>
+                  {st.added_by_driver && !st.approved && can("tours_edit") && (
+                    <button type="button" className="shrink-0 px-2 py-1 rounded-lg bg-amber-500 text-white text-[11px] font-bold" onClick={() => approveStop(st)} data-testid={`approve-stop-${i}`}>Godkend</button>
+                  )}
                 </li>
               ))}
             </ol>
@@ -819,7 +938,7 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
                     <div key={i} className="flex gap-2">
                       <input className={inputCls} value={l.text} onChange={(e) => setEdit({ ...edit, lines: edit.lines.map((x, j) => (j === i ? { ...x, text: e.target.value } : x)) })} />
                       {edit.trailer_count >= 2 && (
-                        <select className={`${inputCls} w-28`} value={l.trailer || ""} onChange={(e) => setEdit({ ...edit, lines: edit.lines.map((x, j) => (j === i ? { ...x, trailer: e.target.value ? Number(e.target.value) : null } : x)) })}>
+                        <select className={`${inputCls.replace("w-full ", "")} w-28`} value={l.trailer || ""} onChange={(e) => setEdit({ ...edit, lines: edit.lines.map((x, j) => (j === i ? { ...x, trailer: e.target.value ? Number(e.target.value) : null } : x)) })}>
                           <option value="">Hænger…</option>
                           {Array.from({ length: edit.trailer_count }, (_, k) => <option key={k} value={k + 1}>Hænger {k + 1}</option>)}
                         </select>
@@ -855,6 +974,7 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
                         {edit.stops.length > 1 && <button type="button" className="p-1 text-slate-400" onClick={() => setEdit({ ...edit, stops: edit.stops.filter((_, j) => j !== i) })}><X className="w-4 h-4" /></button>}
                       </div>
                       <AddressField value={st.street || st.city ? st : parseAddress(st.address)} onChange={(v) => setEdit({ ...edit, stops: edit.stops.map((x, j) => (j === i ? { ...x, ...v, address: formatAddress(v) } : x)) })} inputCls={inputCls} />
+                      <StopExtras value={st} onChange={(v) => setEdit({ ...edit, stops: edit.stops.map((x, j) => (j === i ? v : x)) })} />
                     </div>
                   ))}
                   <div className="flex gap-3">
@@ -887,6 +1007,12 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
                 <label className="flex items-center gap-2"><input type="checkbox" className="w-4 h-4 accent-emerald-600" checked={!!edit.capture?.photo} onChange={(e) => setEdit({ ...edit, capture: { ...edit.capture, photo: e.target.checked } })} /> Chaufføren tager billede</label>
               </div>
             </div>
+            {tour.series_id && seriesLeft > 0 && (
+              <label className="flex items-center gap-2 text-sm bg-slate-50 dark:bg-slate-900 rounded-lg px-3 py-2" data-testid="panel-series-apply">
+                <input type="checkbox" className="w-4 h-4 accent-emerald-600" checked={applySeries} onChange={(e) => setApplySeries(e.target.checked)} />
+                Gem også for de {seriesLeft} kommende ture i serien (ikke datoen)
+              </label>
+            )}
             <div className="flex gap-2 justify-end">
               <button className={btnGhost} onClick={() => setEdit(null)}>Annuller</button>
               <button className={btnPrimary} disabled={saving} onClick={saveEdit} data-testid="panel-save">{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />} Gem</button>
@@ -906,6 +1032,7 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
               tour_type: tour.tour_type || "normal", priority: isHaster(tour) ? "urgent" : (tour.priority || "normal"), remark: tour.remark || "",
             })}><Edit2 className="w-4 h-4" /> Ret</button>}
             {tour.not_completed && can("tours_edit") && <button className={btnGhost} onClick={reactivate}><RotateCcw className="w-4 h-4" /> Genaktivér</button>}
+            {tour.series_id && seriesLeft > 0 && can("tours_delete") && <button className={btnGhost} onClick={deleteRestOfSeries} data-testid="panel-series-delete"><Trash2 className="w-4 h-4" /> Slet resten af serien ({seriesLeft})</button>}
             {can("tours_edit") && <div className="inline-flex items-stretch rounded-lg border border-slate-200 dark:border-slate-600 overflow-hidden">
               <input type="date" value={copyDate} onChange={(e) => setCopyDate(e.target.value)} className="px-2 text-base sm:text-sm bg-white dark:bg-slate-900 border-0 focus:outline-none" aria-label="Kopiér til dato" />
               <button className="px-3 text-sm font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 inline-flex items-center gap-1.5 border-l border-slate-200 dark:border-slate-600"
@@ -935,7 +1062,8 @@ const copyBody = (t, date) => ({
   customer_code: t.customer_code || "", loose_estimated_count: t.loose_estimated_count || 0,
   tour_kind: t.tour_kind || "container", address_parts: t.address_parts || {}, facility_parts: t.facility_parts || {},
   trailer_count: t.trailer_count || 0, cargo_lines: t.cargo_lines || [],
-  stops: (t.stops || []).map(({ done_at, done_by, ...rest }) => rest),
+  stops: (t.stops || []).map(({ id, done_at, done_by, receiver_name, issue, added_by_driver, approved, ...rest }) => rest),
+  capture: t.capture || {}, customer_ref_id: t.customer_ref_id || "",
 });
 
 // ─────────────────────────── Arbejdsfladen ───────────────────────────
@@ -957,6 +1085,9 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
   const [fDriver, setFDriver] = useState("");
   const [fSource, setFSource] = useState("");
   const [onlyHaster, setOnlyHaster] = useState(false);
+  // 2026-10-18 (E1/E3): prisstatus pr. tur (uden beløb) og afvigelser.
+  const [priceStatus, setPriceStatus] = useState({});
+  const [attnFilter, setAttnFilter] = useState(""); // "" | "price" | "deviation"
   const [showOverdue, setShowOverdue] = useState(false);
   const [selected, setSelected] = useState(new Set());
   const [collapsed, setCollapsed] = useState({});
@@ -1039,6 +1170,14 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
 
   const refresh = useCallback(() => { fetchTours(); fetchOverdue(); fetchUnread(); }, [fetchTours, fetchOverdue, fetchUnread]);
 
+  // Prisstatus kræver økonomi-adgang - koordinatorer uden den ser ingen chip.
+  const priceIdsKey = (tours || []).map(t => `${t.id}:${t.completed ? 1 : 0}:${t.not_completed ? 1 : 0}`).join(",");
+  useEffect(() => {
+    if (!can("economy_view") || !tours || !tours.length) { setPriceStatus({}); return; }
+    const ids = tours.map(t => t.id).slice(0, 500).join(",");
+    axios.get(`${API}/pricing/status`, { params: { ids } }).then(r => setPriceStatus(r.data || {})).catch(() => setPriceStatus({}));
+  }, [priceIdsKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const source = useMemo(() => (showOverdue ? overdue : (tours || [])), [showOverdue, overdue, tours]);
   const ownName = "Egne ture";
 
@@ -1067,13 +1206,15 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
       if (fDriver === "__none" && assigneeName(t)) return false;
       if (fDriver && fDriver !== "__none" && t.driver_id !== fDriver && t.claimed_by_id !== fDriver) return false;
       if (fSource && (t.source || "manual") !== fSource) return false;
+      if (attnFilter === "price" && priceStatus[t.id]?.status !== "missing") return false;
+      if (attnFilter === "deviation" && !deviationsOf(t).length) return false;
       if (needle) {
         const hay = [t.fraction, t.address, t.facility, t.plads, t.tour_number, t.container, t.private_company, t.customer_name, assigneeName(t), t.remark].join(" ").toLowerCase();
         if (!hay.includes(needle)) return false;
       }
       return true;
     });
-  }, [source, status, onlyHaster, fPlads, fCustomer, fDriver, fSource, q, ownName]);
+  }, [source, status, onlyHaster, fPlads, fCustomer, fDriver, fSource, q, ownName, attnFilter, priceStatus]);
 
   const groups = useMemo(() => {
     const rank = (t) => (t.not_completed ? 0 : t.completed ? 4 : t.on_way ? 2 : assigneeName(t) ? 3 : 1);
@@ -1093,8 +1234,10 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
   const unreadTotal = Object.values(unread).reduce((s, n) => s + n, 0);
   const hasterOpen = (tours || []).filter(t => isHaster(t) && !t.completed && !assigneeName(t) && !t.not_completed);
   const blocked = (tours || []).filter(t => t.not_completed);
+  const missingPrice = (tours || []).filter(t => priceStatus[t.id]?.status === "missing");
+  const withDeviation = (tours || []).filter(t => deviationsOf(t).length > 0);
   const openTour = source.find(t => t.id === openId) || (tours || []).find(t => t.id === openId) || overdue.find(t => t.id === openId) || null;
-  const activeFilters = !!(q || fPlads || fCustomer || fDriver || fSource || onlyHaster || status !== "all");
+  const activeFilters = !!(q || fPlads || fCustomer || fDriver || fSource || onlyHaster || attnFilter || status !== "all");
 
   const assign = async (ids, driverId) => {
     try {
@@ -1177,7 +1320,7 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
     ev.target.value = "";
   };
 
-  const resetFilters = () => { setQ(""); setFPlads(""); setFCustomer(""); setFDriver(""); setFSource(""); setOnlyHaster(false); setStatus("all"); };
+  const resetFilters = () => { setQ(""); setFPlads(""); setFCustomer(""); setFDriver(""); setFSource(""); setOnlyHaster(false); setAttnFilter(""); setStatus("all"); };
 
   // ───────── render ─────────
   return (
@@ -1239,7 +1382,7 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
       ) : (
         <>
           {/* Opmærksomhed */}
-          {(hasterOpen.length > 0 || overdue.length > 0 || blocked.length > 0 || unreadTotal > 0) && (
+          {(hasterOpen.length > 0 || overdue.length > 0 || blocked.length > 0 || unreadTotal > 0 || missingPrice.length > 0 || withDeviation.length > 0) && (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2" data-testid="tours-attention">
               {hasterOpen.length > 0 && (
                 <button onClick={() => { setShowOverdue(false); setStatus("open"); setOnlyHaster(true); }} className="text-left rounded-xl border border-rose-200 dark:border-rose-900 bg-rose-50 dark:bg-rose-950/30 px-3 py-2.5 flex items-center gap-2.5">
@@ -1254,6 +1397,18 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
               {blocked.length > 0 && (
                 <button onClick={() => { setShowOverdue(false); setStatus("blocked"); }} className="text-left rounded-xl border border-rose-200 dark:border-rose-900 bg-white dark:bg-slate-800 px-3 py-2.5 flex items-center gap-2.5">
                   <X className="w-4 h-4 text-rose-600 shrink-0" /><span className="text-sm text-slate-800 dark:text-slate-200"><b>{blocked.length}</b> kan ikke gennemføres</span>
+                </button>
+              )}
+              {missingPrice.length > 0 && (
+                <button onClick={() => { setShowOverdue(false); setStatus("all"); setAttnFilter(attnFilter === "price" ? "" : "price"); }} data-testid="tours-missing-price"
+                  className={`text-left rounded-xl border px-3 py-2.5 flex items-center gap-2.5 ${attnFilter === "price" ? "border-red-500 bg-red-100 dark:bg-red-950/50" : "border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/30"}`}>
+                  <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" /><span className="text-sm text-red-800 dark:text-red-200"><b>{missingPrice.length}</b> tur{missingPrice.length === 1 ? "" : "e"} mangler pris</span>
+                </button>
+              )}
+              {withDeviation.length > 0 && (
+                <button onClick={() => { setShowOverdue(false); setStatus("all"); setAttnFilter(attnFilter === "deviation" ? "" : "deviation"); }} data-testid="tours-deviations"
+                  className={`text-left rounded-xl border px-3 py-2.5 flex items-center gap-2.5 ${attnFilter === "deviation" ? "border-amber-500 bg-amber-100 dark:bg-amber-950/50" : "border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/30"}`}>
+                  <Flag className="w-4 h-4 text-amber-600 shrink-0" /><span className="text-sm text-amber-900 dark:text-amber-200"><b>{withDeviation.length}</b> med afvigelse at se på</span>
                 </button>
               )}
               {unreadTotal > 0 && (
@@ -1389,6 +1544,10 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
                                   {t.container && t.tour_type !== "loes_afhentning" && <span className="text-[11px] text-slate-400">#{t.container}</span>}
                                   {showOverdue && <span className="text-[11px] font-semibold text-amber-700">{fmtDayLong(t.date)}</span>}
                                   {!showOverdue && late > 0 && <span className="text-[11px] font-semibold text-amber-700">{late} d. forsinket</span>}
+                                  {priceStatus[t.id]?.status === "missing" && <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300" title={priceStatus[t.id].why || ""} data-testid={`row-price-${t.id}`}>{priceStatus[t.id].label}</span>}
+                                  {priceStatus[t.id]?.status === "invoiced" && <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 dark:bg-slate-700 dark:text-slate-300">Faktureret</span>}
+                                  {priceStatus[t.id]?.pending > 0 && <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">Rettelse venter</span>}
+                                  {deviationsOf(t).length > 0 && <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200" title={deviationsOf(t).join(" · ")} data-testid={`row-deviation-${t.id}`}>Afvigelse</span>}
                                 </div>
                                 <div className="text-sm text-slate-600 dark:text-slate-300 truncate">{t.address || "Ingen adresse"}{t.facility && t.facility !== t.plads ? <span className="text-slate-400"> → {t.facility}</span> : null}</div>
                                 {stopsOf(t).length > 0 && <div className="text-[11px] font-semibold text-slate-500">{stopsOf(t).length} stop · {stopsDone(t)} udført</div>}
@@ -1438,7 +1597,8 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
         siteWord={siteWord}
         onCreated={(d) => { setShowOverdue(false); if (d && d !== date) setDate(d); else refresh(); }} />
       <TourPanel tour={openTour} onClose={() => setOpenId(null)} drivers={drivers} load={load} onAssign={assign}
-        onChanged={refresh} onUnreadChanged={fetchUnread} ownName={ownName} siteWord={siteWord} askConfirm={setConfirm} can={can} isPremium={!!profile?.is_premium} />
+        onChanged={refresh} onUnreadChanged={fetchUnread} ownName={ownName} siteWord={siteWord} askConfirm={setConfirm} can={can} isPremium={!!profile?.is_premium}
+        priceStatus={openTour ? priceStatus[openTour.id] : null} />
       <Confirm state={confirm} onClose={() => setConfirm(null)} />
     </div>
   );

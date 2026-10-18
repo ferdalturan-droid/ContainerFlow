@@ -143,6 +143,24 @@ Ud for hver kunde står, om den følger de generelle priser eller har en egen pr
 - Slet en aftale: "Stop fra nu" (bevarer historikken) eller "Slet helt" (`DELETE /api/pricing/bundles/{id}?effective=`).
 - Hængertillæg afregnes ud fra det antal hængere chaufføren faktisk kørte med (`trailer_count_actual`), hvis det er indberettet; ellers det planlagte.
 
+## 3f. Fra "friske øjne"-gennemgangen (2026-10-18)
+- **"Opret pris" fra Rapport gælder nu også turen, man kom fra.** Valget "Nye + ture uden pris" (`effective="unpriced"`) gemmer aftalen fra nu, men markerer reglerne `backfill_unpriced`. En ældre tur bruger dem kun, hvis den ellers ingen pris har; ture med pris ændres aldrig. Efter gem bliver man i Rapport.
+- **Hvilke ture gælder aftalen for?** "Ture kørt fra en dato" (anbefalet ved prisstigning): den gamle aftale får `valid_to` = dagen før, og en ny aftale med de nye beløb gælder fra datoen, også for ture der allerede er oprettet (fx en serie). "Kun ture oprettet fra nu" og "Alle, også eksisterende" er uændrede.
+- **Én sandhed for hængere** (`_trailer_info`): godkendt/admin-rettet antal → chaufførens oplyste antal → planlagt antal → ja/nej. Rettelser og godkendelser sender **antal**. En godkendt "uden hænger" slår nu igennem (før blev den overset, når chaufføren havde oplyst et antal).
+- **Automatisk hænger (B2B):** forslaget fra chaufførens profil ved start bevares, men gemmes som `trailer_source="auto"`, `trailer_confirmed=false`. Ved afslutning spørges "Kørte du med hænger?" med svaret forudfyldt. Rapport viser "automatisk, ikke bekræftet" og har et filter, så planlæggeren kan tjekke før fakturering. Prisen regnes stadig med hænger.
+- **Materiale som liste:** en grundpris med materialer gælder kun, når **alle** turens materialer er med (en betonpris gælder kun rene betonture). Et tillæg gælder, når **ét** passer. Før matchede "Beton + Træ" ingen materialeregel og faldt stille igennem til en generel pris.
+- **Forklaring på "Mangler pris"** (`explain_missing`): den nærmeste regel og de betingelser, der ikke passede, fx "materiale (turen har Beton + Træ, reglen gælder Beton)" eller "forgæves kørsel". Vises i Rapport, i prisopbygningen og på Ture-siden.
+- **Pris pr. enhed** (`per_unit`): beløb × antal i enheden (paller, kolli, m³, ton …), registreret antal hvis chaufføren har oplyst det, ellers planlagt, med valgfrit minimumsbeløb. "Mangler antal", hvis turen ikke har linjer i enheden.
+- **Stoptillæg** (`stop`): pr. stop ud over de inkluderede (standard 2). Stop der ikke kunne gennemføres, tæller med. Stop som chaufføren selv har tilføjet, tæller først, når planlæggeren har godkendt dem.
+- **Forgæves kørsel:** en aftale kan have en pris for forgæves kørsel (en grundpris med udfald "forgæves"). Forgæves ture får tid fra "På vej" til de blev markeret (før "Mangler tid" ved timepris). Chaufføren vælger en årsagskode (`not_completed_code`).
+- **Containere:** på containerture med flere indholdslinjer tæller hver linje som en container (eller linjens antal i stk/containere). Før var det altid 1.
+- **Aftalt pris:** tillæg, der er indregnet, vises som "… - indregnet i aftalt pris (0 kr)". Ved flere ture viser Ny tur "2.400 kr pr. tur · 3 ture = 7.200 kr i alt". Standard er pr. tur; "samlet, deles ligeligt" er et aktivt valg.
+- **Haster:** én kilde (`priority`). "haster" i planlæggerens note sætter prioriteten ved oprettelse (ikke "ikke haster"). B2B-kundens valgte prioritet overstyres ikke af kommentaren.
+- **Faktureret = frosset registrering:** vægt, mængder, status, tider, hængere, billeder og stop kan ikke ændres på en faktureret tur (409). Fjern markeringen først.
+- **Godkendelser:** advarsel når ventetid godkendes uden ventetidstillæg (= 0 kr). Flere rettelser pr. tur er tilladt, når de handler om forskellige ting. Kort ventetid kan godkendes automatisk (Økonomi › Indstillinger, `auto_approve_waiting_min`).
+- **Prisstatus på Ture-siden** (`GET /api/pricing/status?ids=`): Mangler pris / Faktureret / Rettelse venter, uden beløb og kun med økonomi-adgang. Timeprisede ture, der ikke er kørt endnu, er ikke "Mangler tid".
+- **Kunde fra kunderegistret:** Ny tur gemmer `customer_ref_id`. Prisnøglen tages fra registrets navn, også hvis turens tekst er stavet anderledes. Ligner et nyt navn en eksisterende kunde, foreslås den ("Mente du …?"). Nye navne oprettes i registret, hvis man vil.
+
 ## 4. Sider (logistik admin → "Økonomi")
 
 Rapport · Kunder & priser · Prisregler · Godkendelser · Helligdage · Indstillinger

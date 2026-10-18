@@ -192,3 +192,57 @@ def test_agreed_price_keeps_waiting_only_when_chosen():
     nobase = P.price_tour(a, [surcharge("w", "waiting", "per_hour", 600)], None,
                           {"mode": "fixed", "amount": 800, "add_waiting": True})
     assert nobase["status"] == "ok" and nobase["total"] == 1100
+
+
+def test_materials_list_base_needs_all_surcharge_needs_one():
+    """2026-10-18: 'Beton + Træ' matchede før ingen regel og faldt stille
+    igennem til en generel (lavere) pris."""
+    rules = [base_rule("beton", amount=900, conditions={"materials": ["Beton"]}),
+             base_rule("beton_trae", amount=1200, conditions={"materials": ["Beton", "Træ"]}),
+             base_rule("gen", amount=500),
+             surcharge("tung", "other", "kr", 100, conditions={"materials": ["beton"]})]
+    only = P.price_tour(attrs(material="Beton", materials=["Beton"]), rules, None)
+    assert only["total"] == 900 + 100
+    both = P.price_tour(attrs(material="Beton + Træ", materials=["Beton", "Træ"]), rules, None)
+    assert both["base_rule"]["id"] == "beton_trae" and both["total"] == 1200 + 100
+    other = P.price_tour(attrs(material="Træ + Jern", materials=["Træ", "Jern"]), rules, None)
+    assert other["base_rule"]["id"] == "gen" and other["total"] == 500
+    # Gamle attrs uden liste virker som før
+    assert P.price_tour(attrs(material="Beton"), rules, None)["total"] == 1000
+
+
+def test_explain_missing_names_the_failing_condition():
+    rules = [base_rule("Carlsberg", amount=900, conditions={"customer_ids": ["c1"], "materials": ["Beton"]})]
+    a = attrs(material="Beton + Træ", materials=["Beton", "Træ"])
+    assert P.price_tour(a, rules, None)["status"] == "missing_rule"
+    why = P.explain_missing(rules, a)
+    assert why["failing"] == ["materials"] and "Beton + Træ" in why["text"]
+    assert P.explain_missing([], a)["rule"] is None
+    nc = P.explain_missing([base_rule("x", amount=1)], attrs(outcome="not_completed"))
+    assert "forgæves" in nc["text"]
+
+
+def test_per_unit_with_minimum_and_missing_qty():
+    rules = [base_rule("palle", model="per_unit", unit="paller", amount=150, min_amount=1000)]
+    r = P.price_tour(attrs(units={"paller": 12}, units_source={"paller": "planlagt"}), rules, None)
+    assert r["total"] == 1800 and "12 paller" in r["lines"][0]["label"]
+    small = P.price_tour(attrs(units={"Paller": 4}), rules, None)
+    assert small["total"] == 1000  # 600 kr løftet til minimum
+    none = P.price_tour(attrs(units={"kg": 500}), rules, None)
+    assert none["status"] == "missing_qty" and none["total"] is None
+
+
+def test_stop_surcharge_counts_stops_over_included():
+    rules = [base_rule("b", amount=1000),
+             {**surcharge("st", "stop", "kr", 150), "surcharge": {"unit": "kr", "value": 150, "included": 2}}]
+    assert P.price_tour(attrs(stops=2), rules, None)["total"] == 1000
+    r = P.price_tour(attrs(stops=5), rules, None)
+    assert r["total"] == 1000 + 3 * 150 and "3 ekstra stop" in r["lines"][-1]["label"]
+
+
+def test_agreed_price_shows_included_surcharges_at_zero():
+    rules = [base_rule("b", amount=900), surcharge("we", "weekend", "percent", 25)]
+    r = P.price_tour(attrs(day_type="saturday"), rules, None, {"mode": "fixed", "amount": 2000})
+    assert r["total"] == 2000
+    inc = [l for l in r["lines"] if l["type"] == "included"]
+    assert inc and inc[0]["amount"] == 0 and "indregnet" in inc[0]["label"]

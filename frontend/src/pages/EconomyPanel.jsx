@@ -34,6 +34,8 @@ const chipBase = "px-3 py-1.5 rounded-lg text-xs font-semibold border transition
 const chipOn = "bg-emerald-600 border-emerald-600 text-white";
 const chipOff = "bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700";
 const input = "w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/40";
+// Uden w-full - til felter med fast bredde (w-full vinder ellers over w-24 osv.).
+const inputFit = input.replace("w-full ", "");
 const label = "block text-[11px] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1";
 const btnPrimary = "inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold disabled:opacity-50";
 const btnGhost = "inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 text-sm font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700";
@@ -42,7 +44,10 @@ const STATUS_META = {
   ok: null,
   missing_rule: { text: "Mangler pris", cls: "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300" },
   missing_time: { text: "Mangler tid", cls: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300" },
+  missing_qty: { text: "Mangler antal", cls: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300" },
 };
+// Lokal dato (YYYY-MM-DD). toISOString() er UTC og giver "i går" mellem kl. 00 og 02.
+const localDate = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 
 /* 2026-10-17: Hjælpetekster (vises ved ⓘ). Brugerens egen forklaring på en
    regel gemmes i `note` og vises sammen med standardteksten. */
@@ -52,7 +57,8 @@ const HELP = {
   model: {
     fixed: "Fast pris: samme beløb pr. tur, uanset hvor lang tid den tager.",
     hourly: "Timepris: tiden fra chaufføren trykker \"På vej\" til turen afsluttes × timeprisen. Startgebyr, minimum og afrunding kan tilføjes, og pauser kan trækkes fra. Kører chaufføren flere ture samtidig, deles tiden mellem dem.",
-    per_container: "Pris pr. container: beløbet × antal containere på turen (fx ved løs afhentning, hvor chaufføren vejer flere containere).",
+    per_container: "Pris pr. container: beløbet × antal containere på turen (fx ved løs afhentning, hvor chaufføren vejer flere containere, eller én container pr. indholdslinje).",
+    per_unit: "Pris pr. enhed: beløbet × antal paller, kolli, m³, ton ... på turens indholdslinjer i den valgte enhed. Har chaufføren registreret antallet ved afslutning, bruges det - ellers det planlagte. Et minimumsbeløb sikrer at små ture stadig koster noget.",
   },
   category: {
     weekend: "Weekend: lægges på ture der køres lørdag eller søndag.",
@@ -61,6 +67,7 @@ const HELP = {
     trailer: "Hænger: lægges på ture hvor chaufføren har kørt med hænger (chaufføren vælger Med/Uden hænger på turen).",
     evening: "Aften/nat: lægges på ture der starter i et bestemt tidsrum, fx 18:00-06:00. Tidsrummet sættes under \"Flere betingelser\".",
     waiting: "Ventetid: betaling for tid chaufføren venter på adressen, fx når containeren er blokeret eller kunden ikke er klar. Afregnes pr. påbegyndt kvarter ud fra de ventetidsminutter der er registreret på turen. Chaufføren beder om ventetid efter turen (godkendes under Godkendelser), eller du skriver den på turen i Rapport. Ture uden ventetid får intet tillæg. Typisk som kr pr. time.",
+    stop: "Ekstra stop: et beløb pr. stop ud over dem der er med i grundprisen (standard 2 = én afhentning + én aflevering). Stop der ikke kunne gennemføres tæller med - chaufføren kørte derhen.",
     other: "Andet: alt det der ikke passer i de andre typer, fx miljøtillæg eller bro/færge. Brug betingelserne til at styre hvilke ture det gælder.",
   },
 };
@@ -182,6 +189,7 @@ export default function EconomyPanel({ canEdit = true }) {
   const [view, setView] = useState("report");
   const [rulesFilter, setRulesFilter] = useState("all");
   const [draftBundle, setDraftBundle] = useState(null);
+  const [reportReload, setReportReload] = useState(0);
   const [options, setOptions] = useState(null);
   const [pendingCount, setPendingCount] = useState(0);
 
@@ -228,15 +236,20 @@ export default function EconomyPanel({ canEdit = true }) {
         <div className={`${card} p-10 flex justify-center`}><Loader2 className="w-6 h-6 animate-spin text-slate-400" /></div>
       ) : (
         <>
-          {view === "report" && <ReportView options={options} onChanged={loadPending} goRules={() => setView("rules")} goApprovals={() => setView("approvals")}
-            onCreatePrice={canEdit ? (row) => setDraftBundle(newBundle({
-              // Turen uden pris: kunde + lokation + opgave + materiale er udfyldt på forhånd.
-              customer_ids: row.customer_id ? [row.customer_id] : [],
-              location_codes: row.location_code ? [row.location_code] : [],
-              task_types: row.task_type ? [row.task_type] : [],
-              materials: row.material && options.materials.includes(row.material) ? [row.material] : [],
-            }, `${row.customer_name || "Kunde"}${row.location_name ? ` - ${row.location_name}` : ""}`)) : undefined} />}
-          {draftBundle && <BundleEditor bundle={draftBundle} options={options} onClose={() => setDraftBundle(null)} onSaved={() => { setDraftBundle(null); setView("rules"); }} />}
+          {view === "report" && <ReportView options={options} onChanged={loadPending} goRules={() => setView("rules")} goApprovals={() => setView("approvals")} reloadSignal={reportReload}
+            onCreatePrice={canEdit ? (row) => {
+              // Turen uden pris: kunde + lokation + opgave + materiale(r) er udfyldt på forhånd.
+              const mats = (row.materials && row.materials.length ? row.materials : (row.material ? [row.material] : []));
+              setDraftBundle({ ...newBundle({
+                customer_ids: row.customer_id ? [row.customer_id] : [],
+                location_codes: row.location_code ? [row.location_code] : [],
+                task_types: row.task_type ? [row.task_type] : [],
+                materials: mats.length && mats.every(m => options.materials.includes(m)) ? mats : [],
+              }, `${row.customer_name || "Kunde"}${row.location_name ? ` - ${row.location_name}` : ""}`),
+              ...(row.outcome === "not_completed" ? { failed: { amount: "" } } : {}) });
+            } : undefined} />}
+          {draftBundle && <BundleEditor bundle={draftBundle} options={options} fromReport onClose={() => setDraftBundle(null)}
+            onSaved={() => { setDraftBundle(null); setReportReload(n => n + 1); }} />}
           {!canEdit && (
             <div className="flex gap-2 p-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 text-sm text-amber-900 dark:text-amber-100">
               <Info className="w-4 h-4 mt-0.5 shrink-0" /> Du kan se priser, men ikke ændre dem. Spørg din administrator under Team &amp; rettigheder.
@@ -268,7 +281,7 @@ function periodRange(p) {
   return null;
 }
 
-function ReportView({ options, onChanged, goRules, goApprovals, onCreatePrice }) {
+function ReportView({ options, onChanged, goRules, goApprovals, onCreatePrice, reloadSignal = 0 }) {
   const [period, setPeriod] = useState("this_month");
   const [range, setRange] = useState(periodRange("this_month"));
   const [customer, setCustomer] = useState("");
@@ -294,7 +307,7 @@ function ReportView({ options, onChanged, goRules, goApprovals, onCreatePrice })
     } catch (e) { toast.error(formatApiError(e, "Kunne ikke hente rapporten")); }
     finally { setLoading(false); }
   }, [range.from, range.to, customer, location]);
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); }, [load, reloadSignal]);
 
   const rows = useMemo(() => {
     let arr = data?.rows || [];
@@ -302,6 +315,7 @@ function ReportView({ options, onChanged, goRules, goApprovals, onCreatePrice })
     if (attention === "pending") arr = arr.filter(r => r.pending_requests > 0);
     if (attention === "invoiced") arr = arr.filter(r => r.price.locked);
     if (attention === "open") arr = arr.filter(r => !r.price.locked);
+    if (attention === "trailer") arr = arr.filter(r => !r.price.locked && r.trailer && r.trailer_confirmed === false);
     if (search.trim()) {
       const q = search.trim().toLowerCase();
       arr = arr.filter(r => [r.tour_number, r.customer_name, r.location_name, r.material, r.driver_name, r.delivery_label]
@@ -394,11 +408,11 @@ function ReportView({ options, onChanged, goRules, goApprovals, onCreatePrice })
           <Kpi tone="emerald" title="Omsætning ekskl. moms" value={fmtKr(t.net)} sub={`Inkl. ${t.vat_percent}% moms: ${fmtKr(t.gross)}`} />
           <Kpi tone="blue" title="Ture" value={t.tours} sub={`${t.not_completed} forgæves · ${t.invoiced} faktureret`} />
           <Kpi tone="amber" title="Fakt. timer" value={`${String(t.billable_hours).replace(".", ",")} t`} sub="Timeprisede ture" />
-          <Kpi tone="sky" title="Gns. pr. tur" value={fmtKr(t.tours - t.missing_rule - t.missing_time > 0 ? t.net / (t.tours - t.missing_rule - t.missing_time) : 0)} sub="Ture med pris" />
+          <Kpi tone="sky" title="Gns. pr. tur" value={fmtKr(t.tours - t.missing_rule - t.missing_time - (t.missing_qty || 0) > 0 ? t.net / (t.tours - t.missing_rule - t.missing_time - (t.missing_qty || 0)) : 0)} sub="Ture med pris" />
         </div>
       )}
 
-      {t && (t.missing_rule > 0 || t.missing_time > 0 || t.pending_requests > 0) && (
+      {t && (t.missing_rule > 0 || t.missing_time > 0 || t.missing_qty > 0 || t.pending_requests > 0 || t.trailer_unconfirmed > 0) && (
         <div className="flex flex-wrap gap-2">
           {t.missing_rule > 0 && (
             <button onClick={() => setAttention(attention === "missing" ? "" : "missing")} className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 text-sm text-red-700 dark:text-red-300">
@@ -409,6 +423,17 @@ function ReportView({ options, onChanged, goRules, goApprovals, onCreatePrice })
           {t.missing_time > 0 && (
             <button onClick={() => setAttention(attention === "missing" ? "" : "missing")} className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 text-sm text-amber-800 dark:text-amber-200">
               <Clock className="w-4 h-4" /> {t.missing_time} timeprisede ture mangler start/slut
+            </button>
+          )}
+          {t.missing_qty > 0 && (
+            <button onClick={() => setAttention(attention === "missing" ? "" : "missing")} className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 text-sm text-amber-800 dark:text-amber-200">
+              <AlertTriangle className="w-4 h-4" /> {t.missing_qty} ture med pris pr. enhed mangler antal
+            </button>
+          )}
+          {t.trailer_unconfirmed > 0 && (
+            <button onClick={() => setAttention(attention === "trailer" ? "" : "trailer")} data-testid="report-trailer-unconfirmed"
+              className={`inline-flex items-center gap-2 px-3 py-2 rounded-xl border text-sm ${attention === "trailer" ? "bg-amber-600 text-white border-amber-600" : "bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-900 text-amber-800 dark:text-amber-200"}`}>
+              <Info className="w-4 h-4" /> {t.trailer_unconfirmed} ture med hænger, som chaufføren ikke har bekræftet - tjek før fakturering
             </button>
           )}
           {t.pending_requests > 0 && (
@@ -487,8 +512,9 @@ function ReportView({ options, onChanged, goRules, goApprovals, onCreatePrice })
                       </td>
                       <td className="p-3"><div className="font-semibold">{r.customer_name}</div><div className="text-xs text-slate-500">{r.location_name}</div></td>
                       <td className="p-3">
-                        <div>{r.material}</div>
-                        <div className="text-xs text-slate-500">{taskLabel(r.task_type)}{r.priority === "haster" ? " · Haster" : ""}{r.trailer ? " · Hænger" : ""}</div>
+                        <div>{(r.materials && r.materials.length > 1) ? r.materials.join(" + ") : r.material}</div>
+                        <div className="text-xs text-slate-500">{taskLabel(r.task_type)}{r.priority === "haster" ? " · Haster" : ""}{r.trailer ? ` · ${r.trailer_count > 1 ? `${r.trailer_count} hængere` : "Hænger"}` : ""}
+                          {r.trailer && r.trailer_confirmed === false && !r.price.locked && <span className="ml-1 px-1 rounded bg-amber-100 text-amber-800 text-[10px] font-bold" title="Foreslået fra chaufførens profil ved start - chaufføren har ikke svaret">automatisk, ikke bekræftet</span>}</div>
                       </td>
                       <td className="p-3 whitespace-nowrap">{r.driver_name}</td>
                       <td className="p-3 whitespace-nowrap font-mono text-xs">{r.start_time || "-"}–{r.end_time || "-"}</td>
@@ -508,6 +534,7 @@ function ReportView({ options, onChanged, goRules, goApprovals, onCreatePrice })
                           {r.has_override && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">Tilpasset</span>}
                           {r.pending_requests > 0 && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-700">Afventer</span>}
                         </div>
+                        {r.price.why?.text && <div className="text-[10px] text-red-700 dark:text-red-300 mt-0.5 max-w-[240px] ml-auto whitespace-normal" data-testid={`why-${r.tour_id}`}>{r.price.why.text}</div>}
                       </td>
                     </tr>
                   );
@@ -556,7 +583,7 @@ function TourPriceDrawer({ tourId, options, onClose, onChanged }) {
     const fo = d.fact_overrides || {}, po = d.price_override || {};
     setEdit({
       start_time: fo.start_time || "", end_time: fo.end_time || "",
-      used_trailer: fo.used_trailer === undefined ? "" : String(fo.used_trailer),
+      trailer_count: fo.trailer_count !== undefined ? String(fo.trailer_count) : fo.used_trailer === undefined ? "" : (fo.used_trailer ? String(d.trailer_count || 1) : "0"),
       waiting_min: fo.waiting_min ?? "", deduct_pause: fo.deduct_pause === undefined ? "" : String(fo.deduct_pause),
       mode: po.mode === "fixed" ? "fixed" : "rules", amount: po.amount ?? "",
       add_waiting: !!po.add_waiting, label: po.label || "",
@@ -568,7 +595,7 @@ function TourPriceDrawer({ tourId, options, onClose, onChanged }) {
     const fact = {};
     if (edit.start_time) fact.start_time = edit.start_time;
     if (edit.end_time) fact.end_time = edit.end_time;
-    if (edit.used_trailer !== "") fact.used_trailer = edit.used_trailer === "true";
+    if (edit.trailer_count !== "") fact.trailer_count = Number(edit.trailer_count);
     if (edit.deduct_pause !== "") fact.deduct_pause = edit.deduct_pause === "true";
     if (edit.waiting_min !== "") fact.waiting_min = Number(edit.waiting_min);
     setSaving(true);
@@ -610,11 +637,12 @@ function TourPriceDrawer({ tourId, options, onClose, onChanged }) {
             <div className={`${card} p-4`}>
               <div className="text-[11px] font-bold uppercase tracking-wide text-slate-500 mb-2">Prisopbygning</div>
               {(d.price.lines || []).map((l, i) => (
-                <div key={i} className="flex justify-between gap-3 py-1.5 text-sm border-b border-slate-100 dark:border-slate-700 last:border-0">
+                <div key={i} className={`flex justify-between gap-3 py-1.5 text-sm border-b border-slate-100 dark:border-slate-700 last:border-0 ${l.type === "included" ? "text-slate-400 italic" : ""}`}>
                   <span className={l.type === "surcharge" ? "text-amber-700 dark:text-amber-300" : l.type === "extra" || l.type === "override" ? "text-blue-700 dark:text-blue-300" : ""}>{l.label}</span>
                   <span className="font-mono">{fmtKr(l.amount)}</span>
                 </div>
               ))}
+              {d.price.why?.text && <div className="mt-2 px-3 py-2 rounded-lg bg-red-50 dark:bg-red-950/30 text-xs text-red-800 dark:text-red-200" data-testid="price-why"><b>Hvorfor ingen pris?</b> {d.price.why.text}</div>}
               <div className="flex justify-between pt-2 mt-1 font-bold"><span>I alt ekskl. moms</span><span>{fmtKr(d.price.total)}</span></div>
               {(d.price.flags || []).length > 0 && (
                 <div className="mt-2 flex flex-wrap gap-1">{d.price.flags.map(f => <span key={f} className="px-2 py-0.5 rounded-full text-[11px] bg-slate-100 dark:bg-slate-700">{f}</span>)}</div>
@@ -654,9 +682,10 @@ function TourPriceDrawer({ tourId, options, onClose, onChanged }) {
                 <div className="grid grid-cols-2 gap-2">
                   <div><span className={label}>Start</span><input type="time" className={input} value={edit.start_time} placeholder={d.original.start_time} onChange={e => setEdit({ ...edit, start_time: e.target.value })} /></div>
                   <div><span className={label}>Slut</span><input type="time" className={input} value={edit.end_time} onChange={e => setEdit({ ...edit, end_time: e.target.value })} /></div>
-                  <div><span className={label}>Hænger</span>
-                    <select className={input} value={edit.used_trailer} onChange={e => setEdit({ ...edit, used_trailer: e.target.value })}>
-                      <option value="">Som registreret</option><option value="true">Med hænger</option><option value="false">Uden hænger</option>
+                  <div><span className={label}>Hængere</span>
+                    <select className={input} value={edit.trailer_count} onChange={e => setEdit({ ...edit, trailer_count: e.target.value })} data-testid="adjust-trailers">
+                      <option value="">Som registreret ({d.original?.trailer_count ?? (d.trailer ? 1 : 0)})</option>
+                      {[0, 1, 2, 3, 4].map(n => <option key={n} value={String(n)}>{n === 0 ? "Uden hænger" : `${n} hænger${n === 1 ? "" : "e"}`}</option>)}
                     </select></div>
                   <div><span className={label}>Ventetid (min)</span><input type="number" min="0" className={input} value={edit.waiting_min} onChange={e => setEdit({ ...edit, waiting_min: e.target.value })} /></div>
                   <div className="col-span-2"><span className={label}>Pause under turen</span>
@@ -680,7 +709,7 @@ function TourPriceDrawer({ tourId, options, onClose, onChanged }) {
                   {edit.extra_lines.map((x, i) => (
                     <div key={i} className="flex gap-2 mb-2">
                       <input className={input} placeholder="Fx Ekstra rengøring" value={x.label} onChange={e => { const l = [...edit.extra_lines]; l[i] = { ...x, label: e.target.value }; setEdit({ ...edit, extra_lines: l }); }} />
-                      <input type="number" className={`${input} w-32`} placeholder="kr" value={x.amount} onChange={e => { const l = [...edit.extra_lines]; l[i] = { ...x, amount: e.target.value }; setEdit({ ...edit, extra_lines: l }); }} />
+                      <input type="number" className={`${inputFit} w-32`} placeholder="kr" value={x.amount} onChange={e => { const l = [...edit.extra_lines]; l[i] = { ...x, amount: e.target.value }; setEdit({ ...edit, extra_lines: l }); }} />
                       <button className="p-2 text-slate-400 hover:text-red-600" onClick={() => setEdit({ ...edit, extra_lines: edit.extra_lines.filter((_, j) => j !== i) })}><Trash2 className="w-4 h-4" /></button>
                     </div>
                   ))}
@@ -733,6 +762,7 @@ function ruleSummary(rule, options) {
     const p = rule.pricing || {};
     if (p.model === "fixed") return `Fast pris ${fmtKr(p.amount)}`;
     if (p.model === "per_container") return `${fmtKr(p.amount)} pr. container`;
+    if (p.model === "per_unit") return `${fmtKr(p.amount)} pr. ${p.unit || "enhed"}${p.min_amount ? ` · min. ${fmtKr(p.min_amount)}` : ""}`;
     const parts = [`${fmtKr(p.hourly_rate)}/t`];
     if (p.start_fee) parts.push(`start ${fmtKr(p.start_fee)}`);
     if (p.min_minutes) parts.push(`min. ${p.min_minutes} min`);
@@ -846,7 +876,8 @@ function RulesView({ options, reloadOptions, canEdit = true, initialFilter = "al
   };
   const BundleCard = ({ rs }) => {
     const bb = bundleFromRules(rs);
-    const baseRule = rs.find(r => r.kind === "base");
+    const baseRule = rs.find(r => r.kind === "base" && !isFailedRule(r));
+    const failedRule = rs.find(isFailedRule);
     const surs = rs.filter(r => r.kind === "surcharge");
     const chips = conditionChips(bb.conditions, options);
     const vf = (baseRule || rs[0]).version_from;
@@ -858,6 +889,7 @@ function RulesView({ options, reloadOptions, canEdit = true, initialFilter = "al
             <InfoTip text="Prisaftale: grundpris og tillæg for de samme ture." own={bb.note} />
             {!bb.active && <span className="px-2 py-0.5 rounded-full text-[11px] bg-slate-200 dark:bg-slate-700">Inaktiv</span>}
             {vf && new Date(vf) > new Date() && <span className="px-2 py-0.5 rounded-full text-[11px] bg-violet-100 text-violet-800">Træder i kraft {fmtTs(vf)}</span>}
+            {(bb.valid_from || bb.valid_to) && <span className="px-2 py-0.5 rounded-full text-[11px] bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-200" title="Kørselsdato">{bb.valid_from && bb.valid_to ? `Kørt ${fmtDate(bb.valid_from)} - ${fmtDate(bb.valid_to)}` : bb.valid_from ? `Kørt fra ${fmtDate(bb.valid_from)}` : `Kørt til og med ${fmtDate(bb.valid_to)}`}</span>}
           </div>
           <div className="flex flex-wrap gap-1">
             {chips.map((x, i) => <span key={i} className="px-2 py-0.5 rounded-full text-[11px] bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200">{x}</span>)}
@@ -866,8 +898,10 @@ function RulesView({ options, reloadOptions, canEdit = true, initialFilter = "al
           <div className="text-sm space-y-0.5">
             {baseRule ? <div><span className="text-slate-500">Grundpris:</span> <b className="text-emerald-700 dark:text-emerald-300">{ruleSummary(baseRule, options)}</b></div>
               : <div className="text-slate-500">Ingen grundpris (bruger den generelle)</div>}
+            {failedRule && <div><span className="text-slate-500">Forgæves kørsel:</span> <b>{fmtKr(failedRule.pricing?.amount)}</b></div>}
             {surs.map(r => (
-              <div key={r.id}><span className="text-slate-500">{options.categories[r.category]}:</span> <b>{Number(r.surcharge?.value) === 0 ? "Fritaget" : ruleSummary(r, options)}</b></div>
+              <div key={r.id}><span className="text-slate-500">{options.categories[r.category]}:</span> <b>{Number(r.surcharge?.value) === 0 ? "Fritaget" : ruleSummary(r, options)}</b>
+                {r.category === "stop" && Number(r.surcharge?.value) !== 0 && <span className="text-slate-500"> pr. stop ud over {r.surcharge?.included ?? 2}</span>}</div>
             ))}
           </div>
           {vf && <div className="text-[11px] text-slate-500">Gælder for ture oprettet fra {fmtTs(vf)}</div>}
@@ -943,7 +977,7 @@ function RulesView({ options, reloadOptions, canEdit = true, initialFilter = "al
       <div className={`${card} p-4 flex flex-wrap items-center justify-between gap-3`}>
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm font-semibold text-slate-600 dark:text-slate-300">Vis regler for</span>
-          <select className={`${input} w-auto min-w-[220px]`} value={filter} onChange={e => setFilter(e.target.value)} data-testid="rules-filter">
+          <select className={`${inputFit} w-auto min-w-[220px]`} value={filter} onChange={e => setFilter(e.target.value)} data-testid="rules-filter">
             <option value="all">Alle regler</option>
             <option value="general">Generelle (gælder alle kunder)</option>
             {options.customers.some(c => c.own) && <option value="own">Alle egne kunder</option>}
@@ -1180,8 +1214,10 @@ function CustomersView({ options, reloadOptions, canEdit, goRules }) {
 const CAT_AUTO_TEXT = {
   weekend: "Lørdag og søndag", holiday: "Helligdage", haster: "Ture med prioritet Haster",
   trailer: "Ture med hænger", evening: "Ture der starter i tidsrummet", waiting: "Kun når der er registreret ventetid", other: "Alle ture i aftalen",
+  stop: "Pr. stop ud over de inkluderede",
 };
-const CAT_NAME = { weekend: "Weekendtillæg", holiday: "Helligdagstillæg", haster: "Hastetillæg", trailer: "Hængertillæg", evening: "Aften/nat-tillæg", waiting: "Ventetid", other: "Andet tillæg" };
+const CAT_NAME = { weekend: "Weekendtillæg", holiday: "Helligdagstillæg", haster: "Hastetillæg", trailer: "Hængertillæg", evening: "Aften/nat-tillæg", waiting: "Ventetid", stop: "Stoptillæg", other: "Andet tillæg" };
+const UNIT_SUGGESTIONS = ["paller", "kolli", "m³", "ton", "stk", "kg"];
 const AUTO_KEYS = { weekend: ["day_types"], holiday: ["day_types"], haster: ["priorities"], trailer: ["trailer", "trailer_counts"], evening: ["time_from", "time_to"] };
 const parseNum = (v) => {
   if (v === "" || v == null) return NaN;
@@ -1190,12 +1226,15 @@ const parseNum = (v) => {
   else if (/^\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, "");
   return Number(s);
 };
-const BLANK_PRICING = { model: "fixed", amount: "", hourly_rate: "", start_fee: "", min_minutes: "", min_amount: "", rounding_mode: "up", rounding_minutes: 15, deduct_pause: true };
+const BLANK_PRICING = { model: "fixed", amount: "", unit: "paller", hourly_rate: "", start_fee: "", min_minutes: "", min_amount: "", rounding_mode: "up", rounding_minutes: 15, deduct_pause: true };
+// 2026-10-18: Forgæves kørsel er en ekstra grundpris i aftalen (udfald = forgæves).
+const isFailedRule = (r) => r.kind === "base" && (r.conditions || {}).outcome === "not_completed";
 
 /** Lav en prisaftale ud fra én eller flere eksisterende regler. */
 function bundleFromRules(rules) {
-  const base = rules.find(r => r.kind === "base");
-  const first = base || rules[0] || {};
+  const base = rules.find(r => r.kind === "base" && !isFailedRule(r));
+  const failed = rules.find(isFailedRule);
+  const first = base || rules.find(r => !isFailedRule(r)) || rules[0] || {};
   const cond = { ...EMPTY_COND, ...(first.conditions || {}) };
   if (!base && first.kind === "surcharge") (AUTO_KEYS[first.category] || []).forEach(k => { cond[k] = EMPTY_COND[k]; });
   return {
@@ -1205,23 +1244,26 @@ function bundleFromRules(rules) {
     conditions: cond, valid_from: first.valid_from || "", valid_to: first.valid_to || "",
     active: first.active !== false, note: first.note || "",
     base: base ? { id: base.id, pricing: { ...BLANK_PRICING, ...base.pricing } } : null,
+    failed: failed ? { id: failed.id, amount: String((failed.pricing || {}).amount ?? "") } : null,
     surcharges: rules.filter(r => r.kind === "surcharge").map(r => ({
       id: r.id, category: r.category, unit: (r.surcharge || {}).unit || "kr", value: String((r.surcharge || {}).value ?? ""),
       name: r.name && !r.name.startsWith(`${first.bundle_name || ""} - `) ? r.name : "",
       time_from: (r.conditions || {}).time_from || "", time_to: (r.conditions || {}).time_to || "",
       trailer_counts: (r.conditions || {}).trailer_counts || [],
+      included: (r.surcharge || {}).included ?? 2,
       exempt: Number((r.surcharge || {}).value) === 0,
     })),
   };
 }
 const newBundle = (conditions = {}, name = "") => ({
   bundle_id: "", adopt_ids: [], name, conditions: { ...EMPTY_COND, ...conditions }, valid_from: "", valid_to: "",
-  active: true, note: "", base: { pricing: { ...BLANK_PRICING } }, surcharges: [],
+  active: true, note: "", base: { pricing: { ...BLANK_PRICING } }, failed: null, surcharges: [],
 });
 
 const copyBundle = (b) => ({
   ...b, bundle_id: "", adopt_ids: [], name: `${b.name} (kopi)`,
   base: b.base ? { pricing: { ...b.base.pricing } } : null,
+  failed: b.failed ? { amount: b.failed.amount } : null,
   surcharges: b.surcharges.map(({ id, ...rest }) => rest),
 });
 
@@ -1230,10 +1272,12 @@ function bundlePayload(b, effective) {
     bundle_id: b.bundle_id || undefined, adopt_ids: b.adopt_ids, name: b.name, conditions: b.conditions,
     valid_from: b.valid_from, valid_to: b.valid_to, active: b.active, note: b.note, effective,
     base: b.base ? { id: b.base.id, pricing: b.base.pricing } : null,
+    failed: b.failed ? { id: b.failed.id, amount: b.failed.amount } : null,
     surcharges: b.surcharges.map(x => ({
-      id: x.id, category: x.category, unit: x.exempt ? "kr" : x.unit, value: x.exempt ? 0 : x.value,
+      id: x.id, category: x.category, unit: x.exempt ? "kr" : (x.category === "stop" ? "kr" : x.unit), value: x.exempt ? 0 : x.value,
       name: x.exempt ? `Fritaget for ${(CAT_NAME[x.category] || "tillæg").toLowerCase()}` : x.name,
       time_from: x.time_from, time_to: x.time_to, trailer_counts: x.trailer_counts,
+      included: x.category === "stop" ? x.included : undefined,
     })),
   };
 }
@@ -1248,7 +1292,10 @@ function ReadBack({ v, unit }) {
 
 /** "Prøv prisen": beregn et tænkt scenarie med aftalen som den står i editoren. */
 function PriceTester({ bundle, options }) {
-  const [sc, setSc] = useState({ day_type: "weekday", priority: "normal", trailer_count: 0, start_time: "08:00", minutes: 60, waiting_min: 0, containers: 1 });
+  const [sc, setSc] = useState({ day_type: "weekday", priority: "normal", trailer_count: 0, start_time: "08:00", minutes: 60, waiting_min: 0, containers: 1, qty: 10, stops: 2, outcome: "completed" });
+  const perUnit = bundle.base?.pricing?.model === "per_unit";
+  const unitName = bundle.base?.pricing?.unit || "paller";
+  const hasStop = (bundle.surcharges || []).some(x => x.category === "stop");
   const [res, setRes] = useState(null);
   const [busy, setBusy] = useState(false);
   const run = async () => {
@@ -1257,7 +1304,8 @@ function PriceTester({ bundle, options }) {
       const c = bundle.conditions || {};
       const scenario = {
         ...sc, customer_id: (c.customer_ids || [])[0] || "", location_code: (c.location_codes || [])[0] || "",
-        material: (c.materials || [])[0] || "", task_type: (c.task_types || [])[0] || "normal",
+        material: (c.materials || [])[0] || "", materials: c.materials || [], task_type: (c.task_types || [])[0] || "normal",
+        units: perUnit ? { [unitName]: parseNum(sc.qty) || 0 } : {},
       };
       const { data } = await axios.post(`${API}/pricing/simulate`, { scenario, draft: bundlePayload(bundle, "now") });
       setRes(data);
@@ -1281,7 +1329,11 @@ function PriceTester({ bundle, options }) {
         <div><span className={label}>Start</span><input type="time" className={input} value={sc.start_time} onChange={e => set("start_time", e.target.value)} /></div>
         <div><span className={label}>Varighed (min)</span><input inputMode="numeric" className={input} value={sc.minutes} onChange={e => set("minutes", e.target.value)} /></div>
         <div><span className={label}>Ventetid (min)</span><input inputMode="numeric" className={input} value={sc.waiting_min} onChange={e => set("waiting_min", e.target.value)} /></div>
-        <div><span className={label}>Containere</span><input inputMode="numeric" className={input} value={sc.containers} onChange={e => set("containers", e.target.value)} /></div>
+        {perUnit ? <div><span className={label}>Antal {unitName}</span><input inputMode="decimal" className={input} value={sc.qty} onChange={e => set("qty", e.target.value)} /></div>
+          : <div><span className={label}>Containere</span><input inputMode="numeric" className={input} value={sc.containers} onChange={e => set("containers", e.target.value)} /></div>}
+        {hasStop && <div><span className={label}>Antal stop</span><input inputMode="numeric" className={input} value={sc.stops} onChange={e => set("stops", e.target.value)} /></div>}
+        {bundle.failed && <div><span className={label}>Udfald</span>
+          <select className={input} value={sc.outcome} onChange={e => set("outcome", e.target.value)}><option value="completed">Gennemført</option><option value="not_completed">Forgæves</option></select></div>}
         <div className="flex items-end"><button type="button" className={`${btnPrimary} w-full justify-center`} onClick={run} disabled={busy} data-testid="price-tester-run">{busy ? <Loader2 className="w-4 h-4 animate-spin" /> : "Beregn"}</button></div>
       </div>
       {res?.error && <p className="text-sm text-red-600">{res.error}</p>}
@@ -1299,9 +1351,11 @@ function PriceTester({ bundle, options }) {
   );
 }
 
-function BundleEditor({ bundle: initial, options, onClose, onSaved, firstRule = false }) {
-  const [effective, setEffective] = useState(firstRule ? "all" : "now");
-  const [effDate, setEffDate] = useState(() => new Date().toISOString().slice(0, 10));
+function BundleEditor({ bundle: initial, options, onClose, onSaved, firstRule = false, fromReport = false }) {
+  // 2026-10-18: "Opret pris" fra Rapport gælder også ture UDEN pris (ellers
+  // fik turen man kom fra stadig ingen pris). Ture med pris ændres ikke.
+  const [effective, setEffective] = useState(fromReport ? "unpriced" : firstRule ? "all" : "now");
+  const [effDate, setEffDate] = useState(() => localDate());
   const [b, setB] = useState(() => JSON.parse(JSON.stringify(initial)));
   const [more, setMore] = useState(() => {
     const c = initial.conditions || {};
@@ -1326,14 +1380,20 @@ function BundleEditor({ bundle: initial, options, onClose, onSaved, firstRule = 
   if (b.base) {
     if (p.model === "hourly" && !(parseNum(p.hourly_rate) >= 0)) problems.push("Timepris mangler");
     if (p.model !== "hourly" && !(parseNum(p.amount) >= 0)) problems.push("Grundprisens beløb mangler");
+    if (p.model === "per_unit" && !(p.unit || "").trim()) problems.push("Vælg enhed (fx paller)");
   }
+  if (b.failed && !(parseNum(b.failed.amount) >= 0)) problems.push("Beløb for forgæves kørsel mangler");
+  if (effective === "driven" && !effDate) problems.push("Vælg dato for kørsel");
   b.surcharges.forEach((x, i) => { if (!x.exempt && !(parseNum(x.value) >= 0)) problems.push(`Tillæg ${i + 1} (${options.categories[x.category]}) mangler beløb`); });
 
   const save = async (force = false) => {
     if (problems.length) { toast.error(problems[0]); return; }
     setSaving(true);
     try {
-      await axios.post(`${API}/pricing/bundles`, { ...bundlePayload(b, effective === "date" ? effDate : effective), force });
+      const body = effective === "driven"
+        ? { ...bundlePayload(b, "all"), driven_from: effDate, ...(editing ? {} : { valid_from: effDate }) }
+        : bundlePayload(b, effective === "date" ? effDate : effective);
+      await axios.post(`${API}/pricing/bundles`, { ...body, force });
       toast.success("Prisaftalen er gemt");
       onSaved();
     } catch (e) {
@@ -1403,7 +1463,20 @@ function BundleEditor({ bundle: initial, options, onClose, onSaved, firstRule = 
               <>
                 <Segmented value={p.model} onChange={v => setP("model", v)} options={Object.entries(options.models).map(([k, v]) => ({ value: k, label: v }))} />
                 {HELP.model[p.model] && <p className="text-xs text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-slate-900 rounded-lg px-3 py-2">{HELP.model[p.model]}</p>}
-                {p.model !== "hourly" ? (
+                {p.model === "per_unit" ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3" data-testid="bundle-per-unit">
+                    <div><span className={label}>Enhed</span>
+                      <input className={input} list="unit-suggestions" value={p.unit || ""} onChange={e => setP("unit", e.target.value)} placeholder="paller" />
+                      <datalist id="unit-suggestions">{UNIT_SUGGESTIONS.map(u => <option key={u} value={u} />)}</datalist>
+                      <span className="text-[11px] text-slate-500">Samme enhed som på turens linjer</span></div>
+                    <div><span className={label}>Pris pr. {p.unit || "enhed"} (kr)</span>
+                      <input inputMode="decimal" className={input} value={p.amount} onChange={e => setP("amount", e.target.value)} placeholder="Fx 150" data-testid="bundle-base-amount" />
+                      <ReadBack v={p.amount} unit="kr" /></div>
+                    <div><span className={label}>Minimum pr. tur (valgfri)</span>
+                      <input inputMode="decimal" className={input} value={p.min_amount || ""} onChange={e => setP("min_amount", e.target.value)} placeholder="Fx 1.000" />
+                      <ReadBack v={p.min_amount} unit="kr" /></div>
+                  </div>
+                ) : p.model !== "hourly" ? (
                   <div className="max-w-xs"><span className={label}>{p.model === "per_container" ? "Pris pr. container (kr)" : "Pris pr. tur (kr)"}</span>
                     <input inputMode="decimal" className={input} value={p.amount} onChange={e => setP("amount", e.target.value)} placeholder="Fx 1.100" data-testid="bundle-base-amount" />
                     <ReadBack v={p.amount} unit="kr" /></div>
@@ -1420,7 +1493,7 @@ function BundleEditor({ bundle: initial, options, onClose, onSaved, firstRule = 
                         {p.rounding_mode !== "none" && (
                           <>
                             {[15, 30, 60].map(m => <button key={m} type="button" className={`${chipBase} ${Number(p.rounding_minutes) === m ? chipOn : chipOff}`} onClick={() => setP("rounding_minutes", m)}>{m} min</button>)}
-                            <input inputMode="numeric" className={`${input} w-24 ${customRounding ? "ring-2 ring-emerald-500/40" : ""}`} value={p.rounding_minutes} onChange={e => setP("rounding_minutes", e.target.value)} />
+                            <input inputMode="numeric" className={`${inputFit} w-24 ${customRounding ? "ring-2 ring-emerald-500/40" : ""}`} value={p.rounding_minutes} onChange={e => setP("rounding_minutes", e.target.value)} />
                             <span className="text-xs text-slate-500">min</span>
                           </>
                         )}
@@ -1436,6 +1509,22 @@ function BundleEditor({ bundle: initial, options, onClose, onSaved, firstRule = 
             )}
           </div>
 
+          <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4 space-y-2" data-testid="bundle-failed">
+            <label className="flex items-center justify-between gap-2">
+              <span className="text-sm font-bold">Forgæves kørsel <InfoTip text="Prisen når chaufføren har markeret turen som 'Kan ikke gennemføres' (fx lukket, ingen adgang, forkert affald). Uden den står forgæves ture som 'Mangler pris'." /></span>
+              <span className="flex items-center gap-2 text-sm">
+                <input type="checkbox" className="accent-emerald-600 w-4 h-4" checked={!!b.failed} data-testid="bundle-has-failed"
+                  onChange={e => setB({ ...b, failed: e.target.checked ? (b.failed || { amount: "" }) : null })} />
+                Aftalen har en pris for forgæves kørsel
+              </span>
+            </label>
+            {b.failed && (
+              <div className="max-w-xs"><span className={label}>Pris ved forgæves kørsel (kr)</span>
+                <input inputMode="decimal" className={input} value={b.failed.amount} onChange={e => setB({ ...b, failed: { ...b.failed, amount: e.target.value } })} placeholder="Fx 450" data-testid="bundle-failed-amount" />
+                <ReadBack v={b.failed.amount} unit="kr" /></div>
+            )}
+          </div>
+
           <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4 space-y-3" data-testid="bundle-surcharges">
             <div className="flex items-center justify-between gap-2">
               <h4 className="text-sm font-bold">Tillæg <span className="font-normal text-slate-500">({b.surcharges.length})</span></h4>
@@ -1444,7 +1533,7 @@ function BundleEditor({ bundle: initial, options, onClose, onSaved, firstRule = 
             {b.surcharges.map((x, i) => (
               <div key={x.id || i} className="rounded-lg bg-slate-50 dark:bg-slate-900 p-3 space-y-2" data-testid={`bundle-surcharge-${i}`}>
                 <div className="flex flex-wrap items-center gap-2">
-                  <select className={`${input} w-auto`} value={x.category} onChange={e => setS(i, { category: e.target.value })}>
+                  <select className={`${inputFit} w-auto`} value={x.category} onChange={e => setS(i, { category: e.target.value })}>
                     {Object.entries(options.categories).map(([k, v]) => <option key={k} value={k} disabled={k !== x.category && usedCats.has(k) && !["evening", "trailer", "other"].includes(k)}>{v}</option>)}
                   </select>
                   <InfoTip text={HELP.category[x.category]} />
@@ -1469,9 +1558,17 @@ function BundleEditor({ bundle: initial, options, onClose, onSaved, firstRule = 
                     <span className="text-[11px] text-slate-400">(tomt = med hænger)</span>
                   </div>
                 )}
+                {x.category === "stop" && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs text-slate-500">Stop med i grundprisen:</span>
+                    <input inputMode="numeric" className={`${inputFit} w-20`} value={x.included ?? 2} onChange={e => setS(i, { included: e.target.value.replace(/\D/g, "") })} data-testid={`bundle-stop-included-${i}`} />
+                    <span className="text-[11px] text-slate-400">Beløbet nedenfor er pr. ekstra stop</span>
+                  </div>
+                )}
                 <div className="flex flex-wrap items-end gap-2">
                   <Segmented value={x.exempt ? "exempt" : x.unit} onChange={v => setS(i, v === "exempt" ? { exempt: true } : { exempt: false, unit: v })}
-                    options={[{ value: "kr", label: "kr pr. tur" }, { value: "percent", label: "% af grundpris" }, { value: "per_hour", label: "kr pr. time" }, { value: "exempt", label: "Fritaget" }]} />
+                    options={x.category === "stop" ? [{ value: "kr", label: "kr pr. ekstra stop" }, { value: "exempt", label: "Fritaget" }]
+                      : [{ value: "kr", label: "kr pr. tur" }, { value: "percent", label: "% af grundpris" }, { value: "per_hour", label: "kr pr. time" }, { value: "exempt", label: "Fritaget" }]} />
                   {!x.exempt && <div className="w-36"><input inputMode="decimal" className={input} value={x.value} onChange={e => setS(i, { value: e.target.value })} placeholder={x.unit === "percent" ? "Fx 25" : "Fx 500"} data-testid={`bundle-surcharge-value-${i}`} />
                     <ReadBack v={x.value} unit={x.unit === "percent" ? "%" : x.unit === "per_hour" ? "kr/t" : "kr"} /></div>}
                   {x.exempt && <span className="text-xs text-slate-500 pb-2">Kunden betaler ikke dette tillæg (overstyrer generelle tillæg).</span>}
@@ -1480,8 +1577,8 @@ function BundleEditor({ bundle: initial, options, onClose, onSaved, firstRule = 
             ))}
             <button type="button" className={btnGhost} data-testid="bundle-add-surcharge"
               onClick={() => {
-                const next = ["weekend", "haster", "holiday", "trailer", "evening", "waiting", "other"].find(k => !usedCats.has(k)) || "other";
-                setB({ ...b, surcharges: [...b.surcharges, { category: next, unit: "kr", value: "", time_from: "", time_to: "", trailer_counts: [], exempt: false }] });
+                const next = ["weekend", "haster", "holiday", "trailer", "evening", "waiting", "stop", "other"].find(k => !usedCats.has(k)) || "other";
+                setB({ ...b, surcharges: [...b.surcharges, { category: next, unit: "kr", value: "", time_from: "", time_to: "", trailer_counts: [], included: 2, exempt: false }] });
               }}><Plus className="w-4 h-4" /> Tilføj tillæg</button>
           </div>
 
@@ -1497,15 +1594,22 @@ function BundleEditor({ bundle: initial, options, onClose, onSaved, firstRule = 
             <label htmlFor="rule-active">Aktiv</label>
           </div>
           <div className="space-y-2" data-testid="rule-effective">
-            <h4 className="text-sm font-bold">Hvornår gælder {editing ? "ændringen" : "aftalen"}?</h4>
+            <h4 className="text-sm font-bold">Hvilke ture gælder {editing ? "ændringen" : "aftalen"} for?</h4>
             <Segmented value={effective} onChange={setEffective} options={[
-              { value: "now", label: "Nye ture fra nu" }, { value: "date", label: "Fra en dato" }, { value: "all", label: "Også eksisterende ture" },
+              ...(fromReport && !editing ? [{ value: "unpriced", label: "Nye + ture uden pris" }] : []),
+              { value: "driven", label: "Ture kørt fra en dato" },
+              { value: "now", label: "Kun ture oprettet fra nu" },
+              { value: "all", label: "Alle, også eksisterende" },
             ]} />
-            {effective === "date" && (
-              <div className="max-w-xs"><span className={label}>Ture oprettet fra</span><input type="date" className={input} value={effDate} onChange={e => setEffDate(e.target.value)} /></div>
+            {effective === "driven" && (
+              <div className="max-w-xs"><span className={label}>Kørt fra og med</span><input type="date" className={input} value={effDate} onChange={e => setEffDate(e.target.value)} data-testid="rule-driven-from" /></div>
             )}
             <p className="text-xs text-slate-500">
-              {effective === "now" && "Ture og bestillinger der allerede er oprettet beholder deres pris i rapporter og PDF. Den gamle pris gemmes som en tidligere version."}
+              {effective === "unpriced" && "Gælder nye ture - og de eksisterende ture der i dag mangler pris (fx den tur du kom fra). Ture der allerede har en pris, ændres ikke."}
+              {effective === "driven" && (editing
+                ? "Anbefalet ved prisstigning: ture der køres fra datoen får den nye pris - også ture der allerede er oprettet (fx en serie). Ture kørt før datoen beholder den gamle pris."
+                : "Gælder ture der køres fra datoen - også ture der allerede er oprettet.")}
+              {effective === "now" && "Ture og bestillinger der allerede er oprettet beholder deres pris, også hvis de først køres senere. Den gamle pris gemmes som en tidligere version."}
               {effective === "date" && "Gælder for ture oprettet fra den valgte dato. Ture fra før beholder den gamle pris."}
               {effective === "all" && "Ændrer også prisen på eksisterende ture der ikke er markeret som faktureret. Fakturerede ture ændres aldrig."}
             </p>
@@ -1566,6 +1670,8 @@ function ApprovalsView({ onChanged }) {
     if ("start_time" in c) out.push(["Start", b.start_time || "-", c.start_time]);
     if ("end_time" in c) out.push(["Slut", b.end_time || "-", c.end_time]);
     if ("used_trailer" in c) out.push(["Hænger", b.used_trailer ? "Med" : "Uden", c.used_trailer ? "Med" : "Uden"]);
+    const tn = (n) => (Number(n) === 0 ? "Ingen" : `${n} hænger${Number(n) === 1 ? "" : "e"}`);
+    if ("trailer_count" in c) out.push(["Hængere", tn(b.trailer_count ?? (b.used_trailer ? 1 : 0)), tn(c.trailer_count)]);
     if ("waiting_min" in c) out.push(["Ventetid", `${b.waiting_min || 0} min`, `${c.waiting_min} min`]);
     return out;
   };
@@ -1597,6 +1703,11 @@ function ApprovalsView({ onChanged }) {
                 ))}
               </div>
               <div className="text-sm italic text-slate-600 dark:text-slate-300">"{r.comment}"</div>
+              {r.status === "pending" && (r.warnings || []).map(w => (
+                <div key={w} className="flex gap-2 px-3 py-2 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 text-xs text-amber-900 dark:text-amber-100" data-testid="request-warning">
+                  <AlertTriangle className="w-4 h-4 shrink-0" /> {w}
+                </div>
+              ))}
               {r.status === "pending" ? (
                 rejecting === r.id ? (
                   <div className="flex flex-wrap gap-2">
@@ -1611,7 +1722,7 @@ function ApprovalsView({ onChanged }) {
                   </div>
                 )
               ) : (
-                <div className="text-xs text-slate-500">{r.status === "approved" ? "Godkendt" : "Afvist"} af {r.decided_by} · {new Date(r.decided_at).toLocaleString("da-DK")}{r.decision_note ? ` · "${r.decision_note}"` : ""}</div>
+                <div className="text-xs text-slate-500">{r.status === "approved" ? (r.auto_approved ? "Godkendt automatisk" : "Godkendt") : "Afvist"}{r.decided_by ? ` af ${r.decided_by}` : ""} · {new Date(r.decided_at).toLocaleString("da-DK")}{r.decision_note ? ` · "${r.decision_note}"` : ""}</div>
               )}
             </div>
           ))}
@@ -1710,7 +1821,7 @@ function HolidaysView({ profile }) {
           </div>
         ))}
         <div className="flex flex-wrap gap-2 px-4 py-3 border-t border-slate-100 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40">
-          <input type="date" className={`${input} w-44`} value={newDay.date} onChange={e => setNewDay({ ...newDay, date: e.target.value })} />
+          <input type="date" className={`${inputFit} w-44`} value={newDay.date} onChange={e => setNewDay({ ...newDay, date: e.target.value })} />
           <input className={`${input} flex-1 min-w-[160px]`} placeholder="Navn, fx Firmafest" value={newDay.name} onChange={e => setNewDay({ ...newDay, name: e.target.value })} />
           <button className={btnPrimary} onClick={addExtra}><Plus className="w-4 h-4" /> Tilføj dag</button>
         </div>
@@ -1722,6 +1833,32 @@ function HolidaysView({ profile }) {
 /* ======================================================================
    Indstillinger
    ====================================================================== */
+/** Afvigelseskoder chaufføren vælger mellem (forgæves tur, stop der ikke kunne gennemføres, afvigelse ved afslutning). */
+function DeviationCodes({ codes, onSave }) {
+  const [list, setList] = useState(codes);
+  const [nw, setNw] = useState("");
+  useEffect(() => setList(codes), [codes]);
+  const changed = JSON.stringify(list) !== JSON.stringify(codes);
+  return (
+    <div className={`${card} p-4 space-y-3`} data-testid="settings-codes">
+      <h3 className="font-bold">Afvigelseskoder</h3>
+      <p className="text-sm text-slate-500">Det chaufføren kan vælge, når en tur eller et stop ikke kan gennemføres, eller når noget afviger. Koderne gør det muligt at se hvor ofte det sker - og at fakturere forgæves kørsel.</p>
+      <div className="flex flex-wrap gap-1.5">
+        {list.map(c => (
+          <span key={c} className="inline-flex items-center gap-1 pl-3 pr-1.5 py-1 rounded-full bg-slate-100 dark:bg-slate-700 text-sm">{c}
+            <button type="button" className="p-0.5 text-slate-400 hover:text-red-600" aria-label={`Fjern ${c}`} onClick={() => setList(list.filter(x => x !== c))}><X className="w-3.5 h-3.5" /></button></span>
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <input className={`${input} max-w-xs`} value={nw} onChange={e => setNw(e.target.value)} placeholder="Ny kode, fx Container blokeret" maxLength={40}
+          onKeyDown={e => { if (e.key === "Enter" && nw.trim()) { setList([...list, nw.trim()]); setNw(""); } }} />
+        <button type="button" className={btnGhost} onClick={() => { if (nw.trim()) { setList([...list, nw.trim()]); setNw(""); } }}><Plus className="w-4 h-4" /> Tilføj</button>
+        {changed && <button type="button" className={btnPrimary} onClick={() => onSave(list)} data-testid="settings-codes-save"><Check className="w-4 h-4" /> Gem koder</button>}
+      </div>
+    </div>
+  );
+}
+
 function SettingsView() {
   const [s, setS] = useState(null);
   useEffect(() => { axios.get(`${API}/pricing/settings`).then(r => setS(r.data)).catch(e => toast.error(formatApiError(e))); }, []);
@@ -1744,11 +1881,31 @@ function SettingsView() {
           ))}
         </div>
       </div>
+      <div className={`${card} p-4 space-y-3`} data-testid="settings-waiting">
+        <h3 className="font-bold">Ventetid fra chaufføren</h3>
+        <p className="text-sm text-slate-500">Chaufføren oplyser ventetid ved afslutning. Kort ventetid kan godkendes automatisk, så du kun skal se på de længere.</p>
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <span>Godkend automatisk op til</span>
+          <input type="number" min="0" max="120" className={`${inputFit} w-24`} defaultValue={s.auto_approve_waiting_min || 0}
+            onBlur={e => Number(e.target.value) !== (s.auto_approve_waiting_min || 0) && save({ auto_approve_waiting_min: Number(e.target.value) })} data-testid="settings-auto-waiting" />
+          <span>min</span>
+          <span className="text-xs text-slate-500">(0 = du godkender altid selv)</span>
+        </div>
+      </div>
+      <DeviationCodes codes={s.deviation_codes || []} onSave={(codes) => save({ deviation_codes: codes })} />
+      <div className={`${card} p-4 space-y-3`} data-testid="settings-unified">
+        <h3 className="font-bold">Chaufførens afslutning</h3>
+        <label className="flex items-start gap-3 text-sm">
+          <input type="checkbox" className="accent-emerald-600 w-4 h-4 mt-0.5" checked={!!s.unified_finish} onChange={e => save({ unified_finish: e.target.checked })} />
+          <span><b>Ét afslutningsark for alle ture</b> - også bestillinger fra genbrugspladser (B2B). Vægten er stadig påkrævet på containerafhentninger, løs afhentning vejes pr. læs, og vejesedlen kan vedhæftes.
+            <span className="block text-xs text-slate-500 mt-0.5">Slået fra: B2B-ture bruger det hidtidige vægt-flow. Slå det til for én dag og se om chaufførerne er glade for det.</span></span>
+        </label>
+      </div>
       <div className={`${card} p-4 space-y-2`}>
         <h3 className="font-bold">Moms</h3>
         <p className="text-sm text-slate-500">Priser i reglerne er ekskl. moms. Rapporten viser moms separat.</p>
         <div className="flex items-center gap-2">
-          <input type="number" min="0" max="100" className={`${input} w-28`} defaultValue={s.vat_percent} onBlur={e => Number(e.target.value) !== s.vat_percent && save({ vat_percent: Number(e.target.value) })} />
+          <input type="number" min="0" max="100" className={`${inputFit} w-28`} defaultValue={s.vat_percent} onBlur={e => Number(e.target.value) !== s.vat_percent && save({ vat_percent: Number(e.target.value) })} />
           <span className="text-sm">%</span>
         </div>
       </div>

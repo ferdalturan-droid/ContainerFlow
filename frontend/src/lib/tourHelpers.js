@@ -66,9 +66,11 @@ export const fmtClock = (iso) => {
   return d.toLocaleTimeString("da-DK", { hour: "2-digit", minute: "2-digit" });
 };
 
+/** 2026-10-18: Kun prioritetsfeltet - samme kilde som prisen og push.
+ *  "haster" i noten sættes som prioritet af backend ved oprettelse. */
 export const isHaster = (t) => {
   const p = String(t?.priority || "").toLowerCase();
-  return p === "urgent" || p === "haster" || p === "high" || (t?.remark || "").toLowerCase().includes("haster");
+  return p === "urgent" || p === "haster" || p === "high";
 };
 
 /** Åbningstider - felter først, ellers "Tømning 7 14 ..." i bemærkningen. */
@@ -123,3 +125,25 @@ export const parseDk = (v) => {
   else if (/^\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, "");
   return Number(s);
 };
+
+/** 2026-10-18 (E2/E3): Hvad planlæggeren bør kigge på efter turen -
+ *  registreret ≠ planlagt, manglende registrering, stop der ikke blev
+ *  gennemført, ekstra stop fra chaufføren og afvigelser ved afslutning. */
+export const deviationsOf = (t) => {
+  const out = [];
+  if (!t) return out;
+  const lines = Array.isArray(t.cargo_lines) ? t.cargo_lines : [];
+  const cap = t.capture || {};
+  if (t.completed) {
+    if (lines.some(l => l.actual_qty != null && l.qty != null && Number(l.actual_qty) !== Number(l.qty))) out.push("Mængde afviger");
+    if (cap.quantity && !lines.some(l => l.actual_qty != null) && !(Number(t.weight) > 0)) out.push("Mangler mængde");
+    if (cap.photo && !(Number(t.photo_count) > 0)) out.push("Mangler billede");
+    if (stopsOf(t).some(s => !s.done_at)) out.push("Stop ikke krydset af");
+  }
+  if (t.trailer_count_actual != null && Number(t.trailer_count || 0) !== Number(t.trailer_count_actual)) out.push(`Hængere ${t.trailer_count || 0} → ${t.trailer_count_actual}`);
+  if (stopsOf(t).some(s => s.issue?.code)) out.push("Stop ikke gennemført");
+  if (stopsOf(t).some(s => s.added_by_driver && !s.approved)) out.push("Ekstra stop fra chaufføren");
+  if (t.finish_issue?.code) out.push(t.finish_issue.code);
+  return out;
+};
+

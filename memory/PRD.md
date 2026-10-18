@@ -19,6 +19,28 @@ Data must be strictly isolated per company.
   and `/api/health` bypass tenant filtering so the QR-code customer flow continues to work.
 
 ## What's been implemented (2026-02-15)
+## What's new in 2026-10-18 (Friske øjne: pris, stop, afslutning)
+- **Pris:**
+  - "Opret pris" gælder ture uden pris (`backfill_unpriced`), og "ture kørt fra en dato" bruges ved prisstigninger.
+  - Én sandhed for hængere, med automatisk/bekræftet.
+  - Materiale som liste.
+  - Forklaring på manglende pris.
+  - Pris pr. enhed med minimum, stoptillæg og forgæves-pris i aftalen.
+  - Containere tælles pr. linje.
+  - Indregnede tillæg vises.
+  - Haster har én kilde.
+  - Spærring af registrering på fakturerede ture.
+  - Advarsel ved ventetid uden tillæg, flere rettelser pr. tur og automatisk godkendelse af kort ventetid.
+  - Prisstatus på Ture-siden. Se PRICING_SPEC 3f.
+- **Ture:**
+  - Note og kontakt pr. stop, kvittering og afvigelse pr. stop, og chaufføren kan tilføje stop (godkendes).
+  - Serier (`series_id`).
+  - Kunde fra registret (`customer_ref_id`).
+  - Afvigelseskoder pr. firma.
+  - Afslutning i ét kald med `op_id` plus offline-kø.
+  - Valgfrit "Ét afslutningsark" for B2B.
+  - End-to-end-tests i `backend/tests/e2e/`. Se TURE_REDESIGN.
+
 ## What's new in 2026-10-17 (Prisaftaler, afslut tur v2)
 - **Prisaftaler:** grundpris og flere tillæg i én formular (`/pricing/bundles`). Dette retter fejlen, hvor grundpris og tillæg overskrev hinanden. Tillæg får automatisk deres betingelse. Derudover: prissimulator (`/pricing/simulate`), 409 ved identiske betingelser, danske tal (`_parse_dk_number`/`parseDk`), "Fritaget", "Opret pris" fra Rapport og "Ret prisaftale" i Kunder & priser. Se PRICING_SPEC 3e.
 - **Afslut tur v2:** `capture` {quantity, photo} vælges i Ny tur. `FinishSheet` spørger i linjens enhed, tager billeder (`tour_photos`), og hængerantallet gemmes som `trailer_count_actual` (bruges i prisen). Chaufføren kan også sende ventetid og afvigelser. Valideringen er blød. Se TURE_REDESIGN.

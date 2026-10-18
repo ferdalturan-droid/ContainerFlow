@@ -4,6 +4,8 @@ import axios from "axios";
 import { toast } from "sonner";
 import { X, Camera, Loader2, CheckCircle2, Trash2, AlertTriangle, Minus, Plus } from "lucide-react";
 import { API, formatApiError } from "../auth/api";
+import { enqueueOp, isNetworkError, newOpId } from "../lib/tourOpQueue";
+import { enqueueReceiptUpload } from "../lib/receiptUploadQueue";
 
 /**
  * "Afslut tur" for ture hvor planlæggeren har valgt hvad der skal
@@ -17,8 +19,32 @@ import { API, formatApiError } from "../auth/api";
  *  5. Afvigelse / besked til planlæggeren (lander i turens beskedtråd).
  * Mangler noget af det valgte, får chaufføren en blød påmindelse - aldrig en
  * blokering, for chaufføren kender virkeligheden bedst.
+ *
+ * 2026-10-18:
+ *  - Alt sendes i ÉT kald (POST /tours/{id}/finish med op_id). Uden net
+ *    lægges afslutningen i offline-køen og sendes når der er forbindelse.
+ *  - Afvigelseskoder fra firmaets indstillinger (fx "Lukket", "Ingen adgang").
+ *  - "Ét afslutningsark" (firmaindstilling): også B2B-ture bruger arket. Så
+ *    er vægten PÅKRÆVET som før (capture.required), og løs afhentning vejes
+ *    pr. læs (capture.per_load).
  */
-const QUICK_NOTES = ["Mere end planlagt", "Mindre end planlagt", "Kunden var ikke til stede", "Skade/mangler", "Ekstra stop"];
+const DEFAULT_CODES = ["Lukket", "Ingen adgang", "Kunden ikke til stede", "Forkert affald", "Skade", "Delvist leveret", "Mere end planlagt", "Mindre end planlagt"];
+
+/** Hvad arket skal spørge om. null = turen bruger det gamle afslutningsflow. */
+export function effectiveCapture(tour, unified = false) {
+  if (!tour) return null;
+  const tt = tour.tour_type || "normal";
+  const goods = tour.tour_kind === "goods";
+  if (Object.keys(tour.capture || {}).length) {
+    if (tt === "loes_afhentning") return unified ? { ...tour.capture, quantity: true, per_load: true } : null;
+    return tour.capture;
+  }
+  if (!unified) return null;
+  if (tt === "loes_afhentning") return { quantity: true, per_load: true, required: !goods };
+  if (goods) return { quantity: true };
+  if (tt === "normal" || (tour.cargo_lines || []).length > 1) return { quantity: true, required: true, receipt: tt === "normal" && (tour.cargo_lines || []).length <= 1 };
+  return { quantity: false };
+}
 
 const compress = (file) => new Promise((resolve) => {
   const img = new window.Image();
@@ -45,10 +71,20 @@ const num = (v) => {
   return Number.isFinite(n) && n >= 0 ? n : null;
 };
 
-export default function FinishSheet({ tour, onClose, onDone, driverName, myId }) {
-  const cap = tour?.capture || {};
+export default function FinishSheet({ tour, onClose, onDone, driverName, myId, capture, codes }) {
+  const cap = capture || tour?.capture || {};
   const lines = Array.isArray(tour?.cargo_lines) ? tour.cargo_lines : [];
   const editMode = !!tour?.completed;
+  const perLoad = !!cap.per_load;
+  const [loads, setLoads] = useState(() => {
+    const ex = (Array.isArray(tour?.container_weights) ? tour.container_weights : []).map(w => String(w).replace(".", ","));
+    const n = Math.max(ex.length, Number(tour?.loose_estimated_count || 0), 1);
+    return [...ex, ...Array.from({ length: Math.max(0, n - ex.length) }, () => "")];
+  });
+  const [receipt, setReceipt] = useState(null);
+  const [issueCode, setIssueCode] = useState("");
+  const opId = useRef(newOpId());
+  const receiptRef = useRef(null);
   const plannedTrailers = Number(tour?.trailer_count || 0);
   const [qty, setQty] = useState(() => lines.map(l => (l.actual_qty != null ? String(l.actual_qty) : "")));
   const [weight, setWeight] = useState(() => (tour?.weight ? String(tour.weight) : ""));
@@ -78,13 +114,28 @@ export default function FinishSheet({ tour, onClose, onDone, driverName, myId })
     e.target.value = "";
     if (!file) return;
     setUploading(true);
+    let dataUrl = null;
     try {
-      const dataUrl = await compress(file);
+      dataUrl = await compress(file);
       if (!dataUrl) throw new Error("Billedet kunne ikke læses");
       const { data } = await axios.post(`${API}/tours/${tour.id}/photos`, { image: dataUrl });
       setPhotos(p => [...p, { id: data.id, url: dataUrl }]);
-    } catch (err) { toast.error(formatApiError(err)); }
+    } catch (err) {
+      if (dataUrl && isNetworkError(err)) {
+        // Ingen forbindelse: billedet gemmes på telefonen og sendes senere.
+        enqueueOp({ kind: "photo", tour_id: tour.id, image: dataUrl });
+        setPhotos(p => [...p, { id: `q-${Date.now()}`, url: dataUrl, queued: true }]);
+        toast.message("Billedet sendes når der er forbindelse");
+      } else toast.error(formatApiError(err));
+    }
     setUploading(false);
+  };
+  const addReceipt = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    const dataUrl = await compress(file);
+    if (dataUrl) setReceipt(dataUrl);
   };
   const delPhoto = async (pid) => {
     try { await axios.delete(`${API}/tours/${tour.id}/photos/${pid}`); setPhotos(p => p.filter(x => x.id !== pid)); }
@@ -92,46 +143,82 @@ export default function FinishSheet({ tour, onClose, onDone, driverName, myId })
   };
 
   const missing = [];
+  const loadNums = loads.map(num).filter(v => v != null && v > 0);
   if (cap.quantity) {
-    if (lines.length) lines.forEach((l, i) => { if (num(qty[i]) == null) missing.push(`mængde for ${l.text}`); });
-    else if (num(weight) == null) missing.push("vægt");
+    if (perLoad) { if (!loadNums.length) missing.push("vægt for mindst ét læs"); }
+    else if (lines.length) lines.forEach((l, i) => { if (num(qty[i]) == null) missing.push(`mængde for ${l.text}`); });
+    else if (!(num(weight) > 0)) missing.push("vægt");
   }
+  // Påkrævet (B2B i det samlede ark): vægten skal med, som i det gamle flow.
+  const hardMissing = cap.required ? (perLoad ? !loadNums.length
+    : lines.length > 1 ? !lines.some((l, i) => num(qty[i]) > 0) : !(num(lines.length ? qty[0] : weight) > 0)) : false;
   if (cap.photo && photos.length === 0) missing.push("billede");
   if (openStops && !editMode) missing.push(`${openStops} stop er ikke krydset af`);
 
+  const regsOf = () => {
+    const regs = {};
+    if (perLoad) regs.container_weights = loadNums;
+    else if (cap.quantity || lines.some(l => l.actual_qty != null)) {
+      if (lines.length) regs.cargo_actuals = qty.map(num);
+      else if (num(weight) != null) regs.weight = num(weight);
+    }
+    return regs;
+  };
+  const saveDraft = async () => {
+    // Løs afhentning: gem vægtene undervejs uden at afslutte.
+    setBusy(true);
+    try {
+      await axios.put(`${API}/tours/${tour.id}`, { container_weights: loadNums, claimed_by: tour.claimed_by || driverName, claimed_by_id: tour.claimed_by_id || myId });
+      toast.success("Vægtene er gemt - turen er ikke afsluttet");
+      onDone?.(); onClose();
+    } catch (err) { toast.error(formatApiError(err)); }
+    setBusy(false);
+  };
+
   const submit = async () => {
+    if (hardMissing && !editMode) { toast.error(perLoad ? "Indtast vægten for mindst ét læs" : "Indtast vægten før turen afsluttes"); return; }
     if (missing.length) {
       let go = true;
       try { go = window.confirm(`Du mangler: ${missing.join(", ")}.\n\n${editMode ? "Gem alligevel?" : "Afslut turen alligevel?"}`); } catch (_) { /* ok */ }
       if (!go) return;
     }
     setBusy(true);
+    const me = { claimed_by: tour.claimed_by || driverName, claimed_by_id: tour.claimed_by_id || myId };
+    const regs = regsOf();
     try {
-      const me = { claimed_by: tour.claimed_by || driverName, claimed_by_id: tour.claimed_by_id || myId };
-      const regs = {};
-      if (cap.quantity || lines.some(l => l.actual_qty != null)) {
-        if (lines.length) regs.cargo_actuals = qty.map(num);
-        else if (num(weight) != null) regs.weight = num(weight);
-      }
       if (!editMode) {
-        // Hænger-oplysningen gemmes altid eksplicit (den styrer afregningen).
-        await axios.put(`${API}/driver/tours/${tour.id}/trailer`, { used_trailer: trailers > 0, trailer_count: trailers });
-        await axios.put(`${API}/tours/${tour.id}`, {
-          completed: true, on_way: false, time: new Date().toTimeString().slice(0, 5), ...regs, ...me,
-        });
-        if (note.trim()) await axios.post(`${API}/tour-messages/${tour.id}`, { text: note.trim() }).catch(() => {});
-        const w = parseInt(waiting, 10);
-        if (w > 0) {
-          await axios.post(`${API}/driver/tours/${tour.id}/change-request`, { waiting_min: w, comment: `Ventetid oplyst ved afslutning${note.trim() ? `: ${note.trim()}` : ""}` })
-            .then(() => toast.message("Ventetid sendt til godkendelse"))
-            .catch((err) => toast.error(formatApiError(err)));
+        // Hele afslutningen i ét kald - sikker at gentage (op_id).
+        const body = {
+          ...regs, trailer_count: trailers, used_trailer: trailers > 0, time: new Date().toTimeString().slice(0, 5),
+          issue_code: issueCode, message: note.trim(), waiting_min: parseInt(waiting, 10) || 0,
+          waiting_comment: `Ventetid oplyst ved afslutning${note.trim() ? `: ${note.trim()}` : ""}`,
+        };
+        try {
+          const { data } = await axios.post(`${API}/tours/${tour.id}/finish`, { ...body, op_id: opId.current }, { timeout: 30000 });
+          if (data.waiting === "approved") toast.message("Ventetiden er godkendt");
+          else if (data.waiting === "pending") toast.message("Ventetid sendt til godkendelse");
+          else if (data.waiting_error) toast.error(data.waiting_error);
+          toast.success("Turen er afsluttet");
+          if (receipt && regs.weight > 0) {
+            enqueueReceiptUpload({ tour_id: tour.id, image_data: receipt, content_type: "image/jpeg", description: "Vedhæftet ved afslutning",
+              final_weight_kg: regs.weight, user_name: driverName || tour.claimed_by || "", append_for_loose: false });
+          }
+          onDone?.({ queued: false });
+        } catch (err) {
+          if (!isNetworkError(err)) throw err;
+          enqueueOp({ kind: "finish", tour_id: tour.id, op_id: opId.current, body });
+          if (receipt && regs.weight > 0) {
+            enqueueReceiptUpload({ tour_id: tour.id, image_data: receipt, content_type: "image/jpeg", description: "Vedhæftet ved afslutning",
+              final_weight_kg: regs.weight, user_name: driverName || tour.claimed_by || "", append_for_loose: false });
+          }
+          toast.success("Ingen forbindelse - afslutningen er gemt på telefonen og sendes automatisk");
+          onDone?.({ queued: true, tourId: tour.id, regs });
         }
-        toast.success("Turen er afsluttet");
       } else {
         await axios.put(`${API}/tours/${tour.id}`, { ...regs, ...me });
         toast.success("Registreringen er rettet");
+        onDone?.({ queued: false });
       }
-      onDone?.();
       onClose();
     } catch (err) { toast.error(formatApiError(err)); }
     setBusy(false);
@@ -164,8 +251,23 @@ export default function FinishSheet({ tour, onClose, onDone, driverName, myId })
 
           {cap.quantity && (
             <section data-testid="finish-quantity">
-              <div className={sectionTitle}>Registrér mængde</div>
-              {lines.length ? (
+              <div className={sectionTitle}>{perLoad ? "Vægt pr. læs" : cap.required ? "Vægt (påkrævet)" : "Registrér mængde"}</div>
+              {perLoad ? (
+                <div className="space-y-2" data-testid="finish-loads">
+                  {loads.map((w, i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      <span className="w-14 text-sm font-semibold text-slate-500">Læs {i + 1}</span>
+                      <input className={ic} inputMode="decimal" value={w} placeholder="Vægt" onChange={(e) => setLoads(loads.map((x, j) => (j === i ? e.target.value : x)))} data-testid={`finish-load-${i}`} />
+                      <span className="w-8 text-sm font-semibold text-slate-600">kg</span>
+                      {loads.length > 1 && <button type="button" className="p-2 text-slate-400" aria-label="Fjern læs" onClick={() => setLoads(loads.filter((_, j) => j !== i))}><X className="w-4 h-4" /></button>}
+                    </div>
+                  ))}
+                  <div className="flex items-center justify-between">
+                    <button type="button" className="text-sm font-semibold text-emerald-700 inline-flex items-center gap-1" onClick={() => setLoads([...loads, ""])}><Plus className="w-4 h-4" /> Tilføj læs</button>
+                    <span className="text-sm font-bold text-slate-700">I alt {loadNums.reduce((a, b) => a + b, 0).toLocaleString("da-DK")} kg</span>
+                  </div>
+                </div>
+              ) : lines.length ? (
                 <div className="space-y-2.5">
                   {lines.map((l, i) => (
                     <div key={i} className="rounded-xl bg-white border border-slate-200 p-3">
@@ -190,6 +292,14 @@ export default function FinishSheet({ tour, onClose, onDone, driverName, myId })
                   <span className="w-14 text-sm font-semibold text-slate-600">kg</span>
                 </div>
               )}
+              {cap.receipt && !editMode && (
+                <div className="mt-2 flex items-center gap-2">
+                  <button type="button" onClick={() => receiptRef.current?.click()} className="px-3 py-2 rounded-xl border border-slate-200 bg-white text-sm font-semibold text-slate-700 inline-flex items-center gap-2" data-testid="finish-receipt">
+                    <Camera className="w-4 h-4" /> {receipt ? "Vejeseddel vedhæftet ✓" : "Vejeseddel (valgfri)"}</button>
+                  {receipt && <button type="button" className="text-xs text-slate-500 underline" onClick={() => setReceipt(null)}>Fjern</button>}
+                  <input ref={receiptRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={addReceipt} />
+                </div>
+              )}
             </section>
           )}
 
@@ -200,7 +310,8 @@ export default function FinishSheet({ tour, onClose, onDone, driverName, myId })
                 {photos.map(p => (
                   <div key={p.id} className="relative w-20 h-20 rounded-xl overflow-hidden border border-slate-200">
                     <img src={p.url} alt="" className="w-full h-full object-cover" />
-                    {!editMode && <button type="button" onClick={() => delPhoto(p.id)} className="absolute top-1 right-1 w-6 h-6 rounded-full bg-black/60 text-white flex items-center justify-center" aria-label="Slet billede"><Trash2 className="w-3.5 h-3.5" /></button>}
+                    {p.queued && <span className="absolute bottom-0 inset-x-0 bg-amber-500/90 text-white text-[10px] font-bold text-center">Venter</span>}
+                    {!editMode && !p.queued && <button type="button" onClick={() => delPhoto(p.id)} className="absolute top-1 right-1 w-6 h-6 rounded-full bg-black/60 text-white flex items-center justify-center" aria-label="Slet billede"><Trash2 className="w-3.5 h-3.5" /></button>}
                   </div>
                 ))}
                 <button type="button" onClick={() => fileRef.current?.click()} disabled={uploading}
@@ -253,9 +364,10 @@ export default function FinishSheet({ tour, onClose, onDone, driverName, myId })
           {!editMode && (
             <section>
               <div className={sectionTitle}>Afvigelse eller besked til planlæggeren (valgfri)</div>
-              <div className="flex flex-wrap gap-1.5 mb-2">
-                {QUICK_NOTES.map(q => (
-                  <button key={q} type="button" onClick={() => setNote(n => (n ? `${n}. ${q}` : q))} className="px-3 py-1.5 rounded-full border border-slate-200 bg-white text-xs font-semibold text-slate-600">{q}</button>
+              <div className="flex flex-wrap gap-1.5 mb-2" data-testid="finish-codes">
+                {(codes && codes.length ? codes : DEFAULT_CODES).map(q => (
+                  <button key={q} type="button" onClick={() => setIssueCode(c => (c === q ? "" : q))} aria-pressed={issueCode === q}
+                    className={`px-3 py-1.5 rounded-full border text-xs font-semibold ${issueCode === q ? "bg-amber-500 border-amber-500 text-white" : "border-slate-200 bg-white text-slate-600"}`}>{q}</button>
                 ))}
               </div>
               <textarea rows={2} className={ic} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Fx kun 10 paller klar - resten hentes i morgen" data-testid="finish-note" />
@@ -264,7 +376,11 @@ export default function FinishSheet({ tour, onClose, onDone, driverName, myId })
         </div>
 
         <div className="px-5 py-3 bg-white border-t border-slate-100" style={{ paddingBottom: "max(12px, env(safe-area-inset-bottom))" }}>
-          {missing.length > 0 && <p className="text-xs text-amber-700 mb-2">Mangler: {missing.join(", ")}</p>}
+          {missing.length > 0 && <p className={`text-xs mb-2 ${hardMissing ? "text-red-600 font-semibold" : "text-amber-700"}`}>{hardMissing ? "Påkrævet" : "Mangler"}: {missing.join(", ")}</p>}
+          {perLoad && !editMode && (
+            <button type="button" onClick={saveDraft} disabled={busy || !loadNums.length} data-testid="finish-draft"
+              className="w-full mb-2 min-h-[44px] rounded-xl border border-slate-200 bg-white text-slate-700 font-bold text-sm disabled:opacity-50">Gem vægte uden at afslutte</button>
+          )}
           <button type="button" onClick={submit} disabled={busy} data-testid="finish-submit"
             className="w-full min-h-[52px] rounded-xl bg-emerald-600 active:bg-emerald-700 text-white font-extrabold text-base inline-flex items-center justify-center gap-2 disabled:opacity-60">
             {busy ? <Loader2 className="w-5 h-5 animate-spin" /> : <CheckCircle2 className="w-5 h-5" />} {editMode ? "Gem rettelse" : "Afslut tur"}

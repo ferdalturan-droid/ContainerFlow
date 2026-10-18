@@ -28,7 +28,9 @@ import AdminTabNav from "@/components/AdminTabNav";
 import TeamPanel from "@/pages/TeamPanel";
 import { DriverChatSheet, CallPlannerButton } from "@/components/DriverTourCard";
 import DriverTodayView from "@/components/DriverTodayView";
-import FinishSheet from "@/components/FinishSheet";
+import FinishSheet, { effectiveCapture } from "@/components/FinishSheet";
+import DriverStopList from "@/components/DriverStopList";
+import { initTourOpQueue, enqueueOp, isNetworkError, subscribeOps } from "@/lib/tourOpQueue";
 import { enablePush, disablePush, syncPush, pushSupported, isIOS, isStandalone, permission as pushPermission } from "@/lib/push";
 import EconomyPanel from "@/pages/EconomyPanel";
 import LogisticsLocations from "@/pages/LogisticsLocations";
@@ -237,8 +239,8 @@ const PRIORITY_CHIP_MAP = {
 const getPriorityChip = (tour) => {
   const p = (tour?.priority || "normal").toString().toLowerCase();
   if (PRIORITY_CHIP_MAP[p]) return PRIORITY_CHIP_MAP[p];
-  // Fallback: tjek remark for "haster" hint
-  if ((tour?.remark || "").toLowerCase().includes("haster")) return PRIORITY_CHIP_MAP.haster;
+  // 2026-10-18: Kun prioritetsfeltet (samme kilde som prisen). "haster" i
+  // noten sættes til prioritet ved oprettelse i backend.
   return PRIORITY_CHIP_MAP.normal;
 };
 const OrderInfoLine = ({ order, dark = false, compact = false, testid = "" }) => {
@@ -1078,6 +1080,8 @@ registerServiceWorker();
 // pending kvitteringer fra forrige session bliver retried automatisk
 // (overlever browser-luk, dårlig dækning, iOS Safari reloads).
 initReceiptUploadQueue();
+// 2026-10-18: Offline-kø for start/stop-kryds/billeder/afslutning.
+initTourOpQueue();
 
 // ============= ORDER PRIORITIES =============
 const ORDER_PRIORITIES = {
@@ -5295,7 +5299,7 @@ const MobileTourCard = ({ tour, onUpdate, onDelete, onToggleOnWay, onToggleCompl
   // OG priority="haster" begge fanges. Tidligere kunne case-mismatch betyde
   // at status-badge ikke blev rød trods at priority-chip viste "Haster".
   const _pLower = priority.toString().toLowerCase();
-  const isHaster = _pLower === "urgent" || _pLower === "haster" || (tour.remark || "").toLowerCase().includes("haster");
+  const isHaster = _pLower === "urgent" || _pLower === "haster" || _pLower === "high";
   const getStatusStyle = () => {
     if (tour.completed) {
       return {
@@ -12988,7 +12992,7 @@ const TourBillingBox = ({ tour }) => {
       setInfo(data[tour.id] || null);
     } catch (_) { setInfo(null); }
   }, [tour?.id]);
-  useEffect(() => { load(); }, [load, tour?.completed, tour?.on_way]);
+  useEffect(() => { load(); }, [load, tour?.completed, tour?.on_way, tour?.used_trailer, tour?.trailer_confirmed]);
   if (!info) return null;
 
   const trailer = info.used_trailer === true;
@@ -13003,7 +13007,7 @@ const TourBillingBox = ({ tour }) => {
     setBusy(true);
     try {
       await axios.post(`${API}/driver/tours/${tour.id}/change-request`, {
-        start_time: form.start_time, end_time: form.end_time, used_trailer: form.used_trailer,
+        start_time: form.start_time, end_time: form.end_time, trailer_count: Number(form.trailer_count),
         waiting_min: form.waiting_min === "" ? undefined : Number(form.waiting_min), comment: form.comment,
       });
       toast.success("Sendt til godkendelse hos din logistik admin");
@@ -13042,8 +13046,8 @@ const TourBillingBox = ({ tour }) => {
               {last.status === "pending" ? "Din rettelse venter på godkendelse" : last.status === "approved" ? "Din rettelse er godkendt" : `Din rettelse blev afvist${last.decision_note ? `: ${last.decision_note}` : ""}`}
             </div>
           )}
-          {!form && !info.invoiced && info.pending_requests === 0 && (
-            <button type="button" onClick={() => setForm({ start_time: tour.on_way_time || "", end_time: tour.time || "", used_trailer: trailer, waiting_min: "", comment: "" })}
+          {!form && !info.invoiced && (
+            <button type="button" onClick={() => setForm({ start_time: tour.on_way_time || "", end_time: tour.time || "", trailer_count: String(info.trailer_count ?? (trailer ? 1 : 0)), waiting_min: "", comment: "" })}
               className="w-full px-3 py-2 rounded-lg text-sm font-semibold bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 flex items-center justify-center gap-2" data-testid="tour-change-request-btn">
               <Edit2 className="w-4 h-4" /> Ret tid, hænger eller ventetid
             </button>
@@ -13057,9 +13061,9 @@ const TourBillingBox = ({ tour }) => {
                   <input type="time" value={form.end_time} onChange={e => setForm({ ...form, end_time: e.target.value })} className="mt-1 w-full px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 text-sm" /></label>
                 <label className="text-[11px] font-bold uppercase text-slate-500">Ventetid (min)
                   <input type="number" min="0" inputMode="numeric" value={form.waiting_min} onChange={e => setForm({ ...form, waiting_min: e.target.value })} placeholder="0" className="mt-1 w-full px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 text-sm" /></label>
-                <label className="text-[11px] font-bold uppercase text-slate-500">Hænger
-                  <select value={form.used_trailer ? "1" : "0"} onChange={e => setForm({ ...form, used_trailer: e.target.value === "1" })} className="mt-1 w-full px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 text-sm">
-                    <option value="0">Uden</option><option value="1">Med hænger</option>
+                <label className="text-[11px] font-bold uppercase text-slate-500">Hængere
+                  <select value={form.trailer_count} onChange={e => setForm({ ...form, trailer_count: e.target.value })} className="mt-1 w-full px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 text-sm" data-testid="change-request-trailers">
+                    {[0, 1, 2, 3, 4].map(n => <option key={n} value={String(n)}>{n === 0 ? "Uden hænger" : `${n} hænger${n === 1 ? "" : "e"}`}</option>)}
                   </select></label>
               </div>
               <textarea rows={2} value={form.comment} onChange={e => setForm({ ...form, comment: e.target.value })} placeholder="Hvad skal rettes og hvorfor?" className="w-full px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 text-sm" />
@@ -13075,8 +13079,11 @@ const TourBillingBox = ({ tour }) => {
   );
 };
 
-const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onToggleComplete, currentDriverName, onChat, onRefresh, onOpenFinish }) => {
+const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onToggleComplete, currentDriverName, onChat, onRefresh, onOpenFinish, unifiedFinish = false, deviationCodes = [] }) => {
   const [weightInput, setWeightInput] = useState("");
+  const [trailerAsk, setTrailerAsk] = useState(null);
+  const [notCompletedCode, setNotCompletedCode] = useState("");
+  const [trailerAnswered, setTrailerAnswered] = useState(false);
   const [askingWeight, setAskingWeight] = useState(false);
   // Fase 15.52 (2026-02-22): "Kan ikke gennemføres"-dialog state.
   const [showNotCompletedDialog, setShowNotCompletedDialog] = useState(false);
@@ -13281,7 +13288,7 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
     // 2026-10-17: Flere læs (løs afhentning ELLER flere indholdslinjer, fx
     // hænger 1: Beton, hænger 2: Træ) vejes hver for sig med samme UI.
     const _cargoN = Array.isArray(tour?.cargo_lines) ? tour.cargo_lines.length : 0;
-    const _hasCapture = Object.keys(tour?.capture || {}).length > 0 && tour?.tour_type !== "loes_afhentning";
+    const _hasCapture = !!effectiveCapture(tour, unifiedFinish);
     const isLoesActive = (tour?.tour_type === "loes_afhentning" || _cargoN > 1) && !tour?.completed && !_hasCapture;
     setAskingWeight(isLoesActive);
     setEditingWeight(false);
@@ -13303,18 +13310,13 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
   if (!tour) return null;
   const isClaimedByOther = tour.claimed_by && tour.claimed_by !== currentDriverName;
   const cargoLines = Array.isArray(tour.cargo_lines) ? tour.cargo_lines : [];
-  const hasCapture = Object.keys(tour.capture || {}).length > 0 && tour.tour_type !== "loes_afhentning";
+  // 2026-10-18: Ture der bruger afslutningsarket (capture, eller alle ture når
+  // firmaet har slået "Ét afslutningsark" til). Ellers det gamle vægt-flow.
+  const hasCapture = !!effectiveCapture(tour, unifiedFinish);
   const isMultiLoadTour = !hasCapture && (tour.tour_type === "loes_afhentning" || cargoLines.length > 1);
   const isGoodsTour = tour.tour_kind === "goods";
   const multiTitle = tour.tour_type === "loes_afhentning" ? "LØS AFHENTNING" : "turen";
   const tourStops = localStops || (Array.isArray(tour.stops) ? tour.stops : []);
-  const toggleStop = async (st) => {
-    try {
-      const { data } = await axios.post(`${API}/tours/${tour.id}/stops/${st.id}/done`, { done: !st.done_at });
-      setLocalStops(data.stops || []);
-      onRefresh?.();
-    } catch (e) { toast.error(e?.response?.data?.detail || "Kunne ikke opdatere stoppet"); }
-  };
   const loadLabel = (idx) => (cargoLines.length > 1
     ? `${cargoLines[idx]?.trailer ? `H${cargoLines[idx].trailer} ` : ""}${cargoLines[idx]?.text || `Læs ${idx + 1}`}`
     : `#${idx + 1}`);
@@ -13364,6 +13366,17 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
     // Fase 13 (2026-06-18): Hard-stop hvis allerede afsluttet - knappen
     // skal ALDRIG kunne nulstille en afsluttet tur via "Afslut" igen.
     if (tour.completed) return;
+    // 2026-10-18: Hængeren blev foreslået ud fra profilen da turen startede.
+    // Spørg med svaret forudfyldt, så der ikke faktureres hænger blindt.
+    if (!trailerAnswered && tour.used_trailer === true && tour.trailer_source === "auto" && !tour.trailer_confirmed) {
+      const v = await new Promise(res => setTrailerAsk({ resolve: res }));
+      setTrailerAsk(null);
+      if (v === null) return;
+      try { await axios.put(`${API}/driver/tours/${tour.id}/trailer`, { used_trailer: v }); }
+      catch (e) { toast.error(formatApiError(e)); return; }
+      setTrailerAnswered(true);
+      onRefresh?.();
+    }
     // Fase 15.44 (2026-02-22): SOFT-VALIDATION - bekræft før vi markerer
     // turen som afsluttet. Et fejlklik på "Afslut" har permanent effekt
     // (claimed_by låses, vægt lægges på rapport), så vi spørger først.
@@ -13541,13 +13554,15 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
   // turen som ikke-gennemførbar med obligatorisk kommentar.
   const handleConfirmNotCompleted = async () => {
     const c = (notCompletedReason || "").trim();
-    if (!c) {
-      toast.error("Skriv en kort årsag - fx 'pladsen er lukket'");
+    if (!c && !notCompletedCode) {
+      toast.error("Vælg en årsag eller skriv en kort forklaring");
       return;
     }
     setSubmittingNotCompleted(true);
     try {
-      await axios.post(`${API}/tours/${tour.id}/not-completed`, { comment: c });
+      // 2026-10-18 (C3): Årsagskode (fx "Lukket") gør forgæves kørsel målbar og fakturerbar.
+      await axios.post(`${API}/tours/${tour.id}/not-completed`, { comment: c, code: notCompletedCode });
+      setNotCompletedCode("");
       toast.success("Tur markeret som ikke-gennemført");
       setShowNotCompletedDialog(false);
       setNotCompletedReason("");
@@ -13713,31 +13728,10 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
               </a>
             </div>
           )}
-          {tourStops.length > 0 && (
-            <div data-testid="mobile-tour-panel-stops">
-              <div className="text-xs uppercase tracking-wide text-slate-500 mb-1.5">Stop ({tourStops.filter(x => x.done_at).length}/{tourStops.length} udført)</div>
-              <div className="space-y-2">
-                {tourStops.map((st, i) => {
-                  const canTick = !tour.completed && !isClaimedByOther && (tour.on_way || tour.claimed_by);
-                  return (
-                    <div key={st.id || i} className={`flex items-center gap-2 rounded-xl border px-3 py-2.5 ${st.done_at ? "border-emerald-200 bg-emerald-50" : "border-slate-200 bg-white"}`}>
-                      <button type="button" disabled={!canTick} onClick={() => toggleStop(st)} data-testid={`stop-toggle-${i}`}
-                        aria-label={st.done_at ? "Fortryd stop" : "Marker stop som udført"}
-                        className={`w-9 h-9 shrink-0 rounded-full border-2 flex items-center justify-center ${st.done_at ? "bg-emerald-500 border-emerald-500 text-white" : "border-slate-300 text-slate-400"} disabled:opacity-40`}>
-                        {st.done_at ? <Check className="w-5 h-5" /> : <span className="text-xs font-bold">{i + 1}</span>}
-                      </button>
-                      <div className="min-w-0 flex-1">
-                        <div className="text-[11px] font-semibold text-slate-500">{st.kind === "delivery" ? "Aflevering" : "Afhentning"}{st.done_at ? ` · udført ${st.done_at}` : ""}</div>
-                        <div className="text-sm font-semibold text-slate-800 break-words">{st.address}</div>
-                      </div>
-                      <a href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(st.address)}&travelmode=driving`} target="_blank" rel="noopener noreferrer"
-                        className="w-9 h-9 shrink-0 rounded-lg border border-slate-200 flex items-center justify-center text-slate-600" aria-label="Navigér"><Navigation className="w-4 h-4" /></a>
-                    </div>
-                  );
-                })}
-              </div>
-              {!tour.on_way && !tour.completed && <p className="text-[11px] text-slate-400 mt-1.5">Start turen for at krydse stop af.</p>}
-            </div>
+          {(tourStops.length > 0 || (tour.on_way && !tour.completed && !isClaimedByOther)) && (
+            <DriverStopList tour={tour} stops={tourStops} codes={deviationCodes}
+              canTick={!tour.completed && !isClaimedByOther && !!(tour.on_way || tour.claimed_by)}
+              onChanged={(st, queued) => { setLocalStops(st); if (!queued) onRefresh?.(); }} />
           )}
           {(tour.open_from || tour.open_to) && (
             <div>
@@ -14274,10 +14268,18 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
               <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">
                 Årsag <span className="text-rose-500">*</span>
               </label>
+              {deviationCodes.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mb-2" data-testid="not-completed-codes">
+                  {deviationCodes.map(code => (
+                    <button key={code} type="button" onClick={() => setNotCompletedCode(c => (c === code ? "" : code))}
+                      className={`px-3 py-1.5 rounded-full border text-xs font-semibold ${notCompletedCode === code ? "bg-rose-600 border-rose-600 text-white" : "border-slate-300 text-slate-600 dark:text-slate-300"}`}>{code}</button>
+                  ))}
+                </div>
+              )}
               <textarea
                 value={notCompletedReason}
                 onChange={(e) => setNotCompletedReason(e.target.value)}
-                placeholder="Beskriv årsagen - f.eks. lukket, ingen adgang, forkert adresse"
+                placeholder={notCompletedCode ? "Kort forklaring (valgfri)" : "Beskriv årsagen - f.eks. lukket, ingen adgang, forkert adresse"}
                 rows={3}
                 className="w-full px-3 py-2 rounded-lg border-2 border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white text-sm focus:outline-none focus:border-rose-500 placeholder:text-slate-400"
                 data-testid="not-completed-reason-input"
@@ -14295,7 +14297,7 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
               </button>
               <button
                 onClick={handleConfirmNotCompleted}
-                disabled={submittingNotCompleted || !notCompletedReason.trim()}
+                disabled={submittingNotCompleted || (!notCompletedReason.trim() && !notCompletedCode)}
                 className="flex-1 px-4 py-2 rounded-xl text-sm font-semibold text-white bg-rose-600 hover:bg-rose-700 disabled:opacity-50 inline-flex items-center justify-center gap-1.5"
                 data-testid="not-completed-confirm-btn"
               >
@@ -14367,6 +14369,24 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
           receiptId={viewerReceiptId}
           onClose={() => setViewerReceiptId(null)}
         />
+      )}
+      {trailerAsk && (
+        <div className="fixed inset-0 z-[70] flex items-end sm:items-center justify-center bg-black/50 p-0 sm:p-4" onClick={(e) => { e.stopPropagation(); trailerAsk.resolve(null); }}>
+          <div className="w-full sm:max-w-sm rounded-t-2xl sm:rounded-2xl bg-white dark:bg-slate-900 p-5 space-y-4" style={{ paddingBottom: "calc(1.25rem + env(safe-area-inset-bottom))" }}
+            onClick={(e) => e.stopPropagation()} data-testid="trailer-confirm">
+            <div>
+              <div className="text-lg font-bold text-slate-900 dark:text-white">Kørte du med hænger?</div>
+              <p className="text-sm text-slate-500 mt-1">Forudfyldt fra din profil. Bruges til afregningen af turen (hængertillæg).</p>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              {[[true, "Ja, med hænger"], [false, "Nej, uden"]].map(([v, l]) => (
+                <button key={l} type="button" onClick={() => trailerAsk.resolve(v)} data-testid={`trailer-confirm-${v ? "yes" : "no"}`}
+                  className={`py-4 rounded-xl text-base font-bold border-2 ${v === (tour.used_trailer === true) ? "border-emerald-600 bg-emerald-50 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200" : "border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200"}`}>{l}</button>
+              ))}
+            </div>
+            <button type="button" className="w-full py-2 text-sm text-slate-500" onClick={() => trailerAsk.resolve(null)}>Annuller</button>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -14776,6 +14796,18 @@ function App() {
   const [chatTour, setChatTour] = useState(null);
   // 2026-10-17: "Afslut tur"-ark for ture med "Ved afslutning"-valg (capture).
   const [finishTour, setFinishTour] = useState(null);
+  // 2026-10-18: Firmaets indstillinger til afslutningsarket (afvigelseskoder,
+  // "Ét afslutningsark" for alle ture).
+  const [finishSettings, setFinishSettings] = useState({ codes: [], unified_finish: false });
+  useEffect(() => {
+    if (authUser?.role !== "driver") return;
+    axios.get(`${API}/driver/finish-settings`).then(r => setFinishSettings(r.data || {})).catch(() => {});
+  }, [authUser?.role, authUser?.id]);
+  // Offline-køen: sig til hvis serveren afviste en handling der blev sendt senere.
+  useEffect(() => subscribeOps((_n, ev) => {
+    if (ev?.type === "rejected") toast.error(`En handling fra da du var offline blev afvist: ${ev.message}`, { duration: 8000 });
+    if (ev?.type === "sent" && authUser?.role === "driver") fetchTours();
+  }), [authUser?.role]); // eslint-disable-line react-hooks/exhaustive-deps
   const driverUnreadTotalRef = useRef(null);
   const [inlineWeightTourId, setInlineWeightTourId] = useState(null);
   const [showInlineScanner, setShowInlineScanner] = useState(false);
@@ -15136,7 +15168,9 @@ function App() {
         if (res.data.vehicle_reg) setVehicleReg(res.data.vehicle_reg);
         if (res.data.current_plads) setSelectedPlads(res.data.current_plads);
         if (res.data.start_time) setStartTime(res.data.start_time);
-        if (res.data.report_date) setReportDate(res.data.report_date);
+        // 2026-10-18: Kun dagens dato genskabes - ellers så chaufføren
+        // gårsdagens ture næste morgen (sessionen husker sidste dato).
+        if (res.data.report_date && res.data.report_date === getLocalDateStr()) setReportDate(res.data.report_date);
         
         toast.success(`Velkommen tilbage, ${driverName}!`);
       }
@@ -15354,6 +15388,8 @@ function App() {
           fresh.completed === prev.completed &&
           fresh.on_way === prev.on_way &&
           fresh.claimed_by === prev.claimed_by &&
+          fresh.used_trailer === prev.used_trailer &&
+          fresh.trailer_confirmed === prev.trailer_confirmed &&
           JSON.stringify(fresh.stops || []) === JSON.stringify(prev.stops || []) &&
           (fresh.container_weights || []).join(",") === (prev.container_weights || []).join(",")
         ) {
@@ -15796,12 +15832,22 @@ function App() {
     try {
       if (newOnWay) {
         // Claiming the tour
-        await handleUpdateTour(tourId, { 
-          on_way: true, 
+        const startBody = {
+          on_way: true,
           on_way_time: currentTime,
           claimed_by: driverName,
           claimed_by_id: selectedDriver?.id || authUser?.id || ""
-        });
+        };
+        try {
+          await handleUpdateTour(tourId, startBody);
+        } catch (e) {
+          // 2026-10-18: Uden net startes turen på telefonen og sendes senere.
+          if (!isNetworkError(e)) throw e;
+          enqueueOp({ kind: "put", tour_id: tourId, body: startBody });
+          setTours(prev => prev.map(t => (t.id === tourId ? { ...t, ...startBody, queued: true } : t)));
+          toast.message("Ingen forbindelse - starten sendes når der er net");
+          return;
+        }
         toast.success(`${driverName || "Chauffør"} er på vej!`);
       } else {
         // Unclaiming - first update with own name to pass validation, then clear
@@ -16371,8 +16417,8 @@ function App() {
     if (!a.completed && b.completed) return -1;
     
     // HASTER/urgent priority ALWAYS on top (overrides everything)
-    const aUrgent = (a.priority === "urgent" || a.remark?.toLowerCase().includes("haster")) ? 1 : 0;
-    const bUrgent = (b.priority === "urgent" || b.remark?.toLowerCase().includes("haster")) ? 1 : 0;
+    const aUrgent = ["urgent", "haster", "high"].includes(String(a.priority || "").toLowerCase()) ? 1 : 0;
+    const bUrgent = ["urgent", "haster", "high"].includes(String(b.priority || "").toLowerCase()) ? 1 : 0;
     if (aUrgent !== bUrgent) return bUrgent - aUrgent;
     
     // On way tours next
@@ -17060,10 +17106,11 @@ function App() {
           onFinish={(t) => {
             // Ture med "Ved afslutning"-valg (nye manuelle ture) bruger det samlede
             // afslutnings-ark. Ældre ture/bestillinger: vægt i tur-panelet.
-            if (Object.keys(t.capture || {}).length && t.tour_type !== "loes_afhentning") { setFinishTour(t); return; }
+            if (effectiveCapture(t, finishSettings.unified_finish)) { setFinishTour(t); return; }
             const tt = t.tour_type || "normal";
             const multi = tt === "loes_afhentning" || (t.cargo_lines || []).length > 1;
-            if (tt === "normal" || multi || t.tour_kind === "goods") setSelectedTourForPanel(t);
+            const askTrailer = t.used_trailer === true && t.trailer_source === "auto" && !t.trailer_confirmed;
+            if (tt === "normal" || multi || t.tour_kind === "goods" || askTrailer) setSelectedTourForPanel(t);
             else if (window.confirm(`Afslut "${TOUR_TYPE_LABELS[tt] || tt}"?\n\n${t.fraction || ""}`)) handleToggleComplete(t.id);
           }}
           onOpen={(t) => setSelectedTourForPanel(t)}
@@ -18146,13 +18193,21 @@ function App() {
             onChat={() => { const t = selectedTourForPanel; setSelectedTourForPanel(null); setChatTour(t); }}
             onRefresh={fetchTours}
             onOpenFinish={(t) => setFinishTour(t)}
+            unifiedFinish={!!finishSettings.unified_finish}
+            deviationCodes={finishSettings.codes || []}
           />
         )}
 
         <DriverChatSheet tour={chatTour} onClose={() => setChatTour(null)} onChanged={fetchDriverTourUnread} />
         {finishTour && (
           <FinishSheet tour={finishTour} onClose={() => setFinishTour(null)}
-            onDone={() => { fetchTours(); setSelectedTourForPanel(null); }}
+            capture={effectiveCapture(finishTour, finishSettings.unified_finish)} codes={finishSettings.codes}
+            onDone={(r) => {
+              setSelectedTourForPanel(null);
+              // Uden net: vis turen som afsluttet med det samme (køen sender den).
+              if (r?.queued) setTours(prev => prev.map(t => (t.id === r.tourId ? { ...t, ...(r.regs?.weight != null ? { weight: r.regs.weight } : {}), completed: true, on_way: false, queued: true } : t)));
+              else fetchTours();
+            }}
             driverName={driverName} myId={selectedDriver?.id || authUser?.id || ""} />
         )}
 

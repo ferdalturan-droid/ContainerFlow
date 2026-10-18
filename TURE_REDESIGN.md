@@ -110,3 +110,28 @@ Begge dele er rettet. Desuden:
 - **Planlæggeren** ser planlagt mod registreret pr. linje (orange, når de afviger), "Hængere: planlagt X · kørt Y" og billederne.
 - **Kode:** `frontend/src/components/FinishSheet.jsx` og `Registration` i `pages/ToursWorkspace.jsx`; backend `cargo_actuals` i `PUT /api/tours/{id}` og `trailer_count` i `PUT /api/driver/tours/{id}/trailer`.
 
+### Stop med kvittering, serier og robust afslutning (2026-10-18)
+- **Stop:**
+  - Hvert stop kan have note og kontakt (navn + telefon). Chaufføren ringer direkte fra stoppet.
+  - Krydset gemmer fuldt tidsstempel.
+  - Ved aflevering kan modtagerens navn skrives.
+  - "Kunne ikke" på ét stop (årsagskode + tekst): stoppet bliver rødt, turen kører videre, og planlæggeren får en besked.
+  - Chaufføren kan tilføje et stop (ikke på B2B-kundebestillinger). Det markeres "tilføjet af chaufføren" og tæller først i prisen, når planlæggeren har godkendt det i tur-panelet.
+  - Planlæggerens rettelser bevarer chaufførens kvittering og afvigelser.
+- **Ny tur:**
+  - Haster og container nr. står fremme.
+  - Mængde er som standard slået til på gods, når en linje har et antal.
+  - Kunden vælges fra kunderegistret.
+  - Aftalt pris viser totalen ved flere ture.
+  - Gentagne ture får `series_id`. I tur-panelet kan man "Gem også for de N kommende ture i serien" (`PUT /api/tours/series/{id}`, aldrig datoen) og "Slet resten af serien".
+- **Ture-siden:**
+  - Opmærksomhedslinjen viser "N mangler pris" og "N med afvigelse at se på", og begge kan bruges som filter.
+  - Rækkerne har chips for Mangler pris, Faktureret, Rettelse venter og Afvigelse.
+  - Afvigelser omfatter: registreret mængde ≠ planlagt, mangler mængde eller billede, stop der ikke er krydset af, stop der ikke kunne gennemføres, ekstra stop fra chaufføren, hængere planlagt ≠ kørt og afvigelseskode ved afslutning.
+- **Afslutning i ét kald:** `POST /api/tours/{id}/finish` med `op_id` gemmer hængere, mængde/vægt, afvigelseskode, besked og ventetid på én gang og kan sendes igen uden dobbelte handlinger.
+- **Offline-kø** (`frontend/src/lib/tourOpQueue.js`): start, stop-kryds, billeder og afslutning gemmes på telefonen uden net og sendes automatisk, når forbindelsen er tilbage. Afviser serveren en handling, får chaufføren besked.
+- **Afvigelseskoder** vedligeholdes pr. firma (Økonomi › Indstillinger) og bruges ved forgæves tur, ved stop og ved afslutning.
+- **"Ét afslutningsark for alle ture"** (firmaindstilling, slået fra som standard): også B2B-ture bruger afslutningsarket. Vægten er påkrævet som før, løs afhentning vejes pr. læs (med "Gem vægte uden at afslutte"), og vejesedlen kan vedhæftes. Uden indstillingen bruger B2B det hidtidige flow.
+- **Chaufføren ser dagens dato ved login** (før kunne sidste sessions dato blive genskabt dagen efter).
+- **Tests:** `backend/tests/e2e/` (se WORKFLOW.md).
+
