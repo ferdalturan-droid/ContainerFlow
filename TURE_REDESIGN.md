@@ -226,3 +226,15 @@ Se BESLUTNINGER_2026-10-19.md for alternativer og runder.
   - Afvigelsen "Hængere 0 → 1" vises kun, når der er planlagt hængere.
   - Økonomi skjuler prisvalg, der aldrig kan ramme en partnertur.
 - **Excel:** skabelonen har en dato-kolonne, vejledningen tælles ikke som fejl, og rækker på kundepladser bliver bestillinger.
+
+### Faste tømninger, rute på chaufførkortet, egen testdatabase (2026-10-19, 2. runde)
+- **Faste tømninger:** lokationsadmin og kundeadmin sætter dem op pr. container (fanen "Faste tømninger").
+  - Hver tømning bliver en almindelig bestilling 7 dage før, med dagens leveringsadresse.
+  - Lukkede dage springes over.
+  - Medarbejdere ser mærket "Fast" og kan "Springe over".
+  - En ekstra bestilling en anden dag er tilladt.
+  - Pause og stop annullerer de bestilte tømninger.
+- **"Bestil igen"** på en tidligere bestilling udfylder bestillingsflowet.
+- **Chaufførkortet** viser ruten i køreorden, med en "Kør"-knap pr. sted, i stedet for et kort-ikon uden tekst.
+- **Banner ved ny version**, når appen har stået åben under en opdatering.
+- **E2E-tests kører kun via `./scripts/e2e.sh`** (egen database og app på port 8081). Før ændrede de midlertidigt priserne i den lokale database.

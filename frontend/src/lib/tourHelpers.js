@@ -161,7 +161,8 @@ export const routeOf = (t) => {
     return legs;
   }
   const legs = [];
-  if (t.address) legs.push({ role: "pickup", label: "Hent", name: "", address: t.address });
+  // Samme adresse ind og ud (fx en flytning på stedet): ét sted.
+  if (t.address) legs.push({ role: "pickup", label: !facIsPlads && t.facility === t.address ? "Hent og aflever" : "Hent", name: "", address: t.address });
   if (facIsPlads ? t.plads_address : (t.facility && t.facility !== t.address)) {
     legs.push({ role: "delivery", label: "Aflever", name: facIsPlads ? pladsName : "", address: facIsPlads ? t.plads_address : t.facility });
   }

@@ -476,6 +476,9 @@ class Tour(BaseModel):
     cancelled_by_role: str = ""
     cancelled_on_way: bool = False
     cancel_reason: str = ""
+    # 2026-10-19: Oprettet automatisk af en fast tømning.
+    fixed_schedule_id: str = ""
+    fixed_label: str = ""
 
 class TourCreate(BaseModel):
     date: str = Field(default_factory=get_dk_date_str)
@@ -9253,7 +9256,7 @@ async def submit_customer_order(order: StructuredOrderCreate, request: Request):
 
 
 async def _create_customer_order(order: StructuredOrderCreate, submitter: dict,
-                                 on_behalf: Optional[dict] = None) -> dict:
+                                 on_behalf: Optional[dict] = None, fixed: Optional[dict] = None) -> dict:
     """Selve oprettelsen af en bestilling + tur. Bruges af bestillingssiden og
     (2026-10-19) af logistikfirmaets "Bestil for kunden" (`on_behalf`), så en
     bestilling er den samme uanset hvem der taster den: kundens materialer,
@@ -9314,10 +9317,14 @@ async def _create_customer_order(order: StructuredOrderCreate, submitter: dict,
             "status": {"$nin": ["completed", "cancelled"]},
         }
         if dup_query["location_code"] and dup_query["container_number"]:
-            existing = await _raw_db.container_orders.find_one(
-                dup_query, {"_id": 0, "id": 1, "order_date": 1},
-            )
-            if existing:
+            _new_date = normalize_date(order.order_date) if (order.order_date or "").strip() else get_dk_date_str()
+            async for existing in _raw_db.container_orders.find(
+                    dup_query, {"_id": 0, "id": 1, "order_date": 1, "fixed_schedule_id": 1}):
+                # 2026-10-19: En fast tømning en anden dag spærrer ikke for en
+                # ekstra bestilling (containeren blev fuld før tid) - og omvendt.
+                # Samme dag er stadig en dobbeltbestilling.
+                if (fixed or existing.get("fixed_schedule_id")) and (existing.get("order_date") or "") != _new_date:
+                    continue
                 raise HTTPException(
                     status_code=409,
                     detail=("Der findes allerede en ikke-fuldført bestilling for denne container og opgavetype"
@@ -9408,6 +9415,10 @@ async def _create_customer_order(order: StructuredOrderCreate, submitter: dict,
     doc["created_by_email"] = submitter_user_email
     # 2026-10-19: "Bestil for kunden" - logistikfirmaet taster bestillingen for
     # kunden (telefon, mail, chaufføren så en fuld container ...).
+    if fixed:
+        # 2026-10-19: Oprettet af en fast tømning (se FASTE TØMNINGER).
+        doc["fixed_schedule_id"] = fixed.get("schedule_id") or ""
+        doc["fixed_label"] = (fixed.get("label") or "")[:120]
     if on_behalf:
         doc["on_behalf_company_id"] = on_behalf.get("company_id") or ""
         doc["on_behalf_company_name"] = on_behalf.get("company_name") or ""
@@ -9558,6 +9569,8 @@ async def _create_customer_order(order: StructuredOrderCreate, submitter: dict,
         lng=(picked_plads or plads or {}).get("lng") if (picked_plads or plads) else None
     )
     tour_doc = tour_obj.model_dump()
+    if fixed and not (order.comment or "").strip():
+        tour_doc["remark"] = f"Fast tømning · {fixed.get('label') or ''}".strip(" ·")
     tour_doc.update(_order_tour_route(
         tour_doc["tour_type"], final_address, picked_plads or plads or location, location["name"],
         order.workshop_name, order.workshop_address, order.workshop_phone,
@@ -9571,6 +9584,9 @@ async def _create_customer_order(order: StructuredOrderCreate, submitter: dict,
     # admin-UI'et kan vise det via OrderInfoLine uden et ekstra DB-opslag.
     tour_doc["created_by_name"] = doc.get("created_by_name", "")
     tour_doc["created_by_email"] = doc.get("created_by_email", "")
+    if fixed:
+        tour_doc["fixed_schedule_id"] = doc.get("fixed_schedule_id", "")
+        tour_doc["fixed_label"] = doc.get("fixed_label", "")
     if on_behalf:
         tour_doc["on_behalf_company_name"] = doc.get("on_behalf_company_name", "")
         tour_doc["on_behalf_user_name"] = doc.get("on_behalf_user_name", "")
@@ -17765,15 +17781,10 @@ async def logistics_order_options(location_code: str, plads_name: str = "",
             "loes_enabled": bool(site.get("loes_afhentning_enabled") or pl.get("loes_afhentning_enabled"))}
 
 
-@api_router.get("/logistics/order-defaults")
-async def logistics_order_defaults(location_code: str, material: str, date: str, container: str = "",
-                                   plads_name: str = "", payload: dict = Depends(get_current_user_payload)):
+async def _order_defaults(code: str, material: str, date: str, container: str = "") -> dict:
     """Leveringsadresse og åbningstid for netop den dag - samme kilde som
-    bestillingssiden (containerens låste adresse, ellers kundens kalender) -
-    og åbne bestillinger på containeren, så planlæggeren ser en dobbelt-
-    bestilling før den sendes."""
-    pl, _owner = await _la_customer_site(payload, location_code, plads_name)
-    code = pl.get("location_code") or location_code
+    bestillingssiden: containerens låste adresse, ellers kundens kalender
+    (helligdage og lukkedage). Bruges af "Bestil for kunden" og faste tømninger."""
     ov = await _raw_db.container_overrides.find_one(
         {"location_code": code, "material": material, "container_label": container}, {"_id": 0}) if container else None
     ov = ov or {}
@@ -17792,11 +17803,21 @@ async def logistics_order_defaults(location_code: str, material: str, date: str,
             addr = ov["custom_address"].strip()
     if addr and not name:
         name = await _delivery_name(code, addr)
-    hours_locked = bool(ov.get("locked_hours"))
     return {"address": addr, "delivery_name": name, "locked_address": bool(ov.get("locked_address") and ov.get("custom_address")),
             "open_from": ov.get("open_from") or sched.get("open_from") or "", "open_to": ov.get("open_to") or sched.get("open_to") or "",
-            "locked_hours": hours_locked, "is_closed": bool(sched.get("is_closed")), "holiday_name": sched.get("holiday_name") or "",
-            "container_id": ov.get("custom_container_id") or "", "open_orders": await _open_orders_for(code, material, container)}
+            "locked_hours": bool(ov.get("locked_hours")), "is_closed": bool(sched.get("is_closed")),
+            "holiday_name": sched.get("holiday_name") or "", "container_id": ov.get("custom_container_id") or ""}
+
+
+@api_router.get("/logistics/order-defaults")
+async def logistics_order_defaults(location_code: str, material: str, date: str, container: str = "",
+                                   plads_name: str = "", payload: dict = Depends(get_current_user_payload)):
+    """Leveringsadresse og åbningstid for dagen + åbne bestillinger på
+    containeren, så planlæggeren ser en dobbeltbestilling før den sendes."""
+    pl, _owner = await _la_customer_site(payload, location_code, plads_name)
+    code = pl.get("location_code") or location_code
+    return {**await _order_defaults(code, material, date, container),
+            "open_orders": await _open_orders_for(code, material, container)}
 
 
 @api_router.post("/logistics/customer-orders")
@@ -17916,6 +17937,276 @@ async def logistics_restore_customer_order(order_id: str, body: dict = Body(defa
     await _co_audit(order_id, "restore", {**payload, "name": by_name}, {"status": "cancelled"},
                     {"status": "in_progress" if on_way else "pending", "reason": reason})
     return {"success": True}
+
+
+# =====================================================================
+#   FASTE TØMNINGER (2026-10-19)
+#   Lokationsadmin / kundeadmin sætter en fast tømning op pr. container
+#   ("Container 1 · Pap: hver mandag, uge 14-43"). Serveren laver hver
+#   tømning om til en almindelig bestilling `lead_days` (7) dage før - med
+#   leveringsadressen for netop den dag (kundens kalender), så helligdage og
+#   lukkedage gælder. Medarbejderen kan springe en tømning over (annullér) og
+#   bestille ekstra. Pause/stop fjerner de allerede bestilte, ikke startede
+#   tømninger. Se BESLUTNINGER_2026-10-19.md.
+# =====================================================================
+from datetime import date  # noqa: E402  (faste tømninger regner i hele datoer)
+
+_FIXED_WEEKDAYS = ["Man", "Tir", "Ons", "Tor", "Fre", "Lør", "Søn"]
+_FIXED_LEAD_DAYS = 7
+
+
+class FixedScheduleIn(BaseModel):
+    location_code: str
+    plads_name: str = ""
+    material: str = ""
+    container_number: str = ""
+    tour_type: str = "normal"
+    partner_id: str = ""
+    weekdays: List[int] = Field(default_factory=list)  # 0 = mandag
+    interval_weeks: int = 1
+    start_date: str = ""
+    end_date: str = ""
+    priority: str = "normal"
+    comment: str = ""
+
+
+def _fixed_dates(s: dict, start: date, end: date) -> List[str]:
+    """Datoerne i [start, end] hvor skemaet har en tømning."""
+    wd = {int(x) for x in (s.get("weekdays") or []) if str(x).lstrip("-").isdigit() and 0 <= int(x) <= 6}
+    if not wd or not s.get("start_date"):
+        return []
+    interval = max(1, min(int(s.get("interval_weeks") or 1), 8))
+    sd = date.fromisoformat(s["start_date"][:10])
+    ed = date.fromisoformat(s["end_date"][:10]) if s.get("end_date") else None
+    anchor = sd - timedelta(days=sd.weekday())
+    out, d = [], max(start, sd)
+    while d <= end and (ed is None or d <= ed):
+        if d.weekday() in wd and ((d - anchor).days // 7) % interval == 0:
+            out.append(d.isoformat())
+        d += timedelta(days=1)
+    return out
+
+
+def _fixed_text(s: dict) -> str:
+    days = ", ".join(_FIXED_WEEKDAYS[i] for i in sorted(int(x) for x in (s.get("weekdays") or [])))
+    every = {1: "hver uge", 2: "hver 2. uge", 3: "hver 3. uge", 4: "hver 4. uge"}.get(int(s.get("interval_weeks") or 1), "")
+    dk = lambda x: f"{x[8:10]}.{x[5:7]}.{x[0:4]}" if x and len(x) >= 10 else (x or "")  # noqa: E731
+    per = (f" · fra {dk(s['start_date'])}" + (f" til {dk(s['end_date'])}" if s.get("end_date") else "")) if s.get("start_date") else ""
+    return f"{days} · {every}{per}"
+
+
+def _dk_today() -> date:
+    return date.fromisoformat(get_dk_date_str())
+
+
+async def _fixed_generate(s: dict) -> List[dict]:
+    """Opret de tømninger der falder inden for de næste `lead_days` dage.
+    Hver (skema, dato) oprettes højst én gang - også med flere app-instanser
+    (unikt indeks på fixed_schedule_runs). En annulleret ("sprunget over")
+    tømning oprettes ikke igen."""
+    if not s.get("active", True) or s.get("paused"):
+        return []
+    today = _dk_today()
+    lead = max(1, min(int(s.get("lead_days") or _FIXED_LEAD_DAYS), 21))
+    results = []
+    for d in _fixed_dates(s, today, today + timedelta(days=lead)):
+        try:
+            await _raw_db.fixed_schedule_runs.insert_one({"schedule_id": s["id"], "date": d, "status": "pending",
+                                                          "at": datetime.now(timezone.utc).isoformat()})
+        except DuplicateKeyError:
+            continue
+        run = {"date": d}
+        try:
+            dfl = await _order_defaults(s["location_code"], s["material"], d, s.get("container_number") or "")
+            needs_addr = s.get("tour_type", "normal") == "normal"
+            if needs_addr and dfl.get("is_closed"):
+                run.update(status="skipped_closed", note=f"Leveringsstedet er lukket{(' (' + dfl['holiday_name'] + ')') if dfl.get('holiday_name') else ''}")
+            elif needs_addr and not dfl.get("address"):
+                run.update(status="error", note="Ingen leveringsadresse i kundens kalender for dagen")
+            else:
+                order = StructuredOrderCreate(
+                    location_code=s["location_code"], material=s["material"], container_number=s.get("container_number") or "",
+                    priority=s.get("priority") or "normal", comment=s.get("comment") or "", tour_type=s.get("tour_type") or "normal",
+                    custom_address=dfl.get("address") if needs_addr else "", custom_container_id=dfl.get("container_id") or "",
+                    order_date=d, open_from=dfl.get("open_from") if needs_addr else "", open_to=dfl.get("open_to") if needs_addr else "",
+                    plads_name=s.get("plads_name") or "", partner_id=s.get("partner_id") or "")
+                tok = current_company_id.set(SUPER_ADMIN_BYPASS)
+                try:
+                    res = await _create_customer_order(order, {"id": "", "name": "Fast tømning", "email": ""},
+                                                       fixed={"schedule_id": s["id"], "label": _fixed_text(s)})
+                finally:
+                    current_company_id.reset(tok)
+                run.update(status="created", order_id=res["order_id"], tour_id=res["tour_id"])
+        except HTTPException as e:
+            run.update(status="error", note=(e.detail.get("message") if isinstance(e.detail, dict) else str(e.detail))[:200])
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Fast tømning {s.get('id')} {d}: {e}")
+            run.update(status="error", note="Uventet fejl")
+        await _raw_db.fixed_schedule_runs.update_one({"schedule_id": s["id"], "date": d}, {"$set": run})
+        results.append(run)
+    if results:
+        await _raw_db.fixed_schedules.update_one({"id": s["id"]}, {"$set": {"last_run_at": datetime.now(timezone.utc).isoformat()}})
+    return results
+
+
+async def _fixed_generate_all():
+    try:
+        await _raw_db.fixed_schedule_runs.create_index([("schedule_id", 1), ("date", 1)], unique=True)
+        async for s in _raw_db.fixed_schedules.find({"active": True, "paused": {"$ne": True}}, {"_id": 0}):
+            await _fixed_generate(s)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Faste tømninger: {e}")
+
+
+async def fixed_schedule_task():
+    """Hver time: opret de faste tømninger der nu er inden for 7 dage."""
+    await async_lib.sleep(20)
+    while True:
+        await _fixed_generate_all()
+        await async_lib.sleep(3600)
+
+
+async def _fixed_cancel_future(s: dict, reason: str, keep_dates: Optional[set] = None) -> int:
+    """Annullér skemaets bestilte, ikke startede tømninger fra i dag (bortset
+    fra `keep_dates`), og frigør datoerne så de kan oprettes igen senere."""
+    n = 0
+    today = get_dk_date_str()
+    async for o in _raw_db.container_orders.find({"fixed_schedule_id": s["id"], "order_date": {"$gte": today},
+                                                  "status": {"$in": ["pending", "", None]}}, {"_id": 0}):
+        if keep_dates and o.get("order_date") in keep_dates:
+            continue
+        try:
+            await _cancel_order(o, {"role": "system", "name": "Fast tømning", "sub": ""}, by_logistics=False, reason=reason)
+            await _raw_db.fixed_schedule_runs.delete_one({"schedule_id": s["id"], "date": o.get("order_date")})
+            n += 1
+        except HTTPException:
+            pass
+    return n
+
+
+async def _fixed_access(payload: dict, schedule_id: str) -> dict:
+    s = await _raw_db.fixed_schedules.find_one({"id": schedule_id}, {"_id": 0})
+    if not s:
+        raise HTTPException(status_code=404, detail="Fast tømning ikke fundet")
+    await _resolve_plads_for_org(s["location_code"], payload)
+    return s
+
+
+async def _fixed_validate(body: FixedScheduleIn, plads: dict) -> dict:
+    tt = (body.tour_type or "normal").strip()
+    if tt not in ("normal", "flyt"):
+        raise HTTPException(status_code=400, detail="En fast tømning er 'Afhent container' eller 'Byt container'")
+    wd = sorted({int(x) for x in body.weekdays if 0 <= int(x) <= 6})
+    if not wd:
+        raise HTTPException(status_code=400, detail="Vælg mindst én ugedag")
+    if not body.material.strip() or not body.container_number.strip():
+        raise HTTPException(status_code=400, detail="Vælg materiale og container")
+    start = normalize_date(body.start_date) if body.start_date else get_dk_date_str()
+    end = normalize_date(body.end_date) if body.end_date else ""
+    if end and end < start:
+        raise HTTPException(status_code=400, detail="Slutdatoen er før startdatoen")
+    partners = [p for p in (plads.get("assigned_logistics_company_ids") or []) if p]
+    partner = (body.partner_id or "").strip() or (partners[0] if len(partners) == 1 else "")
+    if not partner or partner not in partners:
+        raise HTTPException(status_code=400, detail="Vælg hvilken logistikpartner der skal køre tømningerne")
+    return {"tour_type": tt, "weekdays": wd, "interval_weeks": max(1, min(int(body.interval_weeks or 1), 4)),
+            "start_date": start, "end_date": end, "partner_id": partner,
+            "priority": body.priority if body.priority in ("haster", "normal", "senere") else "normal",
+            "comment": (body.comment or "").strip()[:300]}
+
+
+async def _fixed_out(s: dict) -> dict:
+    today = _dk_today()
+    partner = await _raw_db.companies.find_one({"id": s.get("partner_id")}, {"_id": 0, "name": 1}) or {}
+    upcoming = await _raw_db.container_orders.find(
+        {"fixed_schedule_id": s["id"], "order_date": {"$gte": today.isoformat()}},
+        {"_id": 0, "id": 1, "order_date": 1, "status": 1, "on_way": 1}).sort("order_date", 1).to_list(20)
+    runs = await _raw_db.fixed_schedule_runs.find(
+        {"schedule_id": s["id"], "status": {"$in": ["skipped_closed", "error"]}}, {"_id": 0}).sort("date", -1).to_list(5)
+    nxt = _fixed_dates(s, today, today + timedelta(days=120))[:6] if s.get("active", True) and not s.get("paused") else []
+    return {**s, "text": _fixed_text(s), "partner_name": partner.get("name") or "", "next_dates": nxt,
+            "upcoming_orders": upcoming, "problems": runs}
+
+
+@org_router.get("/fixed-schedules")
+async def org_list_fixed_schedules(location_code: str, payload: dict = Depends(get_current_user_payload)):
+    await _resolve_plads_for_org(location_code, payload)
+    items = await _raw_db.fixed_schedules.find({"location_code": location_code, "active": True}, {"_id": 0}).sort("created_at", 1).to_list(500)
+    return [await _fixed_out(s) for s in items]
+
+
+@org_router.post("/fixed-schedules")
+async def org_create_fixed_schedule(body: FixedScheduleIn, payload: dict = Depends(get_current_user_payload)):
+    ctx = await _resolve_plads_for_org(body.location_code, payload)
+    pl, caller = ctx["plads"], ctx["caller"]
+    v = await _fixed_validate(body, pl)
+    dup = await _raw_db.fixed_schedules.find_one({"location_code": body.location_code, "material": body.material.strip(),
+                                                  "container_number": body.container_number.strip(), "tour_type": v["tour_type"],
+                                                  "active": True}, {"_id": 0, "id": 1})
+    if dup:
+        raise HTTPException(status_code=409, detail="Containeren har allerede en fast tømning af den type - ret den i stedet")
+    s = {"id": str(uuid.uuid4()), "company_id": pl.get("company_id"), "location_code": body.location_code,
+         "plads_name": body.plads_name or pl.get("name") or "", "material": body.material.strip(),
+         "container_number": body.container_number.strip(), **v, "lead_days": _FIXED_LEAD_DAYS, "active": True, "paused": False,
+         "created_by_id": caller.get("id"), "created_by_name": caller.get("name") or caller.get("email") or "",
+         "created_at": datetime.now(timezone.utc).isoformat()}
+    await _raw_db.fixed_schedules.insert_one(dict(s))
+    await _raw_db.fixed_schedule_runs.create_index([("schedule_id", 1), ("date", 1)], unique=True)
+    created = await _fixed_generate(s)
+    return {**await _fixed_out(s), "generated": created}
+
+
+@org_router.put("/fixed-schedules/{schedule_id}")
+async def org_update_fixed_schedule(schedule_id: str, body: FixedScheduleIn, payload: dict = Depends(get_current_user_payload)):
+    """Ugedage, interval, periode, prioritet og kommentar kan rettes. Plads,
+    materiale, container og opgave er selve tømningen - stop og opret en ny.
+    Allerede bestilte tømninger på datoer der ikke længere passer, annulleres;
+    de øvrige får den nye prioritet og kommentar."""
+    s = await _fixed_access(payload, schedule_id)
+    pl = await _raw_db.plads.find_one({"location_code": s["location_code"]}, {"_id": 0}) or {}
+    v = await _fixed_validate(FixedScheduleIn(**{**body.model_dump(), "location_code": s["location_code"], "material": s["material"],
+                                                 "container_number": s["container_number"], "tour_type": s["tour_type"]}), pl)
+    v["tour_type"] = s["tour_type"]
+    new = {**s, **v, "updated_at": datetime.now(timezone.utc).isoformat()}
+    await _raw_db.fixed_schedules.update_one({"id": schedule_id}, {"$set": {k: new[k] for k in list(v) + ["updated_at"]}})
+    today = _dk_today()
+    keep = set(_fixed_dates(new, today, today + timedelta(days=60)))
+    cancelled = await _fixed_cancel_future(new, "Den faste tømning er ændret", keep_dates=keep)
+    tour_prio = {"haster": "urgent", "senere": "low"}.get(new["priority"], "normal")
+    async for o in _raw_db.container_orders.find({"fixed_schedule_id": schedule_id, "order_date": {"$gte": today.isoformat()},
+                                                  "status": {"$in": ["pending", "", None]}}, {"_id": 0, "id": 1, "tour_id": 1}):
+        await _raw_db.container_orders.update_one({"id": o["id"]}, {"$set": {"priority": new["priority"], "comment": new["comment"]}})
+        if o.get("tour_id"):
+            await _raw_db.tours.update_one({"id": o["tour_id"]}, {"$set": {
+                "priority": tour_prio, "remark": f"Kundeordre: {new['comment']}" if new["comment"] else "Fast tømning",
+                "fixed_label": _fixed_text(new)}})
+    created = await _fixed_generate(new)
+    return {**await _fixed_out(new), "cancelled": cancelled, "generated": created}
+
+
+@org_router.post("/fixed-schedules/{schedule_id}/pause")
+async def org_pause_fixed_schedule(schedule_id: str, payload: dict = Depends(get_current_user_payload)):
+    s = await _fixed_access(payload, schedule_id)
+    await _raw_db.fixed_schedules.update_one({"id": schedule_id}, {"$set": {"paused": True}})
+    n = await _fixed_cancel_future(s, "Den faste tømning er sat på pause")
+    return {"success": True, "cancelled": n}
+
+
+@org_router.post("/fixed-schedules/{schedule_id}/resume")
+async def org_resume_fixed_schedule(schedule_id: str, payload: dict = Depends(get_current_user_payload)):
+    s = await _fixed_access(payload, schedule_id)
+    await _raw_db.fixed_schedules.update_one({"id": schedule_id}, {"$set": {"paused": False}})
+    created = await _fixed_generate({**s, "paused": False})
+    return {"success": True, "generated": created}
+
+
+@org_router.delete("/fixed-schedules/{schedule_id}")
+async def org_stop_fixed_schedule(schedule_id: str, payload: dict = Depends(get_current_user_payload)):
+    s = await _fixed_access(payload, schedule_id)
+    await _raw_db.fixed_schedules.update_one({"id": schedule_id}, {"$set": {
+        "active": False, "stopped_at": datetime.now(timezone.utc).isoformat()}})
+    n = await _fixed_cancel_future(s, "Den faste tømning er stoppet")
+    return {"success": True, "cancelled": n}
 
 
 # =====================================================================
@@ -19866,6 +20157,7 @@ async def startup_db_client():
         await _migrate_manual_customer_tours_to_orders()
         await _migrate_tour_routes()
         await _migrate_driver_matches_claimer()
+        async_lib.create_task(fixed_schedule_task())
     except Exception as e:
         logger.warning(f"Startup tasks warning: {e}")
 

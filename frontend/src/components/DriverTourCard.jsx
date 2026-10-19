@@ -14,43 +14,9 @@ import { TOUR_TYPE_LABEL, isHaster, openHours, capacityText, daysLate, routeOf, 
  * haster) -> HVOR (adresse stort) -> HVAD (materiale/indhold, container)
  * -> EN tydelig hovedknap. Store trykflader (min. 48 px), ingen hover.
  */
-/**
- * 2026-10-19: Kort-knappen. Har turen to steder (fx hent på pladsen og aflever
- * på HCS, eller værkstedet og pladsen), vælger chaufføren her i køreorden -
- * så knappen aldrig sender ham til det forkerte sted. Ét sted (Byt container)
- * eller næste stop på en stop-tur åbner Google Maps direkte.
- */
-export function NavChooser({ legs, onClose }) {
-  if (!legs) return null;
-  return createPortal(
-    <div className="fixed inset-0 z-[90] flex items-end justify-center" data-testid="nav-chooser">
-      <div className="absolute inset-0 bg-slate-900/50" onClick={onClose} />
-      <div className="relative w-full max-w-md bg-white rounded-t-2xl shadow-2xl p-4 space-y-2" style={{ paddingBottom: "max(16px, env(safe-area-inset-bottom))" }}>
-        <div className="flex items-center justify-between">
-          <h3 className="text-base font-bold text-slate-900">Hvor skal du hen?</h3>
-          <button type="button" onClick={onClose} className="p-2 -mr-2 rounded-lg text-slate-500" aria-label="Luk"><X className="w-5 h-5" /></button>
-        </div>
-        {legs.map((l, i) => (
-          <a key={i} href={navUrl(l.address)} target="_blank" rel="noreferrer" onClick={onClose} data-testid={`nav-leg-${i}`}
-            className="flex items-center gap-3 rounded-xl border border-slate-200 px-3 py-3 active:bg-slate-50 min-h-[60px]">
-            <span className="w-8 h-8 shrink-0 rounded-full bg-slate-900 text-white text-sm font-bold flex items-center justify-center">{i + 1}</span>
-            <span className="min-w-0 flex-1">
-              <span className="block text-[11px] font-bold uppercase tracking-wide text-slate-500">{l.label}{l.name ? ` · ${l.name}` : ""}</span>
-              <span className="block text-[15px] font-bold text-slate-900 break-words">{l.address}</span>
-            </span>
-            <Navigation className="w-5 h-5 text-slate-500 shrink-0" />
-          </a>
-        ))}
-      </div>
-    </div>,
-    document.body
-  );
-}
-
 export default function DriverTourCard({ tour, index, routeInfo, unread = 0, mine = true, onStart, onFinish, onOpen, onChat }) {
   const haster = isHaster(tour);
   const oh = openHours(tour);
-  const [navLegs, setNavLegs] = useState(null);
   const late = daysLate(tour);
   const done = !!tour.completed;
   const onWay = !!tour.on_way && !done;
@@ -69,12 +35,14 @@ export default function DriverTourCard({ tour, index, routeInfo, unread = 0, min
   // værksted: værkstedet -> pladsen. Kortets store adresse er første stop.
   const workshop = (tour.tour_type === "vaerksted" || tour.tour_type === "afhent_vaerksted") && tour.workshop_address
     ? { name: tour.workshop_name || "Værksted", phone: tour.workshop_phone || "", pickup: tour.tour_type === "afhent_vaerksted" } : null;
-  // 2026-10-19: Kortet følger turens rute (se routeOf): næste stop på en
-  // stop-tur, ellers ét sted direkte eller et valg mellem stederne.
+  // 2026-10-19: Ruten står på kortet i køreorden - hvert sted med sin egen
+  // "Kør"-knap. Et kort-ikon uden tekst sagde ikke hvor det førte hen, så
+  // chaufføren kunne køre til leveringsadressen før pladsen.
   const legs = routeOf(tour);
-  const navTarget = nextStop?.address || (legs.length === 1 ? legs[0].address : "") || (!legs.length ? (tour.address || tour.facility) : "");
   const cancelled = !!tour.cancelled && !tour.completed;
-  const deliveryName = tour.order_id && tour.delivery_name && (tour.tour_type === "normal" || tour.tour_type === "loes_afhentning") ? tour.delivery_name : "";
+  const routeRows = stops.length
+    ? (nextStop ? [] : [{ label: `1. stop af ${stops.length} · ${stops[0].kind === "delivery" ? "Aflevering" : "Afhentning"}`, name: "", address: stops[0].address }])
+    : (legs.length ? legs : [{ label: "Adresse", name: "", address: tour.address || tour.facility || "" }].filter(l => l.address));
   const cap = tour.tour_type === "loes_afhentning"
     ? (tour.loose_estimated_count ? `${tour.loose_estimated_count} containere` : "")
     : capacityText(tour);
@@ -109,18 +77,18 @@ export default function DriverTourCard({ tour, index, routeInfo, unread = 0, min
           {tour.tour_number && <span className="ml-auto text-[11px] font-mono text-slate-400">{tour.tour_number}</span>}
         </div>
 
-        <div className="mt-2 flex items-start gap-2">
-          <div className="min-w-0 flex-1">
-            {workshop && <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500">{workshop.pickup ? `Hent på ${workshop.name}` : "Hent på pladsen"}</p>}
-            {!workshop && deliveryName && <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500" data-testid={`tour-delivery-name-${tour.id}`}>Aflever · {deliveryName}</p>}
-            <p className="text-[17px] leading-snug font-extrabold text-slate-900 break-words">{street}</p>
-            {town && <p className="text-[13px] text-slate-500">{town}</p>}
-            {stops.length > 0 ? (
-              <p className="text-[13px] font-semibold text-slate-600 mt-1">{stops.length} stop{onWay || done ? ` · ${stopsDoneN} udført` : ""} · slut: {stops[stops.length - 1]?.address}</p>
-            ) : delivery && <p className="text-[13px] text-slate-600 mt-1" data-testid={`tour-delivery-${tour.id}`}>→ {workshop ? (workshop.pickup ? "Pladsen: " : `${workshop.name}: `) : ""}{delivery}</p>}
+        {(done || cancelled) ? (
+          <div className="mt-2 flex items-start gap-2">
+            <div className="min-w-0 flex-1">
+              <p className="text-[17px] leading-snug font-extrabold text-slate-900 break-words">{street}</p>
+              {town && <p className="text-[13px] text-slate-500">{town}</p>}
+              {delivery && <p className="text-[13px] text-slate-600 mt-1" data-testid={`tour-delivery-${tour.id}`}>→ {delivery}</p>}
+            </div>
+            <ChevronRight className="w-5 h-5 text-slate-300 shrink-0 mt-1" />
           </div>
-          <ChevronRight className="w-5 h-5 text-slate-300 shrink-0 mt-1" />
-        </div>
+        ) : stops.length > 0 && (
+          <p className="mt-2 text-[13px] font-semibold text-slate-600">{stops.length} stop{onWay ? ` · ${stopsDoneN} udført` : ""} · slut: {stops[stops.length - 1]?.address}</p>
+        )}
 
         <div className="mt-2.5 flex items-center gap-x-3 gap-y-1 flex-wrap text-[13px]">
           {lines.length > 1 || (lines.length === 1 && Number(tour.trailer_count) > 0) ? (
@@ -154,6 +122,24 @@ export default function DriverTourCard({ tour, index, routeInfo, unread = 0, min
         )}
       </button>
 
+      {!done && !cancelled && routeRows.length > 0 && (
+        <div className="mx-4 mb-3 rounded-xl border border-slate-200 divide-y divide-slate-100" data-testid={`tour-route-${tour.id}`}>
+          {routeRows.map((l, i) => (
+            <div key={i} className="flex items-center gap-2.5 px-3 py-2.5">
+              {routeRows.length > 1 && <span className="w-6 h-6 shrink-0 rounded-full bg-slate-900 text-white text-[12px] font-bold flex items-center justify-center">{i + 1}</span>}
+              <button type="button" onClick={() => onOpen(tour)} className="min-w-0 flex-1 text-left">
+                <span className="block text-[11px] font-bold uppercase tracking-wide text-slate-500 break-words">{l.label}{l.name ? ` · ${l.name}` : ""}</span>
+                <span className={`block break-words ${i === 0 ? "text-[17px] font-extrabold text-slate-900" : "text-[15px] font-bold text-slate-800"}`}>{l.address}</span>
+              </button>
+              <a href={navUrl(l.address)} target="_blank" rel="noreferrer" data-testid={`tour-nav-${tour.id}-${i}`}
+                aria-label={`Kør til ${l.name || l.address}`}
+                className="shrink-0 min-h-[44px] px-3 rounded-xl border border-slate-200 bg-white text-slate-700 text-[13px] font-bold inline-flex items-center gap-1.5 active:bg-slate-50">
+                <Navigation className="w-4 h-4" /> Kør
+              </a>
+            </div>
+          ))}
+        </div>
+      )}
       {workshop && workshop.phone && !done && (
         <div className="mx-4 mb-3 flex items-center justify-between gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2" data-testid={`tour-workshop-${tour.id}`}>
           <span className="text-[13px] text-slate-700 min-w-0 truncate"><b>{workshop.name}</b> · {tour.workshop_address}</span>
@@ -173,6 +159,8 @@ export default function DriverTourCard({ tour, index, routeInfo, unread = 0, min
             <a href={`tel:${nextStop.contact_phone.replace(/\s/g, "")}`} aria-label={`Ring til ${nextStop.contact_name || "kontakt"}`}
               className="min-h-[44px] min-w-[44px] rounded-xl border border-emerald-200 bg-white text-emerald-700 inline-flex items-center justify-center"><Phone className="w-5 h-5" /></a>
           )}
+          <a href={navUrl(nextStop.address)} target="_blank" rel="noreferrer" data-testid={`tour-nav-next-${tour.id}`} aria-label="Kør til næste stop"
+            className="shrink-0 min-h-[44px] px-3 rounded-xl border border-slate-200 bg-white text-slate-700 text-[13px] font-bold inline-flex items-center gap-1.5"><Navigation className="w-4 h-4" /> Kør</a>
         </div>
       )}
 
@@ -197,19 +185,6 @@ export default function DriverTourCard({ tour, index, routeInfo, unread = 0, min
             </button>
           )
         )}
-        {!done && !cancelled && navTarget && (
-          <a href={navUrl(navTarget)} target="_blank" rel="noreferrer" data-testid={`maps-btn-${tour.id}`} aria-label={nextStop ? "Navigér til næste stop" : "Åbn kort"}
-            className="min-h-[50px] min-w-[50px] rounded-xl border border-slate-200 text-slate-700 inline-flex items-center justify-center active:bg-slate-50">
-            <Navigation className="w-5 h-5" />
-          </a>
-        )}
-        {!done && !cancelled && !navTarget && legs.length > 1 && (
-          <button type="button" onClick={() => setNavLegs(legs)} data-testid={`maps-btn-${tour.id}`} aria-label="Vælg hvor du skal hen"
-            className="min-h-[50px] min-w-[50px] rounded-xl border border-slate-200 text-slate-700 inline-flex items-center justify-center active:bg-slate-50">
-            <Navigation className="w-5 h-5" />
-          </button>
-        )}
-        <NavChooser legs={navLegs} onClose={() => setNavLegs(null)} />
         <button type="button" onClick={() => onChat(tour)} data-testid={`tour-chat-btn-${tour.id}`} aria-label="Beskeder"
           className={`relative min-h-[50px] min-w-[50px] rounded-xl border inline-flex items-center justify-center gap-2 font-semibold text-sm ${done ? "flex-1" : ""} ${
             unread ? "border-emerald-300 bg-emerald-50 text-emerald-800" : "border-slate-200 text-slate-700 active:bg-slate-50"}`}>

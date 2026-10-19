@@ -1627,6 +1627,35 @@ const CustomerOrderPage = ({ locationCode, pladsName = "", prefillAddress = "", 
     setAddressEditable(false);
   };
 
+  // 2026-10-19: "Bestil igen" - udfyld bestillingen som en tidligere
+  // (materiale, container, opgave, prioritet, kommentar, værksted); medarbejderen
+  // vælger dato og bekræfter som altid.
+  const reorder = async (o) => {
+    resetOrder();
+    setView("order");
+    try {
+      const pq = partnerId ? `&partner_id=${encodeURIComponent(partnerId)}` : "";
+      const res = await axios.get(`${API}/locations/${locationCode}/containers?material=${encodeURIComponent(o.material)}${pq}`);
+      const items = res.data.containers || [];
+      setSelectedMaterial(o.material);
+      setContainers(items);
+      refreshBlockedByContainer(items.map(c => (c.label || c.number || "").trim()), o.material);
+      const c = items.find(x => (x.label || "") === o.container_number);
+      if (c) handleContainerSelect(c); else setStep(2);
+      setTourType(o.tour_type || "normal");
+      setPriority(o.priority || "normal");
+      setComment(o.comment || "");
+      if (o.workshop_name) {
+        setWorkshopId(o.workshop_id || ""); setWorkshopName(o.workshop_name || "");
+        setWorkshopAddress(o.workshop_address || ""); setWorkshopPhone(o.workshop_phone || "");
+      }
+      if (c) toast.success("Udfyldt som sidst - vælg dato og bekræft");
+      else toast.message(`"${o.container_number}" er ikke i containerlisten - vælg containeren`);
+    } catch (e) {
+      toast.error("Kunne ikke udfylde bestillingen");
+    }
+  };
+
   // Add material to this location's list permanently.
   // Brugerkrav 2026-06-15 (Krav 5 strict separation): Når en partner er valgt,
   // sendes `partner_id` med så materialet KUN registreres under den partners
@@ -1803,8 +1832,9 @@ const CustomerOrderPage = ({ locationCode, pladsName = "", prefillAddress = "", 
         (me && o.created_by_user_id === me) ||
         (myEmail && (o.created_by_email || "").toLowerCase() === myEmail) ||
         (!o.created_by_user_id && !o.created_by_email) ||
-        // 2026-10-19: Bestilt af logistikfirmaet for pladsen - alle på pladsen skal se den.
-        !!o.on_behalf_company_id
+        // 2026-10-19: Bestilt af logistikfirmaet for pladsen, eller en fast
+        // tømning - alle på pladsen skal se den.
+        !!o.on_behalf_company_id || !!o.fixed_schedule_id
       );
     }
     // "Afventende" = ikke fuldført (dvs. afventer + på vej + taget).
@@ -3953,6 +3983,7 @@ const CustomerOrderPage = ({ locationCode, pladsName = "", prefillAddress = "", 
                       {/* Status badge - mobil: shrink-0 så material+container får plads.
                           Desktop: flex-1 så badge højre-justeres pænt. */}
                       <div className="flex-shrink-0 sm:flex-1 flex items-center justify-end gap-2 min-w-0">
+                        {order.fixed_schedule_id && <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-sky-500/20 text-sky-300" title={order.fixed_label || "Fast tømning"} data-testid={`order-fixed-${idx}`}>Fast</span>}
                         <span className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-${statusColor}-500/20 text-${statusColor}-300`}>{statusLabel}</span>
                         <ChevronDown className={`w-4 h-4 text-slate-500 flex-shrink-0 transition-transform ${isExpanded ? "rotate-180" : ""}`} />
                       </div>
@@ -4052,12 +4083,7 @@ const CustomerOrderPage = ({ locationCode, pladsName = "", prefillAddress = "", 
                               <OrderInfoLine order={order} dark testid={`order-info-line-${idx}`} />
                             )}
                           </div>
-                          {/* "Bestilt af X for jer" står i info-linjen ovenfor (OrderInfoLine). */}
-                          {!order.on_behalf_company_name && !isEstimat && historyScope === "all" && (order.created_by_name || order.created_by_email) && (
-                            <p className="text-emerald-400 text-[11px] mt-1" data-testid={`order-created-by-${idx}`}>
-                              Bestilt af {order.created_by_name || order.created_by_email}
-                            </p>
-                          )}
+                          {/* "Bestilt af" står i info-linjen ovenfor (OrderInfoLine) - ikke to gange. */}
                           {isCancelled && (
                             <p className="text-slate-400 text-[11px] mt-1" data-testid={`order-cancelled-${idx}`}>
                               Annulleret{order.cancelled_by_logistics ? " af logistikfirmaet" : order.cancelled_by_name ? ` af ${order.cancelled_by_name}` : ""}
@@ -4253,7 +4279,14 @@ const CustomerOrderPage = ({ locationCode, pladsName = "", prefillAddress = "", 
                         <button onClick={() => setConfirmDeleteOrder(order)}
                           className="text-[11px] inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 font-bold"
                           data-testid={`order-cancel-btn-${idx}`}>
-                          <XCircle className="w-3 h-3" /> Annullér
+                          <XCircle className="w-3 h-3" /> {order.fixed_schedule_id ? "Spring over" : "Annullér"}
+                        </button>
+                      )}
+                      {!isEstimat && !isCustom && (order.tour_type || "normal") !== "loes_afhentning" && (
+                        <button onClick={() => reorder(order)}
+                          className="text-[11px] inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-orange-500/20 hover:bg-orange-500/30 text-orange-300 font-bold"
+                          data-testid={`order-reorder-btn-${idx}`}>
+                          <RefreshCw className="w-3 h-3" /> Bestil igen
                         </button>
                       )}
                       {!canEdit && !isCancelled && !order.completed && (
@@ -4877,8 +4910,8 @@ const OrderCancelConfirmModal = ({ order, onCancel, onDeleted }) => {
   const doCancel = async () => {
     setBusy(true);
     try {
-      await axios.post(`${API}/customer-orders/${order.id}/cancel`, { confirm_on_way: onWay });
-      toast.success(onWay ? "Bestilling annulleret - chaufføren har fået besked" : "Bestilling annulleret");
+      await axios.post(`${API}/customer-orders/${order.id}/cancel`, { confirm_on_way: onWay, ...(order.fixed_schedule_id ? { reason: "Sprunget over" } : {}) });
+      toast.success(onWay ? "Bestilling annulleret - chaufføren har fået besked" : order.fixed_schedule_id ? "Tømningen er sprunget over - den faste tømning fortsætter næste gang" : "Bestilling annulleret");
       onDeleted();
     } catch (e) {
       const d = e?.response?.data?.detail;
@@ -4895,7 +4928,7 @@ const OrderCancelConfirmModal = ({ order, onCancel, onDeleted }) => {
           <div className="w-14 h-14 mx-auto mb-4 rounded-full bg-amber-500/10 ring-8 ring-inset ring-amber-500/30 flex items-center justify-center">
             <AlertTriangle className="w-7 h-7 text-amber-400" />
           </div>
-          <h3 className="text-lg font-bold text-white text-center mb-2">Annullér bestilling?</h3>
+          <h3 className="text-lg font-bold text-white text-center mb-2">{order.fixed_schedule_id ? "Spring tømningen over?" : "Annullér bestilling?"}</h3>
           <p className="text-sm text-slate-300 text-center">
             <span className="font-bold">{order.material}</span>{order.tour_type === "loes_afhentning" ? <span className="text-amber-300"> · Løs afhentning</span> : (order.custom_container_id || order.container_id ? <> · {order.custom_container_id || order.container_id}</> : null)}
             <br />
@@ -4908,7 +4941,9 @@ const OrderCancelConfirmModal = ({ order, onCancel, onDeleted }) => {
               </span>
             )}
             <span className="text-slate-400 text-xs">
-              Bestillingen kan ikke genåbnes. Hvis du fortryder skal du oprette en ny bestilling.
+              {order.fixed_schedule_id
+                ? "Kun denne dag springes over - den faste tømning fortsætter som normalt næste gang."
+                : "Bestillingen kan ikke genåbnes. Hvis du fortryder skal du oprette en ny bestilling."}
             </span>
           </p>
         </div>

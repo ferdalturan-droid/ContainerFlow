@@ -1,4 +1,4 @@
-"""Kør end-to-end-flows mod den lokale app. Se _e2e.py for hvordan."""
+"""Kør end-to-end-flows i testens egen database og app: ./scripts/e2e.sh (se _e2e.py)."""
 import importlib
 import os
 import sys
@@ -6,11 +6,13 @@ import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _e2e import RESULTS  # noqa: E402
+import _fixtures  # noqa: E402
 
-FLOWS = ["b2b", "ownership", "workshop", "goods", "pricing", "stops", "finish", "time", "assign", "security", "tiers", "behalf"]
+FLOWS = ["b2b", "ownership", "workshop", "goods", "pricing", "stops", "finish", "time", "assign", "security", "tiers", "behalf", "fixed"]
 
 if __name__ == "__main__":
     wanted = sys.argv[1:] or FLOWS
+    _fixtures.ensure()
     for name in wanted:
         print(f"== {name}")
         try:

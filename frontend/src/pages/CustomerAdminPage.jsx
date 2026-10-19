@@ -6,8 +6,9 @@ import { saveAs } from "file-saver";
 import {
   Building, MapPin, Users, Truck, Plus, Trash2, X, Check, Loader2, Mail, Edit2,
   LogOut, Link2, Link2Off, BarChart3, Wrench, Tags, Save, Phone, MessageSquare,
-  FileSpreadsheet, FileDown, Leaf, Menu,
+  FileSpreadsheet, FileDown, Leaf, Menu, CalendarClock,
 } from "lucide-react";
+import FixedSchedulesTab from "./FixedSchedulesTab";
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { useAuth } from "../auth/AuthContext";
 import { API, formatApiError } from "../auth/api";
@@ -28,6 +29,7 @@ export default function CustomerAdminPage() {
     { id: "groups",     label: "Lokationsgrupper", icon: Tags },
     { id: "admins",     label: "Tilføj location admin", icon: Users },
     { id: "workshops",  label: "Værksteder", icon: Wrench },
+    { id: "fixed",      label: "Faste tømninger", icon: CalendarClock },
     { id: "co2",        label: "CO2-typer", icon: Leaf },
     { id: "partners",   label: "Logistik-partnere", icon: Truck },
     { id: "report",     label: "Rapport", icon: BarChart3 },
@@ -142,6 +144,7 @@ export default function CustomerAdminPage() {
         {tab === "groups" && <LocationGroupsTab />}
         {tab === "admins" && <LocationAdminsTab />}
         {tab === "workshops" && <WorkshopsTab />}
+        {tab === "fixed" && <FixedSchedulesTab />}
         {tab === "co2" && <CO2TypesTab />}
         {tab === "partners" && <PartnersTab />}
         {tab === "report" && <ReportTab />}

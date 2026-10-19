@@ -4,6 +4,7 @@ import "@/index.css";
 import App from "@/App";
 import { Toaster } from "sonner";
 import { AuthProvider } from "@/auth/AuthContext";
+import UpdateBanner from "@/components/UpdateBanner";
 
 const root = ReactDOM.createRoot(document.getElementById("root"));
 root.render(
@@ -15,6 +16,7 @@ root.render(
           because each Sonner portal mounts/unmounts when routes swap.
           Pr. 2026-06-15: ONE Toaster på root-niveau. */}
       <Toaster position="top-right" richColors />
+      <UpdateBanner />
     </AuthProvider>
   </React.StrictMode>,
 );

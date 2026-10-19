@@ -4364,3 +4364,13 @@ Bestillingshistorik fremgår nu som en kompakt liste i stedet for store kort, s�
 - **Route:** `routeOf` in tourHelpers is used by the driver's map chooser, the driver panel and the planner's map. Tours have `plads_address` and `delivery_name`.
 - **Partner:** trailer count is now core. Premium-only UI and pricing options are hidden. /import-argo is super-admin only.
 - **Security:** the customer roles' PUT /tours hole is closed (commit 0fa5e79).
+
+- **Fixed schedules (faste tømninger):**
+  - Data lives in the `fixed_schedules` and `fixed_schedule_runs` collections (unique on schedule_id + date).
+  - Endpoints: /org/fixed-schedules (GET, POST, PUT, pause, resume, DELETE).
+  - An hourly task, `fixed_schedule_task`, creates each occurrence as a normal order 7 days ahead via `_create_customer_order(fixed=...)`.
+  - The duplicate check allows fixed vs. extra orders on different dates.
+- **"Bestil igen"** on Mine bestillinger.
+- **Driver card:** shows route rows, each with its own "Kør" button.
+- **UpdateBanner:** tells the user when a new version is available.
+- **E2E tests:** run only via `./scripts/e2e.sh` (own DB `containerflow_e2e`, app on port 8081). `_e2e.py` refuses any other database.

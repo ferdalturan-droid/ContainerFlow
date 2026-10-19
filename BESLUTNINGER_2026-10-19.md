@@ -214,20 +214,104 @@ for "Modtageanlæg".
 
 ---
 
-## 5. Faste bestillinger på bestillingssiden – vurdering
+## 5. Faste tømninger og "Bestil igen" (bygget samme dag)
 
-Giver mening for forretningen, men ikke som en kopi af logistikfirmaets
-"Gentag". "Gentag" opretter alle ture på én gang i browseren og kender ikke
-helligdage. Bestillingerne tillader kun én åben bestilling pr. container og
-opgave.
+**Valgt:** Faste tømninger pr. container hos lokationsadmin og kundeadmin, plus
+"Bestil igen" på en tidligere bestilling.
 
-**Anbefaling:** "Faste tømninger" pr. container hos lokationsadmin, fx "hver
-mandag, uge 14-43".
-- Den ligger på serveren og opretter hver tømning som en almindelig bestilling
-  7 dage før. Leveringsadressen findes for netop den dag, så helligdage gælder.
-- Den er mærket "Fast".
-- Medarbejderen kan springe over eller bestille ekstra.
-- Desuden en "Bestil igen"-knap.
+**Alternativer:**
+- A. Ingenting.
+- B. "Gentag" for alle medarbejdere.
+- **C. Faste tømninger pr. container (valgt).**
+- D. Kun "Bestil igen".
+- E. Påmindelse dagen før.
+- F. Sensorer.
 
-Det er en selvstændig funktion med ny datamodel og et dagligt job, så den
-bygges som næste skridt for sig. Den er ikke med i denne leverance.
+**Runde 1 – mangler:**
+- Opsætning: ugedage, hver 1.–4. uge, periode (fx sæson), partner (når pladsen
+  har flere), opgave (afhent eller byt), prioritet og kommentar.
+- Forhåndsvisning af de næste datoer.
+- På listen: hvad der er bestilt, og hvad der er sprunget over (lukket dag,
+  manglende leveringsadresse).
+
+**Runde 2 – proces:**
+- Hver tømning bliver en almindelig bestilling 7 dage før gennem samme
+  oprettelse som bestillingssiden. Leveringsadresse og åbningstid hentes for
+  netop den dag.
+- Lukket leveringssted (helligdag) betyder, at tømningen springes over og
+  logges.
+- Dobbeltbestillings-tjekket lader nu en ekstra bestilling en anden dag
+  komme igennem (containeren blev fuld før tid). Samme dag er stadig
+  dobbelt.
+
+**Runde 3 – fejlsituationer:**
+- Hver kombination af skema og dato oprettes højst én gang (unikt indeks), også
+  med flere app-instanser og ved genstart.
+- "Spring over" er en annullering af den ene dag; den oprettes ikke igen.
+- Pause og stop annullerer de bestilte, ikke startede tømninger. Genoptag
+  opretter dem igen, men ikke dem, der blev sprunget over.
+
+**Runde 4 – ret:**
+- Partner, materiale, container og opgave er selve tømningen. De kan ikke
+  rettes; man stopper den og opretter en ny.
+- Ugedage, interval, periode, prioritet og kommentar kan rettes:
+  - bestilte datoer, der ikke længere passer, annulleres;
+  - de øvrige får den nye prioritet og kommentar.
+
+**Runde 5 – alle ender:**
+- Mærket "Fast" i Mine bestillinger, som alle på pladsen ser.
+- Knappen "Spring over" i stedet for "Annullér".
+- Ture viser "Fast tømning" og hvornår.
+- Chaufføren ser noten "Fast tømning · Man, Tor · hver uge".
+- Rapporter tæller tømningerne under "Fast tømning".
+- Testet i e2e-testen `flow_fixed` (15 tjek).
+
+**Usikkerheder:**
+- "Hver 4. uge" bruges som månedlig. Ønskes "første mandag i måneden", er
+  det en lille udvidelse.
+- De 7 dage er fast for nu (feltet `lead_days` findes på skemaet).
+
+---
+
+## 6. Priser der skiftede i Økonomi › Rapport (fundet 2026-10-19)
+
+**Årsag (bevist):** Mine e2e-tests kørte mod den samme lokale database, som du
+bruger i browseren.
+- For at få faste resultater slår testene midlertidigt firmaets egne
+  prisregler fra og opretter "E2E …"-regler.
+- Mens testen kørte, viste TUR-0671 "Nærmeste regel 'E2E HF kundepris' passer
+  ikke på: kunde". Bagefter var den 1.460 kr igen.
+- Reproduceret ved at aflæse prisen 2 gange i sekundet under en testkørsel.
+- Dine egne regler var urørte.
+
+**Alternativer:**
+- A. Advare før testkørsel.
+- B. Skrive testene om, så de ikke slår regler fra.
+- **C. Egen testdatabase og egen test-app (valgt).**
+
+**Løsning C:** `./scripts/e2e.sh`.
+- Hver kørsel får en frisk database (`containerflow_e2e`) med testdata og en
+  separat app på port 8081.
+- Testene nægter at køre mod din database.
+- Det, testene manglede (koordinator, ILK's egen lokation, partner nr. 2 på
+  Folehaven), oprettes af `_fixtures.py`.
+
+---
+
+## 7. Chaufførens adresser og kort-knappen (2. runde)
+
+**Feedback:** Et kort-ikon uden tekst siger ikke, hvor det fører hen.
+
+**Valgt:** Ruten står på kortet i køreorden, og hvert sted har sin egen
+"Kør"-knap:
+1. Hent · Nordkysten – Folehaven 1: Folehaven 1, Hornbæk [Kør]
+2. Aflever · HCS A/S Helsingør: Energivej 10, 3000 Helsingør [Kør]
+
+Ingen skjulte valg. Stop-ture viser næste stop med "Kør".
+
+**Skærmbilledet med "Aflevering" og "Adresse" ens** var det gamle layout. En
+side, der står åben, beholder den gamle kode, til den genindlæses. Derfor:
+- Banner: "Der er en ny version af ContainerFlow · Tryk for at opdatere".
+- Turen "test" havde samme adresse som afhentning og aflevering. Den vises nu
+  som ét sted ("Hent og aflever"), og Ny tur advarer, når de to adresser er
+  ens.

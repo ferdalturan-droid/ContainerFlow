@@ -4,10 +4,9 @@ Testene kører mod den LOKALE app (docker-containeren cf-app) og den lokale
 MongoDB, med testdata fra ./scripts/local-test.sh. De opretter egne ture,
 kunder og prisaftaler med navne der starter med "E2E" og rydder op efter sig.
 
-Kør (fra repoets rod):
-    docker exec -e PW="$(grep '^LOCAL_TEST_PASSWORD=' .env.local | cut -d= -f2-)" \
-        cf-app python /app/backend/tests/e2e/run.py            # alle flows
-    ... python /app/backend/tests/e2e/run.py b2b pricing      # udvalgte
+Kør (fra repoets rod) - altid i testens egen database og app (port 8081):
+    ./scripts/e2e.sh                 # alle flows
+    ./scripts/e2e.sh b2b pricing     # udvalgte
 
 Testene nægter at køre mod andet end den lokale database.
 """
@@ -27,7 +26,13 @@ if not any(h in MONGO_URL for h in ("cf-mongo", "localhost", "127.0.0.1")):
     sys.exit("Afbrudt: end-to-end-tests må kun køre mod den lokale database (cf-mongo).")
 if not PW:
     sys.exit("Sæt PW (LOCAL_TEST_PASSWORD fra .env.local).")
-db = MongoClient(MONGO_URL)[os.environ.get("DB_NAME", "containerflow")]
+# 2026-10-19: Testene slår firmaets prisregler midlertidigt fra og opretter
+# E2E-data. De må derfor aldrig køre mod den database man selv bruger i
+# browseren - kun mod testdatabasen fra ./scripts/e2e.sh.
+DB_NAME = os.environ.get("DB_NAME", "containerflow")
+if not DB_NAME.endswith("_e2e"):
+    sys.exit("Afbrudt: kør testene med ./scripts/e2e.sh (egen database og app) - ikke mod din lokale database.")
+db = MongoClient(MONGO_URL)[DB_NAME]
 DK = ZoneInfo("Europe/Copenhagen")
 
 # Testbrugere (fra local-logins.txt)

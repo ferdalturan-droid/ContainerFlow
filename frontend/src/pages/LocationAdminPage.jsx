@@ -8,8 +8,9 @@ import {
   LogOut, ClipboardList, Truck, Clock, CheckCircle2, AlertTriangle, Filter,
   Eye, EyeOff, Calendar, Activity, PowerOff, ShieldAlert, Copy, Save, Lock,
   Pause, Power, Search, Megaphone, BarChart3, Ruler, FileDown, FileSpreadsheet, FileText,
-  Bell, Leaf, ChevronDown, MoreHorizontal, Menu,
+  Bell, Leaf, ChevronDown, MoreHorizontal, Menu, CalendarClock,
 } from "lucide-react";
+import FixedSchedulesTab from "./FixedSchedulesTab";
 import { useAuth } from "../auth/AuthContext";
 import { API, formatApiError } from "../auth/api";
 import { exportReportXLSX } from "../lib/excelExport";
@@ -84,6 +85,7 @@ export default function LocationAdminPage() {
   // "Mere"-dropdown så hovedlinjen er ren og handlingsorienteret.
   const TABS = [
     { id: "orders", label: "Bestillinger", icon: ClipboardList },
+    { id: "fixed", label: "Faste tømninger", icon: CalendarClock },
     { id: "employees", label: "Medarbejdere", icon: Users },
     { id: "schedule", label: "Åbnings- og lukketidspunkter", icon: Clock },
     { id: "archive", label: "Arkiv", icon: FileText },
@@ -333,6 +335,7 @@ export default function LocationAdminPage() {
           <>
             {tab === "employees" && <EmployeesTab locations={locations} />}
             {tab === "orders" && <OrdersTab locations={locations} />}
+            {tab === "fixed" && <FixedSchedulesTab locations={locations} />}
             {tab === "schedule" && <SchedulesTab locations={locations} />}
             {tab === "delivery" && <DeliveryAddressesTab locations={locations} />}
             {tab === "capacity" && <CapacityMeasuresTab locations={locations} />}

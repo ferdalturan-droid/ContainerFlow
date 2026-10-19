@@ -598,6 +598,9 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
               onClick={() => set(key, [...f[key], { street: "", postal: "", city: "" }])}><Plus className="w-4 h-4" /> {addLabel}</button>}
           </div>
         ))}
+        {addrFilled(f.stops[0]) && addrFilled(f.deliveries[0]) && formatAddress(f.stops[0]).toLowerCase() === formatAddress(f.deliveries[0]).toLowerCase() && (
+          <p className="text-[12px] text-amber-800 bg-amber-50 rounded-lg px-3 py-2" data-testid="tf-same-address">Afhentning og aflevering er den samme adresse - chaufføren ser kun ét sted. Er det rigtigt?</p>
+        )}
         {hintPlads && onOrderMode && (
           <div className="rounded-lg bg-sky-50 dark:bg-sky-950/30 border border-sky-200 dark:border-sky-900 px-3 py-2 text-sm text-sky-900 dark:text-sky-100" data-testid="tf-site-hint">
             Adressen er {hintPlads.name}{hintPlads.customer_name ? ` (${hintPlads.customer_name})` : ""}. Er opgaven for kunden, så{" "}
@@ -1250,7 +1253,7 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
           {fact("Kapacitet", capacityText(tour))}
           {fact("Værksted", tour.workshop_address ? [tour.workshop_name, tour.workshop_phone].filter(Boolean).join(" · ") : "")}
           {fact("Tidsvindue", oh.from ? `${oh.from}–${oh.to}` : "")}
-          {fact("Kilde", SOURCE_LABEL[tour.source] || tour.source)}
+          {fact("Kilde", tour.fixed_schedule_id ? `Fast tømning · ${tour.fixed_label || ""}` : (SOURCE_LABEL[tour.source] || tour.source))}
           {fact("Bestilt af", byUs ? `${tour.on_behalf_company_name}${tour.on_behalf_user_name ? ` (${tour.on_behalf_user_name})` : ""} for kunden` : tour.created_by_name)}
           {fact("Hvem bad om det", tour.requested_by)}
           {fact("Vægt", tour.weight ? `${tour.weight} kg` : "")}
@@ -2312,14 +2315,14 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
                                 <div className="md:hidden mt-1 flex items-center gap-3 text-[11px] text-slate-500">
                                   {oh.from && <span className="inline-flex items-center gap-1"><Clock className="w-3 h-3" />{oh.from}–{oh.to}</span>}
                                   <span className={`px-1.5 py-0.5 rounded border ${st.chip}`}>{st.label}{t.on_way_time && !t.completed ? ` ${t.on_way_time}` : ""}{t.completed && t.time ? ` ${t.time}` : ""}</span>
-                                  {t.source && t.source !== "manual" && <span>{SOURCE_LABEL[t.source] || t.source}</span>}
+                                  {t.source && t.source !== "manual" && <span>{t.fixed_schedule_id ? "Fast tømning" : (SOURCE_LABEL[t.source] || t.source)}</span>}
                                 </div>
                               </div>
                               <div className="hidden md:block min-w-0 text-xs text-slate-500 space-y-0.5">
                                 {oh.from ? <div className="inline-flex items-center gap-1"><Clock className="w-3 h-3" />{oh.from}–{oh.to}</div> : <div className="text-slate-300 dark:text-slate-600">Hele dagen</div>}
                                 <div className="flex items-center gap-1.5">
                                   <span className={`px-1.5 py-0.5 rounded border ${st.chip}`}>{st.label}{t.on_way_time && !t.completed ? ` ${t.on_way_time}` : ""}{t.completed && t.time ? ` ${t.time}` : ""}</span>
-                                  {t.source && t.source !== "manual" && <span className="text-slate-400">{SOURCE_LABEL[t.source] || t.source}</span>}
+                                  {t.source && t.source !== "manual" && <span className="text-slate-400">{t.fixed_schedule_id ? "Fast tømning" : (SOURCE_LABEL[t.source] || t.source)}</span>}
                                 </div>
                               </div>
                               <div className="col-span-2 col-start-2 md:col-span-1 md:col-start-auto" onClick={(e) => e.stopPropagation()}>
