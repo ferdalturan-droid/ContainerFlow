@@ -890,6 +890,7 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
           {fact("Indhold", cargoSummary(tour))}
           {fact("Container", tour.tour_type === "loes_afhentning" ? (tour.loose_estimated_count ? `${tour.loose_estimated_count} stk. (løs)` : "") : tour.container)}
           {fact("Kapacitet", capacityText(tour))}
+          {fact("Værksted", tour.workshop_address ? [tour.workshop_name, tour.workshop_phone].filter(Boolean).join(" · ") : "")}
           {fact("Tidsvindue", oh.from ? `${oh.from}–${oh.to}` : "")}
           {fact("Kilde", SOURCE_LABEL[tour.source] || tour.source)}
           {fact("Bestilt af", tour.created_by_name)}
@@ -1425,8 +1426,12 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
     axios.get(`${API}/materials`).then(r => setMaterials((r.data?.materials || []).map(m => (typeof m === "string" ? m : m.name)).filter(Boolean))).catch(() => {});
   }, []);
   // Live: opdatér hvert 10. sekund mens fanen er synlig + straks når man vender tilbage.
+  // 2026-10-19: Gælder både Dagsplan og Planlæg (før opdaterede Planlæg aldrig,
+  // så nye bestillinger "manglede" indtil man skiftede fane og ventede), og der
+  // hentes med det samme når man skifter visning.
   useEffect(() => {
-    if (view !== "day") return;
+    if (view !== "day" && view !== "plan") return;
+    fetchTours(); fetchUnread();
     const tick = () => { if (!document.hidden) { fetchTours(); fetchUnread(); } };
     const iv = setInterval(tick, 10000);
     const iv2 = setInterval(() => { if (!document.hidden) fetchOverdue(); }, 60000);
@@ -1895,7 +1900,7 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
                                   {priceStatus[t.id]?.pending > 0 && <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">Rettelse venter</span>}
                                   {devs(t).length > 0 && <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200" title={devs(t).join(" · ")} data-testid={`row-deviation-${t.id}`}>Afvigelse</span>}
                                 </div>
-                                <div className="text-sm text-slate-600 dark:text-slate-300 truncate">{t.address || "Ingen adresse"}{t.facility && t.facility !== t.plads && t.facility !== t.address ? <span className="text-slate-400"> → {t.facility}</span> : null}</div>
+                                <div className="text-sm text-slate-600 dark:text-slate-300 truncate">{t.address || "Ingen adresse"}{t.facility && t.facility !== t.plads && t.facility !== t.address ? <span className="text-slate-400"> → {t.tour_type === "vaerksted" && t.workshop_name ? `${t.workshop_name}, ` : ""}{t.facility}</span> : null}</div>
                                 {stopsOf(t).length > 0 && <div className="text-[11px] font-semibold text-slate-500">{stopsOf(t).length} stop · {stopsDone(t)} udført</div>}
                                 <div className="md:hidden mt-1 flex items-center gap-3 text-[11px] text-slate-500">
                                   {oh.from && <span className="inline-flex items-center gap-1"><Clock className="w-3 h-3" />{oh.from}–{oh.to}</span>}

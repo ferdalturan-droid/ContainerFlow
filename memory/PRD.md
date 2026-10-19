@@ -19,6 +19,11 @@ Data must be strictly isolated per company.
   and `/api/health` bypass tenant filtering so the QR-code customer flow continues to work.
 
 ## What's been implemented (2026-02-15)
+## What's new in 2026-10-19 (Værksted, én partner, live)
+- Værksteds-ture har værkstedet på turen (`_order_tour_route`), med begge adresser og Maps hos planlægger, chauffør og i Mine bestillinger. Migrering: `_migrate_workshop_routes`.
+- Én logistikpartner pr. bestilling (`_single_partner`); Excel-import kun til det importerende firma.
+- Ture opdaterer også i Planlæg. Test: `flow_workshop.py`.
+
 ## What's new in 2026-10-18 (Sikkerhed + Premium/Partner)
 Se `LOGISTICS_TIERS.md`. Princip: alt der gavner genbrugsplads-kunden er i kernen (begge typer); premium er vognmandens egen forretning uden for genbrugspladserne.
 

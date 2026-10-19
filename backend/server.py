@@ -452,6 +452,11 @@ class Tour(BaseModel):
     # kørselsdatoen kan afgøres (on_way_time/time er kun HH:MM).
     completed_at: str = ""
     on_way_at: str = ""
+    # 2026-10-19: Værksted (fra bestillingen). Til værksted: pladsen ->
+    # værkstedet. Afhent fra værksted: værkstedet -> pladsen.
+    workshop_name: str = ""
+    workshop_address: str = ""
+    workshop_phone: str = ""
 
 class TourCreate(BaseModel):
     date: str = Field(default_factory=get_dk_date_str)
@@ -2876,7 +2881,10 @@ async def upload_tours_template(
             "priority": "normal",
             "tour_type": "normal",
             "company_id": plads_company_id,
-            "assigned_logistics_company_ids": list(p.get("assigned_logistics_company_ids") or []),
+            # 2026-10-19: Kun firmaet der importerer (ikke alle pladsens partnere),
+            # så to firmaer aldrig kan tage den samme tur.
+            "assigned_logistics_company_ids": ([payload["company_id"]] if payload.get("role") == "logistics_admin" and payload.get("company_id")
+                                               else list(p.get("assigned_logistics_company_ids") or [])[:1]),
             "source": "manual",
             "customer_name": cust_info.get("name", ""),
             "customer_code": cust_info.get("customer_id", ""),
@@ -9024,6 +9032,46 @@ async def check_duplicate_order(
     }
 
 
+def _order_tour_route(tour_type: str, container_addr: str, plads_doc: Optional[dict], location_name: str,
+                      w_name: str = "", w_addr: str = "", w_phone: str = "") -> dict:
+    """2026-10-19: Hvor turen starter (`address`) og slutter (`facility`).
+    - Afhent container / byt container / løs: containerens adresse; slut som før.
+    - Til værksted: pladsen (containeren) -> værkstedet.
+    - Afhent fra værksted: værkstedet -> pladsen.
+    Containeradressen får byens navn med, så Google Maps-linket rammer rigtigt
+    ("Folehaven 1" alene kan ligge mange steder)."""
+    city = ((plads_doc or {}).get("city") or "").strip()
+    a = (container_addr or (plads_doc or {}).get("address") or "").strip()
+    home = f"{a}, {city}" if a and city and "," not in a and city.lower() not in a.lower() else a
+    out = {"address": home, "workshop_name": (w_name or "").strip(), "workshop_address": (w_addr or "").strip(),
+           "workshop_phone": (w_phone or "").strip()}
+    if tour_type == "vaerksted" and out["workshop_address"]:
+        out["facility"] = out["workshop_address"]
+    elif tour_type == "afhent_vaerksted" and out["workshop_address"]:
+        out["address"] = out["workshop_address"]
+        out["facility"] = home
+    else:
+        out["facility"] = location_name
+    return out
+
+
+def _single_partner(partners: List[str], chosen: str, material: str, partner_materials: Optional[dict]) -> List[str]:
+    """2026-10-19: En bestilling går til PRÆCIS ét logistikfirma. Før gik en
+    bestilling uden partnervalg på en plads med flere partnere til dem alle,
+    så to firmaer kunne tage den samme tur."""
+    if chosen:
+        if partners and chosen not in partners:
+            raise HTTPException(status_code=400, detail="Den valgte logistikpartner betjener ikke denne plads")
+        return [chosen]
+    if len(partners) <= 1:
+        return list(partners)
+    mat = _pricing.norm_label(material)
+    cands = [p for p in partners if any(_pricing.norm_label(m) == mat for m in ((partner_materials or {}).get(p) or []))]
+    if len(cands) == 1:
+        return cands
+    raise HTTPException(status_code=400, detail="Vælg hvilken logistikpartner der skal køre bestillingen")
+
+
 @api_router.post("/customer-orders/submit")
 async def submit_customer_order(order: StructuredOrderCreate, request: Request):
     """Submit a structured customer order - creates both container_order and tour for drivers."""
@@ -9287,15 +9335,10 @@ async def submit_customer_order(order: StructuredOrderCreate, request: Request):
         or (location.get("assigned_logistics_company_ids") if location else None)
         or []
     )
-    _chosen_partner = (order.partner_id or "").strip()
-    if _chosen_partner and _chosen_partner in _location_partners:
-        doc["assigned_logistics_company_ids"] = [_chosen_partner]
-    elif _chosen_partner and not _location_partners:
-        # Plads har ingen partner-liste men medarbejderen valgte alligevel en
-        # partner — respekter valget.
-        doc["assigned_logistics_company_ids"] = [_chosen_partner]
-    else:
-        doc["assigned_logistics_company_ids"] = _location_partners
+    doc["assigned_logistics_company_ids"] = _single_partner(
+        _location_partners, (order.partner_id or "").strip(), order.material,
+        (picked_plads or {}).get("partner_materials") or (plads or {}).get("partner_materials")
+        or (location or {}).get("partner_materials"))
     # Fase 15.16/15.18 (2026-02-21): Estimat-felt på container_order
     # (bruges i "Mine bestillinger" → felt "Antal containere estimeret").
     if is_estimat:
@@ -9340,6 +9383,8 @@ async def submit_customer_order(order: StructuredOrderCreate, request: Request):
         lng=(picked_plads or plads or {}).get("lng") if (picked_plads or plads) else None
     )
     tour_doc = tour_obj.model_dump()
+    tour_doc.update(_order_tour_route(tour_doc["tour_type"], final_address, picked_plads or plads or location, location["name"],
+                                      order.workshop_name, order.workshop_address, order.workshop_phone))
     tour_doc["company_id"] = resolved_company_id
     tour_doc["order_id"] = doc["id"]  # link tour -> order for status sync
     tour_doc["assigned_logistics_company_ids"] = doc["assigned_logistics_company_ids"]
@@ -17275,6 +17320,15 @@ async def edit_customer_order(order_id: str, body: dict,
             tour_update["loose_estimated_count"] = int(proposed["loose_estimated_count"] or 0)
         except (TypeError, ValueError):
             tour_update["loose_estimated_count"] = 0
+    if order.get("tour_id") and set(after_diff) & {"tour_type", "workshop_name", "workshop_address", "workshop_phone",
+                                                    "custom_address", "customer_address"}:
+        # 2026-10-19: Opgavetype, værksted eller adresse ændret -> ny rute på turen.
+        merged = {**order, **proposed}
+        pl = await _raw_db.plads.find_one({"location_code": merged.get("location_code")}, {"_id": 0, "address": 1, "city": 1})
+        tour_update.update(_order_tour_route(
+            merged.get("tour_type") or "normal", merged.get("custom_address") or merged.get("customer_address") or "",
+            pl, merged.get("location_name") or "", merged.get("workshop_name") or "",
+            merged.get("workshop_address") or "", merged.get("workshop_phone") or ""))
     if tour_update and order.get("tour_id"):
         await _raw_db.tours.update_one({"id": order["tour_id"]}, {"$set": tour_update})
 
@@ -19345,6 +19399,7 @@ async def startup_db_client():
         await migrate_dates()
         await _migrate_haster_from_remark()
         await _migrate_tour_owner_from_plads()
+        await _migrate_workshop_routes()
         await _migrate_driver_matches_claimer()
     except Exception as e:
         logger.warning(f"Startup tasks warning: {e}")
@@ -19367,6 +19422,30 @@ async def _migrate_driver_matches_claimer():
             logger.info(f"Tildelt chauffør rettet til den der kører: {n} ture i gang")
     except Exception as e:
         logger.warning(f"Chauffør-migrering: {e}")
+
+
+async def _migrate_workshop_routes():
+    """2026-10-19: Engangsrettelse - åbne værksteds-ture fra bestillinger får
+    værkstedet på turen (før stod kun pladsen på, og chaufføren kunne ikke se
+    hvor containeren skulle hen). Afsluttede/fakturerede ture røres ikke."""
+    try:
+        n = 0
+        q = {"tour_type": {"$in": ["vaerksted", "afhent_vaerksted"]}, "completed": {"$ne": True},
+             "deleted": {"$ne": True}, "price_locked": {"$exists": False}, "order_id": {"$nin": ["", None]},
+             "$or": [{"workshop_address": {"$exists": False}}, {"workshop_address": ""}]}
+        async for t in _raw_db.tours.find(q, {"_id": 0, "id": 1, "order_id": 1, "tour_type": 1, "facility": 1}):
+            o = await _raw_db.container_orders.find_one({"id": t["order_id"]}, {"_id": 0})
+            if not o or not (o.get("workshop_address") or "").strip():
+                continue
+            pl = await _raw_db.plads.find_one({"location_code": o.get("location_code")}, {"_id": 0, "address": 1, "city": 1})
+            route = _order_tour_route(t["tour_type"], o.get("customer_address") or "", pl, o.get("location_name") or t.get("facility") or "",
+                                      o.get("workshop_name") or "", o.get("workshop_address") or "", o.get("workshop_phone") or "")
+            await _raw_db.tours.update_one({"id": t["id"]}, {"$set": route})
+            n += 1
+        if n:
+            logger.info(f"Værksted på turen: {n} åbne værksteds-ture fik værkstedets adresse")
+    except Exception as e:
+        logger.warning(f"Værksteds-migrering: {e}")
 
 
 async def _migrate_tour_owner_from_plads():

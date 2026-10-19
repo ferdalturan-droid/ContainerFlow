@@ -14,7 +14,7 @@ def run():
     try:
         loc = call("GET", "/locations/code/1101")
         material = (loc.get("materials") or ["Pap"])[0]
-        o = call("POST", "/customer-orders/submit", {
+        o = call("POST", "/customer-orders/submit", {"partner_id": db.users.find_one({"email": ILK_ADMIN}, {"_id": 0, "company_id": 1})["company_id"],
             "location_code": "1101", "material": material, "container_number": "Container 1",
             "priority": "normal", "comment": "E2E-test B2B haster", "order_date": today(), "tour_type": "normal",
             "custom_address": "Energivej 6, 3000 Helsingør", "open_from": "07:00", "open_to": "15:00",

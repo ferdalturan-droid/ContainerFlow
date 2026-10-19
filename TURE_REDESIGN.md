@@ -181,3 +181,20 @@ Begge dele er rettet. Desuden:
 - **Arkiv har ikke længere genvejen "Ture → Historik".** Tur-historikken findes kun under Ture › Historik; Arkiv har Dagrapporter (PDF) og Kvittering-arkiv.
 - **Menuen** har nu seks punkter + "Mere": Ture · Tid & ressourcer · Chauffører · Rapportering · Økonomi · Arkiv. Arkiv er flyttet ud af "Mere".
 
+### Værksted, én partner pr. bestilling og live-opdatering (2026-10-19)
+- **Værksteds-ture har nu værkstedet på turen** (`workshop_name/address/phone`). Før stod det kun på bestillingen, så hverken planlægger eller chauffør kunne se, hvor containeren skulle hen.
+  - Til værksted: pladsen → værkstedet.
+  - Afhent fra værksted: værkstedet → pladsen.
+  - Byt container: kun pladsen.
+- **Hvor det vises:** chaufførkortet, tur-panelet (begge adresser med Google Maps og ring til værkstedet), Ture-siden og "Mine bestillinger".
+- **Containeradressen får byen med** ("Folehaven 1, Hornbæk"), så Maps-linket rammer rigtigt.
+- **Rettelser følger med:** retter kunden opgavetype, værksted eller adresse, følger turen med.
+- **Engangsrettelse ved opstart:** åbne værksteds-ture har fået værkstedet på.
+- **Én logistikpartner pr. bestilling:**
+  - Er en partner valgt, går bestillingen kun til den.
+  - Har pladsen én partner, går den til den.
+  - Ellers afgør materialet det (`partner_materials`); er det ikke entydigt, afvises bestillingen ("Vælg hvilken logistikpartner …").
+  - Før gik en bestilling uden partnervalg til alle pladsens partnere, så to firmaer kunne tage samme tur.
+  - Excel-importen giver turen kun til det importerende firma.
+- **Ture-siden** opdaterer sig selv i både Dagsplan og Planlæg og henter med det samme ved skift af visning. Før opdaterede Planlæg aldrig.
+

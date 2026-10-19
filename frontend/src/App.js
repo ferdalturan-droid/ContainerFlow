@@ -4118,10 +4118,21 @@ const CustomerOrderPage = ({ locationCode, pladsName = "", prefillAddress = "", 
                       </div>
                     ) : (
                     <div className="grid grid-cols-2 gap-2 text-sm">
+                      {/* 2026-10-19: Værksted - vis hvor containeren hentes og hvor den skal hen. */}
+                      {(order.tour_type === "vaerksted" || order.tour_type === "afhent_vaerksted") && order.workshop_address ? (
+                        <div className="col-span-2" data-testid={`order-route-${idx}`}>
+                          <span className="text-slate-500">{order.tour_type === "vaerksted" ? "Fra pladsen:" : "Fra værksted:"}</span>
+                          <span className="text-white ml-2">{order.tour_type === "vaerksted" ? (order.customer_address || order.address || "-") : `${order.workshop_name ? `${order.workshop_name}, ` : ""}${order.workshop_address}`}</span>
+                          <span className="text-slate-500 mx-2">→</span>
+                          <span className="text-slate-500">{order.tour_type === "vaerksted" ? "Til værksted:" : "Til pladsen:"}</span>
+                          <span className="text-white ml-2">{order.tour_type === "vaerksted" ? `${order.workshop_name ? `${order.workshop_name}, ` : ""}${order.workshop_address}` : (order.customer_address || order.address || "-")}</span>
+                        </div>
+                      ) : (
                       <div>
                         <span className="text-slate-500">Adresse:</span>
                         <span className="text-white ml-2">{order.customer_address || order.address || "-"}</span>
                       </div>
+                      )}
                       <div>
                         <span className="text-slate-500">Prioritet:</span>
                         <span className={`ml-2 font-bold uppercase ${
@@ -11987,6 +11998,7 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
   const hasCapture = !!effectiveCapture(tour, unifiedFinish);
   const isMultiLoadTour = !hasCapture && (tour.tour_type === "loes_afhentning" || cargoLines.length > 1);
   const isGoodsTour = tour.tour_kind === "goods";
+  const isWorkshopRoute = (tour.tour_type === "vaerksted" || tour.tour_type === "afhent_vaerksted") && !!tour.workshop_address;
   const multiTitle = tour.tour_type === "loes_afhentning" ? "LØS AFHENTNING" : "turen";
   const tourStops = localStops || (Array.isArray(tour.stops) ? tour.stops : []);
   const loadLabel = (idx) => (cargoLines.length > 1
@@ -12413,13 +12425,34 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
 
         {/* Details */}
         <div className="p-4 space-y-3 text-sm">
-          {tour.facility && tourStops.length === 0 && (
+          {/* 2026-10-19: Værksteds-ture viser hvor containeren hentes og hvor den skal hen
+              (begge med Google Maps) + ring til værkstedet. */}
+          {isWorkshopRoute && tourStops.length === 0 && (
+            <div className="space-y-2.5" data-testid="mobile-tour-panel-route">
+              {[["Afhentning", tour.address, tour.tour_type === "afhent_vaerksted"], ["Aflevering", tour.facility, tour.tour_type === "vaerksted"]].map(([lbl, addr, isWs]) => (
+                <div key={lbl}>
+                  <div className="text-xs uppercase tracking-wide text-slate-500 mb-0.5">{lbl} · {isWs ? (tour.workshop_name || "Værksted") : "Pladsen"}</div>
+                  <a href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(addr || "")}&travelmode=driving`}
+                    target="_blank" rel="noopener noreferrer" data-testid={`mobile-tour-panel-route-${isWs ? "workshop" : "plads"}`}
+                    className="inline-flex items-center gap-1.5 text-blue-600 dark:text-blue-400 hover:underline font-medium">
+                    <MapPin className="w-4 h-4" />{addr}<ExternalLink className="w-3 h-3" />
+                  </a>
+                  {isWs && tour.workshop_phone && (
+                    <a href={`tel:${tour.workshop_phone.replace(/\s/g, "")}`} className="mt-1 flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400 font-semibold">
+                      <Phone className="w-4 h-4" /> Ring til værkstedet ({tour.workshop_phone})
+                    </a>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {!isWorkshopRoute && tour.facility && tourStops.length === 0 && (
             <div>
               <div className="text-xs uppercase tracking-wide text-slate-500 mb-0.5">{isGoodsTour ? "Aflevering" : "Modtageanlæg"}</div>
               <div className="text-slate-800 dark:text-slate-200">{tour.facility}</div>
             </div>
           )}
-          {tour.address && tourStops.length === 0 && (
+          {!isWorkshopRoute && tour.address && tourStops.length === 0 && (
             <div>
               <div className="text-xs uppercase tracking-wide text-slate-500 mb-0.5">Adresse</div>
               <a

@@ -31,6 +31,10 @@ export default function DriverTourCard({ tour, index, routeInfo, unread = 0, min
   // 2026-10-18 (P6): Når turen kører, er det næste åbne stop det chaufføren
   // skal bruge i førerhuset - adresse, note og telefon.
   const nextStop = onWay ? stops.find(x => !x.done_at) : null;
+  // 2026-10-19: Værksted. Til værksted: pladsen -> værkstedet. Afhent fra
+  // værksted: værkstedet -> pladsen. Kortets store adresse er første stop.
+  const workshop = (tour.tour_type === "vaerksted" || tour.tour_type === "afhent_vaerksted") && tour.workshop_address
+    ? { name: tour.workshop_name || "Værksted", phone: tour.workshop_phone || "", pickup: tour.tour_type === "afhent_vaerksted" } : null;
   const navTarget = nextStop?.address || tour.address || tour.facility;
   const cap = tour.tour_type === "loes_afhentning"
     ? (tour.loose_estimated_count ? `${tour.loose_estimated_count} containere` : "")
@@ -68,11 +72,12 @@ export default function DriverTourCard({ tour, index, routeInfo, unread = 0, min
 
         <div className="mt-2 flex items-start gap-2">
           <div className="min-w-0 flex-1">
+            {workshop && <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500">{workshop.pickup ? `Hent på ${workshop.name}` : "Hent på pladsen"}</p>}
             <p className="text-[17px] leading-snug font-extrabold text-slate-900 break-words">{street}</p>
             {town && <p className="text-[13px] text-slate-500">{town}</p>}
             {stops.length > 0 ? (
               <p className="text-[13px] font-semibold text-slate-600 mt-1">{stops.length} stop{onWay || done ? ` · ${stopsDoneN} udført` : ""} · slut: {stops[stops.length - 1]?.address}</p>
-            ) : delivery && <p className="text-[13px] text-slate-600 mt-1">→ {delivery}</p>}
+            ) : delivery && <p className="text-[13px] text-slate-600 mt-1" data-testid={`tour-delivery-${tour.id}`}>→ {workshop ? (workshop.pickup ? "Pladsen: " : `${workshop.name}: `) : ""}{delivery}</p>}
           </div>
           <ChevronRight className="w-5 h-5 text-slate-300 shrink-0 mt-1" />
         </div>
@@ -109,6 +114,13 @@ export default function DriverTourCard({ tour, index, routeInfo, unread = 0, min
         )}
       </button>
 
+      {workshop && workshop.phone && !done && (
+        <div className="mx-4 mb-3 flex items-center justify-between gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2" data-testid={`tour-workshop-${tour.id}`}>
+          <span className="text-[13px] text-slate-700 min-w-0 truncate"><b>{workshop.name}</b> · {tour.workshop_address}</span>
+          <a href={`tel:${workshop.phone.replace(/\s/g, "")}`} aria-label={`Ring til ${workshop.name}`}
+            className="min-h-[40px] min-w-[40px] rounded-xl border border-emerald-200 bg-white text-emerald-700 inline-flex items-center justify-center"><Phone className="w-4 h-4" /></a>
+        </div>
+      )}
       {nextStop && (
         <div className="mx-4 mb-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 flex items-start gap-2" data-testid={`tour-next-stop-${tour.id}`}>
           <div className="min-w-0 flex-1">

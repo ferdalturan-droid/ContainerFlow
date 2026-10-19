@@ -64,7 +64,7 @@ def run():
         ok(ot["company_id"] == ilk and price_of(la, own)["customer_id"] == "firma:life", "9 Arla Ishøj + Life er stadig ILK's egen tur (firma:life)")
 
         # Kopiér en Helsingør-bestilling til i morgen (som Ture-siden gør, uden kundenavn)
-        o = call("POST", "/customer-orders/submit", {
+        o = call("POST", "/customer-orders/submit", {"partner_id": db.users.find_one({"email": ILK_ADMIN}, {"_id": 0, "company_id": 1})["company_id"],
             "location_code": "1102", "material": "Pap til HCS", "container_number": "Container 1", "priority": "normal",
             "comment": "E2E ejer kopi", "order_date": day, "tour_type": "normal", "custom_address": "Energivej 6, 3000 Helsingør",
             "delivery_address_id": (db.delivery_addresses.find_one({"location_code": "1102"}, {"_id": 0, "id": 1}) or {}).get("id", ""),
