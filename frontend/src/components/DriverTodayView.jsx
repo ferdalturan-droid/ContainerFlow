@@ -75,12 +75,16 @@ export default function DriverTodayView({
     return [t.fraction, t.address, t.facility, t.plads, t.customer_name, t.private_company, t.tour_number, t.container].join(" ").toLowerCase().includes(n);
   };
 
-  const { active, mine, free, done } = useMemo(() => {
-    const list = tours.filter(t => !t.is_pause && (t.tour_type || "") !== "estimat" && !t.not_completed);
+  const { active, mine, free, done, cancelled } = useMemo(() => {
+    // 2026-10-19: En annulleret tur (også annulleret mens han var på vej, som
+    // er forgæves) vises nederst under "Annulleret" og tæller ikke med.
+    const all = tours.filter(t => !t.is_pause && (t.tour_type || "") !== "estimat" && (!t.not_completed || t.cancelled));
+    const list = all.filter(t => !t.cancelled && !t.not_completed);
     const mineAll = list.filter(isMine);
     const act = mineAll.filter(t => t.on_way && !t.completed).sort((a, b) => sortOpen(a, b, getRouteInfo));
     return {
       active: act,
+      cancelled: all.filter(t => t.cancelled && !t.completed && isMine(t)),
       mine: mineAll.filter(t => !t.completed && !t.on_way).sort((a, b) => sortOpen(a, b, getRouteInfo)),
       free: list.filter(t => !isMine(t) && !t._is_other_driver && !t.completed && !t.on_way && !t.claimed_by && !(t.driver_id || "").trim()),
       done: mineAll.filter(t => t.completed && (t.date || "").slice(0, 10) === reportDate)
@@ -219,6 +223,13 @@ export default function DriverTodayView({
                 {freeCount > 0 && <button onClick={() => setTab("free")} className="mt-4 h-11 px-5 rounded-xl bg-orange-500 text-white font-bold">Se {freeCount} ledige ture</button>}
               </div>
             )}
+          </div>
+        )}
+
+        {tab === "mine" && cancelled.length > 0 && (
+          <div className="space-y-2" data-testid="ture-cancelled">
+            <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500 px-1 pt-1">Annulleret</p>
+            {cancelled.filter(match).map(card)}
           </div>
         )}
 

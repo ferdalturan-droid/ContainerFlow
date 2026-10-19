@@ -13,7 +13,7 @@ import TourChat from "../components/TourChat";
 import AddressField, { formatAddress, parseAddress } from "../components/AddressField";
 import {
   TOUR_TYPES, GOODS_TYPES, TOUR_TYPE_LABEL, SOURCE_LABEL, cargoSummary, isGoods, stopsOf, stopsDone, parseDk, todayStr, addDays, fmtDayLong, fmtClock, deviationsOf, timeDeviations,
-  isHaster, openHours, capacityText, assigneeName, tourStatus, daysLate, mapsUrl,
+  isHaster, openHours, capacityText, assigneeName, tourStatus, daysLate, routeOf, routeUrl,
 } from "../lib/tourHelpers";
 
 /**
@@ -43,6 +43,7 @@ const STATUS_FILTERS = [
   { id: "onway", label: "På vej" },
   { id: "done", label: "Færdig" },
   { id: "blocked", label: "Kan ikke gennemføres" },
+  { id: "cancelled", label: "Annulleret" },
 ];
 
 const customerOf = (t, ownName) =>
@@ -271,7 +272,7 @@ function StopExtras({ value, onChange }) {
 // LOGISTICS_TIERS.md). En partner (option 2) har ingen af dem: én adresse ind
 // og ud, ingen Gentag, intet Kunde-felt og intet "Ved afslutning" - turen
 // opfører sig som en bestilling fra genbrugspladsen.
-function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, defaultPlads, onCreated, siteWord, canPrice = false, customers = [], caps = {} }) {
+function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, defaultPlads, onCreated, siteWord, canPrice = false, customers = [], caps = {}, onOrderMode }) {
   const [f, setF] = useState(() => blankForm(initialDate, defaultPlads));
   const [saving, setSaving] = useState(false);
   const [more, setMore] = useState(false);
@@ -279,7 +280,13 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
   // skriver "li" på vej til "Life"), og ikke mens et "Mente du"-forslag venter.
   const [firmaBlurred, setFirmaBlurred] = useState(false);
   const [lookDismissed, setLookDismissed] = useState("");
-  useEffect(() => { if (open) { setF(blankForm(initialDate, defaultPlads)); setMore(false); setFirmaBlurred(false); setLookDismissed(""); } }, [open, initialDate, defaultPlads]);
+  useEffect(() => {
+    if (!open) return;
+    const b = blankForm(initialDate, defaultPlads);
+    // En gemt "Fragt"-standard fra et premium-login gælder ikke uden Fragt.
+    if (!caps.goods) { b.kind = "container"; b.tour_type = "normal"; }
+    setF(b); setMore(false); setFirmaBlurred(false); setLookDismissed("");
+  }, [open, initialDate, defaultPlads]); // eslint-disable-line react-hooks/exhaustive-deps
   const set = (k, v) => setF(prev => ({ ...prev, [k]: v }));
   const plads = pladsList.find(p => p.name === f.plads);
   // Egen lokation hos et premium-firma = frit valg af type. Kundens plads = container (B2B).
@@ -394,6 +401,12 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
     cust: pladsList.filter(p => !p.own_location),
   }), [pladsList]);
 
+  // 2026-10-19: En fri tur til en kundes genbrugsplads-adresse er næsten altid
+  // en opgave for kunden - foreslå "Bestil for kunden" (blokerer ikke).
+  const normA = (x) => (x || "").toLowerCase().replace(/[^a-z0-9æøå]+/g, " ").trim();
+  const firstStreet = normA(f.stops[0]?.street);
+  const hintPlads = firstStreet.length >= 4 ? grouped.cust.find(p => normA(p.address) && firstStreet === normA(p.address)) : null;
+
   const moreSummary = [
     f.open_from && f.open_to ? `${f.open_from}–${f.open_to}` : "",
     tc ? `${tc} hænger${tc === 1 ? "" : "e"}` : "",
@@ -418,10 +431,15 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <label className={labelCls}>{siteWord}</label>
-            <select className={inputCls} value={f.plads} onChange={(e) => set("plads", e.target.value)} data-testid="tf-plads">
+            <select className={inputCls} value={f.plads} data-testid="tf-plads" onChange={(e) => {
+              // 2026-10-19: Kundens genbrugsplads -> "Bestil for kunden" (en bestilling, ikke en fri tur).
+              const v = e.target.value;
+              if (onOrderMode && grouped.cust.some(p => p.name === v)) { onOrderMode(v, f.date); return; }
+              set("plads", v);
+            }}>
               <option value="">Vælg…</option>
               {grouped.own.length > 0 && <optgroup label="Egne lokationer">{grouped.own.map(p => <option key={p.id} value={p.name}>{p.name}</option>)}</optgroup>}
-              {grouped.cust.length > 0 && <optgroup label="Kunders pladser">{grouped.cust.map(p => <option key={p.id} value={p.name}>{p.name}{p.customer_name ? ` · ${p.customer_name}` : ""}</option>)}</optgroup>}
+              {grouped.cust.length > 0 && <optgroup label="Kunders genbrugspladser (bestil for kunden)">{grouped.cust.map(p => <option key={p.id} value={p.name}>{p.name}{p.customer_name ? ` · ${p.customer_name}` : ""}</option>)}</optgroup>}
             </select>
           </div>
           <div>
@@ -580,6 +598,12 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
               onClick={() => set(key, [...f[key], { street: "", postal: "", city: "" }])}><Plus className="w-4 h-4" /> {addLabel}</button>}
           </div>
         ))}
+        {hintPlads && onOrderMode && (
+          <div className="rounded-lg bg-sky-50 dark:bg-sky-950/30 border border-sky-200 dark:border-sky-900 px-3 py-2 text-sm text-sky-900 dark:text-sky-100" data-testid="tf-site-hint">
+            Adressen er {hintPlads.name}{hintPlads.customer_name ? ` (${hintPlads.customer_name})` : ""}. Er opgaven for kunden, så{" "}
+            <button type="button" className="font-semibold underline" onClick={() => onOrderMode(hintPlads.name, f.date)}>bestil for kunden</button> - så ser de den og den tæller i deres CO2.
+          </div>
+        )}
         {stops.length > 1 && (
           <label className="flex items-start gap-2 text-sm text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-slate-900 rounded-lg px-3 py-2.5">
             <input type="checkbox" className="w-4 h-4 mt-0.5 accent-emerald-600" checked={!!f.separate} onChange={(e) => set("separate", e.target.checked)} data-testid="tf-separate" />
@@ -604,7 +628,7 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
       <section className={`${card} overflow-hidden`}>
         <button type="button" onClick={() => setMore(v => !v)} className="w-full flex items-center gap-3 px-4 py-3 text-left" data-testid="tf-more">
           <span className="font-semibold text-slate-800 dark:text-slate-100">Flere detaljer</span>
-          <span className="flex-1 text-xs text-slate-500 truncate">{moreSummary.join(" · ") || "Tidsrum, hængere, pris, gentagelse"}</span>
+          <span className="flex-1 text-xs text-slate-500 truncate">{moreSummary.join(" · ") || ["Tidsrum", caps.trailer_cargo && "hængere", canPrice && "pris", caps.series && "gentagelse"].filter(Boolean).join(", ")}</span>
           <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${more ? "rotate-180" : ""}`} />
         </button>
         {more && (
@@ -687,6 +711,294 @@ function TourForm({ open, onClose, initialDate, pladsList, drivers, materials, d
           </div>
         )}
       </section>
+    </Sheet>
+  );
+}
+
+// ─────────────────────────── Bestil for kunden ───────────────────────────
+
+const ORDER_TYPES = [
+  { id: "normal", label: "Afhent container" },
+  { id: "flyt", label: "Byt container" },
+  { id: "vaerksted", label: "Til værksted" },
+  { id: "afhent_vaerksted", label: "Afhent fra værksted" },
+  { id: "loes_afhentning", label: "Løs afhentning" },
+];
+const ORDER_PRIO = [["haster", "Haster"], ["normal", "Normal"], ["senere", "Lav"]];
+const tourPrioToOrder = (p) => (p === "urgent" ? "haster" : p === "low" ? "senere" : "normal");
+const stripOrderRemark = (r) => String(r || "").replace(/^Kundeordre( fra [^:]*)?:?\s*/i, "");
+
+/**
+ * 2026-10-19: "Bestil for kunden". På en genbrugsplads-kundes plads opretter
+ * logistikfirmaet en rigtig bestilling på kundens vegne - med kundens egne
+ * materialer, containere, leveringskalender og værksteder - i stedet for en
+ * fri tur. Kunden ser den under Mine bestillinger ("Bestilt af X for jer"),
+ * den tæller i rapporter og CO2, og kunden kan rette eller annullere den.
+ * Samme formular bruges til "Ret bestilling" (egne bestillinger for kunden)
+ * og "Bestil igen" (i stedet for Kopiér på en bestillings-tur).
+ */
+function CustomerOrderForm({ open, onClose, mode = "create", initial = null, pladsList, drivers, siteWord, onCreated, onSwitchToTour }) {
+  const custPladser = useMemo(() => pladsList.filter(p => !p.own_location), [pladsList]);
+  const ownPladser = useMemo(() => pladsList.filter(p => p.own_location), [pladsList]);
+  const blank = useCallback(() => ({
+    plads: initial?.plads || (custPladser.length === 1 ? custPladser[0].name : ""),
+    date: initial?.date || todayStr(), requested_by: "", tour_type: initial?.tour_type || "normal",
+    priority: initial?.priority || "normal", material: initial?.material || "", container: initial?.container || "",
+    other: false, loose_count: initial?.loose_count || "", address: initial?.address || "", open_from: initial?.open_from || "",
+    open_to: initial?.open_to || "", workshop_id: "", workshop_name: initial?.workshop_name || "", workshop_address: initial?.workshop_address || "",
+    workshop_phone: initial?.workshop_phone || "", comment: initial?.comment || "", driver_id: "", trailer_count: initial?.trailer_count || 0,
+  }), [initial, custPladser]);
+  const [f, setF] = useState(blank);
+  const [opts, setOpts] = useState(null);
+  const [dfl, setDfl] = useState(null);
+  const [addrTouched, setAddrTouched] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const set = (k, v) => setF(prev => ({ ...prev, [k]: v }));
+  useEffect(() => { if (open) { setF(blank()); setAddrTouched(mode === "edit"); setDfl(null); } }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+  const plads = custPladser.find(p => p.name === f.plads);
+  const edit = mode === "edit";
+
+  useEffect(() => {
+    setOpts(null);
+    if (!open || !plads) return;
+    axios.get(`${API}/logistics/order-options`, { params: { location_code: plads.location_code || plads.code || "", plads_name: plads.name } })
+      .then(r => setOpts(r.data)).catch(e => { setOpts({ materials: [], workshops: [], error: formatApiError(e) }); });
+  }, [open, plads?.name]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const matList = opts?.materials || [];
+  const containers = (matList.find(m => m.material === f.material)?.containers) || [];
+  const needsAddr = f.tour_type === "normal" || f.tour_type === "loes_afhentning";
+  const workshopType = f.tour_type === "vaerksted" || f.tour_type === "afhent_vaerksted";
+  const loes = f.tour_type === "loes_afhentning";
+  const types = ORDER_TYPES.filter(t => t.id !== "loes_afhentning" || opts?.loes_enabled || f.tour_type === t.id);
+
+  // Leveringsadresse + åbningstid for dagen (kundens kalender / containerens låste adresse)
+  useEffect(() => {
+    if (!open || !plads || !f.material || !f.date) return;
+    let off = false;
+    axios.get(`${API}/logistics/order-defaults`, { params: { location_code: plads.location_code || plads.code || "", plads_name: plads.name,
+      material: f.material, date: f.date, container: loes ? "" : f.container } })
+      .then(r => {
+        if (off) return;
+        setDfl(r.data);
+        setF(prev => ({
+          ...prev,
+          ...(!addrTouched || r.data.locked_address ? { address: r.data.address || prev.address } : {}),
+          ...(!addrTouched || r.data.locked_hours ? { open_from: r.data.open_from || prev.open_from, open_to: r.data.open_to || prev.open_to } : {}),
+        }));
+      }).catch(() => { if (!off) setDfl(null); });
+    return () => { off = true; };
+  }, [open, plads?.name, f.material, f.container, f.date, loes]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const clash = edit ? [] : (dfl?.open_orders || []).filter(o => o.tour_type === f.tour_type);
+  const pickWorkshop = (id) => {
+    const w = (opts?.workshops || []).find(x => x.id === id);
+    setF(prev => ({ ...prev, workshop_id: id, ...(w ? { workshop_name: w.name || "", workshop_address: w.address || "", workshop_phone: w.phone || "" } : {}) }));
+  };
+
+  const submit = async () => {
+    if (!plads) { toast.error(`Vælg ${siteWord.toLowerCase()}`); return; }
+    if (!edit && !f.requested_by.trim()) { toast.error('Skriv hvem hos kunden der bad om det (fx "Jens, telefon")'); return; }
+    if (!f.material) { toast.error("Vælg materiale"); return; }
+    if (!loes && !f.container.trim()) { toast.error("Vælg containeren"); return; }
+    if (loes && !(parseInt(f.loose_count, 10) > 0)) { toast.error("Skriv antal containere"); return; }
+    if (needsAddr && !f.address.trim()) { toast.error("Skriv leveringsadressen"); return; }
+    if (workshopType && (!f.workshop_name.trim() || !f.workshop_address.trim())) { toast.error("Vælg værkstedet (navn og adresse)"); return; }
+    const route = {
+      tour_type: f.tour_type, priority: f.priority, comment: f.comment.trim(), order_date: f.date,
+      custom_address: needsAddr ? f.address.trim() : "", open_from: needsAddr ? f.open_from : "", open_to: needsAddr ? f.open_to : "",
+      workshop_id: workshopType ? f.workshop_id : "", workshop_name: workshopType ? f.workshop_name.trim() : "",
+      workshop_address: workshopType ? f.workshop_address.trim() : "", workshop_phone: workshopType ? f.workshop_phone.trim() : "",
+      loose_estimated_count: loes ? parseInt(f.loose_count, 10) || 0 : 0,
+    };
+    setSaving(true);
+    try {
+      if (edit) {
+        await axios.put(`${API}/logistics/customer-orders/${initial.order_id}`, route);
+        if (Number(f.trailer_count || 0) !== Number(initial.trailer_count || 0) && initial.tour_id) {
+          await axios.put(`${API}/tours/${initial.tour_id}`, { trailer_count: Number(f.trailer_count || 0) });
+        }
+        toast.success("Bestillingen er rettet - kunden kan se ændringen");
+      } else {
+        await axios.post(`${API}/logistics/customer-orders`, {
+          ...route, location_code: plads.location_code || plads.code || "", plads_name: plads.name, material: f.material,
+          container_number: loes ? "" : f.container.trim(), requested_by: f.requested_by.trim(),
+          driver_id: f.driver_id, trailer_count: Number(f.trailer_count || 0),
+        });
+        toast.success(`Bestilt for ${opts?.customer_name || plads.customer_name || "kunden"} - de ser den under Mine bestillinger`);
+      }
+      onCreated?.(f.date);
+      onClose();
+    } catch (e) {
+      const d = e?.response?.data?.detail;
+      toast.error(typeof d === "object" && d?.message ? d.message : formatApiError(e));
+    }
+    setSaving(false);
+  };
+
+  const chip = (on, extra = "") => `px-3 py-2 rounded-lg text-sm font-semibold border ${on ? "bg-emerald-600 border-emerald-600 text-white" : "border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300"} ${extra}`;
+  const customer = opts?.customer_name || plads?.customer_name || "";
+  const title = edit ? "Ret bestilling" : (initial?.again ? "Bestil igen" : "Bestil for kunden");
+
+  return (
+    <Sheet open={open} onClose={onClose} title={title} testid="order-form"
+      subtitle={customer ? `Bliver ${customer}${/[sxz]$/i.test(customer) ? "'" : "s"} bestilling - de ser den under Mine bestillinger og kan rette eller annullere den.` : "Bliver kundens bestilling - kunden ser den og kan rette eller annullere den."}
+      footer={
+        <div className="flex items-center gap-2 justify-end">
+          <button className={btnGhost} onClick={onClose}>Annuller</button>
+          <button className={btnPrimary} onClick={submit} disabled={saving || clash.length > 0} data-testid="order-form-save">
+            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />} {edit ? "Gem" : "Bestil"}
+          </button>
+        </div>
+      }>
+      <section className={`${card} p-4 space-y-3`}>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label className={labelCls}>{siteWord}</label>
+            <select className={inputCls} value={f.plads} disabled={edit} data-testid="of-plads" onChange={(e) => {
+              const v = e.target.value;
+              if (ownPladser.some(p => p.name === v)) { onSwitchToTour?.(v, f.date); return; }
+              setF(prev => ({ ...prev, plads: v, material: "", container: "", workshop_id: "" }));
+            }}>
+              <option value="">Vælg…</option>
+              <optgroup label="Kunders genbrugspladser">{custPladser.map(p => <option key={p.id} value={p.name}>{p.name}{p.customer_name ? ` · ${p.customer_name}` : ""}</option>)}</optgroup>
+              {onSwitchToTour && ownPladser.length > 0 && <optgroup label="Egne lokationer (ny tur)">{ownPladser.map(p => <option key={p.id} value={p.name}>{p.name}</option>)}</optgroup>}
+            </select>
+            {opts?.plads_address && <p className="text-[11px] text-slate-500 mt-1">{opts.plads_address}</p>}
+          </div>
+          <div>
+            <label className={labelCls}>Dato</label>
+            <input type="date" className={inputCls} value={f.date} min={edit ? undefined : todayStr()} onChange={(e) => set("date", e.target.value)} data-testid="of-date" />
+            {dfl?.is_closed && needsAddr && <p className="text-[11px] text-amber-700 mt-1">Leveringsstedet er lukket{dfl.holiday_name ? ` (${dfl.holiday_name})` : ""} - vælg en anden dag eller adresse</p>}
+          </div>
+        </div>
+        {!edit && (
+          <div>
+            <label className={labelCls}>Hvem bad om det?</label>
+            <input className={inputCls} value={f.requested_by} onChange={(e) => set("requested_by", e.target.value)} maxLength={120}
+              placeholder="Fx Jens på pladsen, telefon" data-testid="of-requested-by" />
+            <p className="text-[11px] text-slate-500 mt-1">Kunden ser det på bestillingen. Det er det I har at holde jer til, hvis kunden siger "det har vi ikke bestilt".</p>
+          </div>
+        )}
+        {opts?.error && <p className="text-sm text-rose-700">{opts.error}</p>}
+      </section>
+
+      {plads && (
+        <section className={`${card} p-4 space-y-3`}>
+          <div>
+            <label className={labelCls}>Opgave</label>
+            <div className="flex flex-wrap gap-1.5">
+              {types.map(t => <button key={t.id} type="button" className={chip(f.tour_type === t.id)} onClick={() => set("tour_type", t.id)} data-testid={`of-type-${t.id}`}>{t.label}</button>)}
+            </div>
+          </div>
+          <div>
+            <label className={labelCls}>Prioritet</label>
+            <div className="inline-flex p-0.5 rounded-lg bg-slate-100 dark:bg-slate-900">
+              {ORDER_PRIO.map(([k, l]) => (
+                <button key={k} type="button" onClick={() => set("priority", k)} data-testid={`of-prio-${k}`}
+                  className={`px-3 py-1.5 rounded-md text-sm font-bold ${f.priority === k ? (k === "haster" ? "bg-rose-600 text-white" : "bg-white dark:bg-slate-700 shadow-sm") : "text-slate-500"}`}>{l}</button>
+              ))}
+            </div>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className={labelCls}>Materiale</label>
+              <select className={inputCls} value={f.material} disabled={edit} onChange={(e) => setF(prev => ({ ...prev, material: e.target.value, container: "", other: false }))} data-testid="of-material">
+                <option value="">{opts ? (matList.length ? "Vælg…" : "Ingen materialer for jer på pladsen") : "Henter…"}</option>
+                {matList.map(m => <option key={m.material} value={m.material}>{m.material}</option>)}
+                {edit && f.material && !matList.some(m => m.material === f.material) && <option value={f.material}>{f.material}</option>}
+              </select>
+            </div>
+            {loes ? (
+              <div>
+                <label className={labelCls}>Antal containere</label>
+                <input type="number" min="1" inputMode="numeric" className={inputCls} value={f.loose_count} onChange={(e) => set("loose_count", e.target.value)} />
+              </div>
+            ) : (
+              <div>
+                <label className={labelCls}>Container</label>
+                {containers.length > 0 && !f.other && !edit ? (
+                  <select className={inputCls} value={f.container} onChange={(e) => (e.target.value === "__other" ? setF(prev => ({ ...prev, other: true, container: "" })) : set("container", e.target.value))} data-testid="of-container">
+                    <option value="">Vælg…</option>
+                    {containers.map(c => <option key={c.label} value={c.label}>{c.label}{c.container_id ? ` · ${c.container_id}` : ""}{c.capacity_label ? ` · ${c.capacity_label}` : ""}</option>)}
+                    <option value="__other">Anden container…</option>
+                  </select>
+                ) : (
+                  <input className={inputCls} value={f.container} disabled={edit} onChange={(e) => set("container", e.target.value)} placeholder="Fx Container 2 eller containerens nr." data-testid="of-container-text" />
+                )}
+              </div>
+            )}
+          </div>
+          {edit && <p className="text-[11px] text-slate-500">Plads, materiale og container ligger fast. Er det forkert, så annullér bestillingen og bestil igen.</p>}
+          {clash.length > 0 && (
+            <div className="rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 px-3 py-2 text-sm text-amber-900 dark:text-amber-100" data-testid="of-clash">
+              Der er allerede en åben bestilling på denne container ({clash.map(o => `${ORDER_TYPES.find(t => t.id === o.tour_type)?.label || o.tour_type} ${o.order_date || ""}${o.on_behalf_company_name ? ` · bestilt af ${o.on_behalf_company_name}` : o.created_by_name ? ` · ${o.created_by_name}` : ""}`).join("; ")}). Ret den i stedet for at bestille igen.
+            </div>
+          )}
+        </section>
+      )}
+
+      {plads && (needsAddr || workshopType || f.tour_type === "flyt") && (
+        <section className={`${card} p-4 space-y-3`}>
+          {needsAddr && (
+            <>
+              <div>
+                <label className={labelCls}>Leveringsadresse</label>
+                <input className={inputCls} value={f.address} disabled={!!dfl?.locked_address} onChange={(e) => { setAddrTouched(true); set("address", e.target.value); }}
+                  placeholder="Hvor containeren skal køres hen" data-testid="of-address" />
+                <p className="text-[11px] text-slate-500 mt-1">
+                  {dfl?.locked_address ? "Låst af kunden for denne container." : dfl?.delivery_name ? `${dfl.delivery_name} - fra kundens leveringskalender for dagen.` : "Fra kundens leveringskalender, når den findes. Kan rettes."}
+                </p>
+              </div>
+              <div className="grid grid-cols-2 gap-3 max-w-sm">
+                <div><label className={labelCls}>Åbner</label><input type="time" className={inputCls} value={f.open_from} disabled={!!dfl?.locked_hours} onChange={(e) => { setAddrTouched(true); set("open_from", e.target.value); }} /></div>
+                <div><label className={labelCls}>Lukker</label><input type="time" className={inputCls} value={f.open_to} disabled={!!dfl?.locked_hours} onChange={(e) => { setAddrTouched(true); set("open_to", e.target.value); }} /></div>
+              </div>
+            </>
+          )}
+          {workshopType && (
+            <div className="space-y-2">
+              <label className={labelCls}>Værksted</label>
+              {(opts?.workshops || []).length > 0 && (
+                <select className={inputCls} value={f.workshop_id} onChange={(e) => pickWorkshop(e.target.value)} data-testid="of-workshop">
+                  <option value="">{f.workshop_name ? `${f.workshop_name} (som nu)` : "Vælg fra kundens værksteder…"}</option>
+                  {opts.workshops.map(w => <option key={w.id} value={w.id}>{w.name}{w.address ? ` · ${w.address}` : ""}</option>)}
+                </select>
+              )}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <input className={inputCls} value={f.workshop_name} onChange={(e) => set("workshop_name", e.target.value)} placeholder="Navn" />
+                <input className={`${inputCls} sm:col-span-2`} value={f.workshop_address} onChange={(e) => set("workshop_address", e.target.value)} placeholder="Adresse, postnr. og by" />
+                <input className={inputCls} type="tel" value={f.workshop_phone} onChange={(e) => set("workshop_phone", e.target.value)} placeholder="Telefon" />
+              </div>
+              <p className="text-[11px] text-slate-500">{f.tour_type === "vaerksted" ? "Chaufføren henter containeren på pladsen og kører den til værkstedet." : "Chaufføren henter containeren på værkstedet og kører den til pladsen."}</p>
+            </div>
+          )}
+          {f.tour_type === "flyt" && <p className="text-sm text-slate-600 dark:text-slate-300">Containeren byttes på pladsen - ingen anden adresse.</p>}
+        </section>
+      )}
+
+      {plads && (
+        <section className={`${card} p-4 space-y-3`}>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {!edit && (
+              <div>
+                <label className={labelCls}>Chauffør</label>
+                <DriverSelect value={f.driver_id} drivers={drivers} onChange={(v) => set("driver_id", v)} testid="of-driver" />
+              </div>
+            )}
+            <div>
+              <label className={labelCls}>Hængere</label>
+              <div className="flex flex-wrap gap-1.5">
+                {[0, 1, 2].map(n => <button key={n} type="button" className={chip(Number(f.trailer_count) === n, "min-w-[52px]")} onClick={() => set("trailer_count", n)}>{n === 0 ? "Ingen" : n}</button>)}
+              </div>
+            </div>
+          </div>
+          <div>
+            <label className={labelCls}>Kommentar <span className="normal-case font-normal">(kunden og chaufføren ser den)</span></label>
+            <input className={inputCls} value={f.comment} onChange={(e) => set("comment", e.target.value)} placeholder="Fx adgang via port 2" data-testid="of-comment" />
+          </div>
+        </section>
+      )}
     </Sheet>
   );
 }
@@ -779,7 +1091,7 @@ function Registration({ tour }) {
   );
 }
 
-function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnreadChanged, ownName, siteWord, askConfirm, can = () => true, caps = {}, priceStatus = null }) {
+function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnreadChanged, ownName, siteWord, askConfirm, can = () => true, caps = {}, priceStatus = null, onOrderForm }) {
   const [audit, setAudit] = useState(null);
   const [edit, setEdit] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -806,14 +1118,46 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
   if (!tour) return null;
   const st = tourStatus(tour);
   const oh = openHours(tour);
-  const locked = tour.completed || tour.on_way;
+  const locked = tour.completed || tour.on_way || tour.cancelled;
+  // 2026-10-19: En bestillings-tur: indholdet (materiale, container, adresse,
+  // opgave) hører til kundens bestilling. Planlæggeren flytter dato/tid/
+  // prioritet/chauffør; egne bestillinger for kunden rettes i bestillingen.
+  const isOrder = !!tour.order_id;
+  const byUs = isOrder && !!tour.on_behalf_company_name;
+  const started = tour.on_way || tour.completed || tour.not_completed;
+  const legs = routeOf(tour);
+  const orderInitial = (date) => ({
+    plads: tour.plads || "", date, tour_type: tour.tour_type || "normal", priority: tourPrioToOrder(tour.priority),
+    material: tour.fraction || "", container: tour.tour_type === "loes_afhentning" ? "" : (tour.container || ""),
+    loose_count: tour.loose_estimated_count || "", address: tour.tour_type === "normal" || tour.tour_type === "loes_afhentning" ? (tour.address || "") : "",
+    open_from: tour.open_from || "", open_to: tour.open_to || "", workshop_name: tour.workshop_name || "",
+    workshop_address: tour.workshop_address || "", workshop_phone: tour.workshop_phone || "",
+    comment: stripOrderRemark(tour.remark), trailer_count: Number(tour.trailer_count || 0),
+  });
+  const reasonPrompt = (q) => { try { return (window.prompt(q) || "").trim(); } catch (_) { return ""; } };
+  const cancelOrder = async () => {
+    const reason = reasonPrompt("Hvorfor annulleres bestillingen? Kunden ser begrundelsen (fx \"Jens ringede - ikke fuld\")");
+    if (!reason) return;
+    try { await axios.post(`${API}/logistics/customer-orders/${tour.order_id}/cancel`, { reason }); toast.success("Bestillingen er annulleret - kunden og chaufføren kan se det"); onChanged(); }
+    catch (e) { const d = e?.response?.data?.detail; toast.error(typeof d === "object" && d?.message ? d.message : formatApiError(e)); }
+  };
+  const restoreOrder = async () => {
+    const reason = reasonPrompt(tour.cancelled_on_way ? "Hvorfor genoptages den? (fx \"Turen var allerede kørt\")" : "Hvorfor genoptages bestillingen? (fx \"Kunden fortrød\")");
+    if (!reason) return;
+    try { await axios.post(`${API}/logistics/customer-orders/${tour.order_id}/restore`, { reason }); toast.success("Bestillingen er genoptaget"); onChanged(); }
+    catch (e) { toast.error(formatApiError(e)); }
+  };
 
   const saveEdit = async () => {
     setSaving(true);
     try {
-      const { addr, deliv, lines, stops, ...rest } = edit;
+      const { addr, deliv, lines, stops: stops0, ...rest } = edit;
+      const stops = caps.stops ? stops0 : null;
       const delivFilled = (deliv?.street || deliv?.city || "").trim();
-      const body = stops
+      const body = isOrder
+        // Bestillings-tur: kun det planlæggeren styrer (resten hører til bestillingen).
+        ? { date: rest.date, open_from: rest.open_from, open_to: rest.open_to, priority: rest.priority, remark: rest.remark, trailer_count: rest.trailer_count }
+        : stops
         ? { ...rest, stops: stops.map(x => ({ ...x, address: x.address || formatAddress(x) })).filter(x => (x.address || "").trim()) }
         : {
           ...rest,
@@ -822,13 +1166,13 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
         };
       // Ældre ture/bestillinger uden "Ved afslutning"-valg beholder deres
       // oprindelige regler (fx vægt påkrævet), medmindre der vælges noget.
-      if (!Object.keys(tour.capture || {}).length && !body.capture?.quantity && !body.capture?.photo) delete body.capture;
-      if (lines) {
+      if (!caps.capture || (!Object.keys(tour.capture || {}).length && !body.capture?.quantity && !body.capture?.photo)) delete body.capture;
+      if (lines && !isOrder && caps.trailer_cargo) {
         body.cargo_lines = lines.filter(l => (l.text || "").trim());
         body.fraction = body.cargo_lines.map(l => l.text.trim()).join(" + ");
       }
       await axios.put(`${API}/tours/${tour.id}`, body);
-      if (applySeries && tour.series_id && seriesLeft > 0) {
+      if (applySeries && caps.series && tour.series_id && seriesLeft > 0) {
         const { date: _d, ...fields } = body;
         const { data } = await axios.put(`${API}/tours/series/${tour.series_id}`, { from_date: addDays(tour.date, 1), fields });
         toast.success(`Turen og ${data.updated} kommende ture i serien er gemt${data.failed?.length ? ` · ${data.failed.length} kunne ikke rettes` : ""}`);
@@ -875,13 +1219,27 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
       title={<span className="flex items-center gap-2"><span className="truncate">{tour.fraction || "Tur"}</span>{tour.tour_number && <span className="text-xs font-mono font-semibold text-slate-400">{tour.tour_number}</span>}</span>}
       subtitle={<span className="inline-flex items-center gap-1.5"><span className={`px-2 py-0.5 rounded-full border text-[11px] font-semibold ${st.chip}`}>{st.label}</span>{isHaster(tour) && <span className="px-2 py-0.5 rounded-full bg-rose-600 text-white text-[11px] font-bold">Haster</span>}<span>{fmtDayLong(tour.date)}</span></span>}>
       <section className={`${card} p-4`}>
+        {tour.cancelled && (
+          <div className="mb-3 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-300 dark:border-slate-600 px-3 py-2.5" data-testid="panel-cancelled">
+            <div className="text-sm font-bold text-slate-800 dark:text-slate-100">
+              {tour.cancelled_on_way ? "Annulleret mens chaufføren var på vej" : "Annulleret"}{tour.cancelled_by_name ? ` af ${tour.cancelled_by_name}` : ""}{tour.cancelled_at ? ` · ${fmtClock(tour.cancelled_at)}` : ""}
+            </div>
+            {tour.cancel_reason && <div className="text-sm text-slate-600 dark:text-slate-300">{tour.cancel_reason}</div>}
+            <div className="text-[11px] text-slate-500 mt-0.5">{tour.cancelled_on_way ? "Står som forgæves kørsel i Økonomi (aftalens forgæves-pris). Chaufføren har fået besked." : (assigneeName(tour) ? "Chaufføren har fået besked." : "Turen kan ikke startes.")}</div>
+          </div>
+        )}
         <div className="flex items-start gap-3">
           <MapPin className="w-5 h-5 text-emerald-600 mt-0.5 shrink-0" />
-          <div className="min-w-0 flex-1">
-            <div className="font-semibold text-slate-900 dark:text-white break-words">{tour.address || "Ingen adresse"}</div>
-            {tour.facility && tour.facility !== tour.address && <div className="text-sm text-slate-500 mt-0.5">→ {tour.facility}</div>}
+          <div className="min-w-0 flex-1 space-y-1.5" data-testid="panel-route">
+            {legs.length === 0 && <div className="font-semibold text-slate-900 dark:text-white">Ingen adresse</div>}
+            {legs.map((l, i) => (
+              <div key={i} className="min-w-0">
+                <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400">{legs.length > 1 ? `${i + 1} · ` : ""}{l.label}{l.name ? ` · ${l.name}` : ""}</div>
+                <div className={`break-words ${i === 0 ? "font-semibold text-slate-900 dark:text-white" : "text-sm text-slate-700 dark:text-slate-200"}`}>{l.address}</div>
+              </div>
+            ))}
           </div>
-          {tour.address && <a href={mapsUrl(tour.address)} target="_blank" rel="noreferrer" className={btnGhost}><Navigation className="w-4 h-4" /> Kort</a>}
+          {legs.length > 0 && <a href={routeUrl(legs)} target="_blank" rel="noreferrer" className={btnGhost} title={legs.length > 1 ? "Hele ruten i Google Maps" : "Åbn i Google Maps"}><Navigation className="w-4 h-4" /> Kort</a>}
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mt-4">
           {fact(siteWord, tour.plads)}
@@ -893,7 +1251,8 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
           {fact("Værksted", tour.workshop_address ? [tour.workshop_name, tour.workshop_phone].filter(Boolean).join(" · ") : "")}
           {fact("Tidsvindue", oh.from ? `${oh.from}–${oh.to}` : "")}
           {fact("Kilde", SOURCE_LABEL[tour.source] || tour.source)}
-          {fact("Bestilt af", tour.created_by_name)}
+          {fact("Bestilt af", byUs ? `${tour.on_behalf_company_name}${tour.on_behalf_user_name ? ` (${tour.on_behalf_user_name})` : ""} for kunden` : tour.created_by_name)}
+          {fact("Hvem bad om det", tour.requested_by)}
           {fact("Vægt", tour.weight ? `${tour.weight} kg` : "")}
         </div>
         <Registration tour={tour} />
@@ -918,7 +1277,7 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
                     {st.issue?.code && <span className="block text-[11px] font-semibold text-rose-700">Kunne ikke gennemføres: {st.issue.code}{st.issue.text ? ` - ${st.issue.text}` : ""}</span>}
                     {st.added_by_driver && <span className="block text-[11px] font-semibold text-amber-700">Tilføjet af chaufføren{st.approved ? " · godkendt" : ""}</span>}
                   </span>
-                  {st.added_by_driver && !st.approved && can("tours_edit") && (
+                  {st.added_by_driver && !st.approved && can("tours_edit") && caps.stops && (
                     <button type="button" className="shrink-0 px-2 py-1 rounded-lg bg-amber-500 text-white text-[11px] font-bold" onClick={() => approveStop(st)} data-testid={`approve-stop-${i}`}>Godkend</button>
                   )}
                 </li>
@@ -945,7 +1304,7 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
           <DriverSelect value={tour.driver_id} drivers={drivers} load={load} disabled={locked || tour.not_completed || !can("tours_assign")}
             onChange={(v) => onAssign([tour.id], v)} testid="panel-driver" />
         )}
-        {locked && <p className="text-[11px] text-slate-400 mt-1.5">Turen er {tour.completed ? "afsluttet" : "i gang"} og kan ikke flyttes til en anden chauffør.</p>}
+        {locked && <p className="text-[11px] text-slate-400 mt-1.5">{tour.cancelled && !tour.completed ? "Turen er annulleret. Genoptag bestillingen, hvis den skal køres alligevel." : `Turen er ${tour.completed ? "afsluttet" : "i gang"} og kan ikke flyttes til en anden chauffør.`}</p>}
       </section>
 
       <section className={`${card} p-4`}>
@@ -965,13 +1324,18 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
           <div className="space-y-3">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div><label className={labelCls}>Dato</label><input type="date" className={inputCls} value={edit.date} onChange={(e) => setEdit({ ...edit, date: e.target.value })} /></div>
-              <div>
+              {isOrder && (
+                <p className="sm:col-span-2 text-[11px] text-slate-500 bg-slate-50 dark:bg-slate-900 rounded-lg px-3 py-2" data-testid="panel-order-note">
+                  Materiale, container, adresse og opgave hører til kundens bestilling. {byUs ? "Ret dem under \"Ret bestilling\"." : "Kunden retter sin bestilling - dato, tid, prioritet og note kan I flytte her, og kunden ser ændringen."}
+                </p>
+              )}
+              {!isOrder && <div>
                 <label className={labelCls}>Opgave</label>
                 <select className={inputCls} value={edit.tour_type} onChange={(e) => setEdit({ ...edit, tour_type: e.target.value })}>
                   {(isGoods(tour) ? GOODS_TYPES : TOUR_TYPES).map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
                 </select>
-              </div>
-              {edit.lines ? (
+              </div>}
+              {isOrder ? null : edit.lines && caps.trailer_cargo ? (
                 <div className="sm:col-span-2 space-y-2">
                   <label className={labelCls}>Indhold</label>
                   {edit.lines.map((l, i) => (
@@ -991,18 +1355,17 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
               ) : (
                 <div><label className={labelCls}>Materiale</label><input className={inputCls} value={edit.fraction} onChange={(e) => setEdit({ ...edit, fraction: e.target.value })} /></div>
               )}
-              {caps.trailer_cargo && (
-                <div>
-                  <label className={labelCls}>Hængere</label>
-                  <select className={inputCls} value={edit.trailer_count} onChange={(e) => {
-                    const n = Number(e.target.value);
-                    setEdit({ ...edit, trailer_count: n, lines: edit.lines || (n >= 2 ? [{ text: edit.fraction, trailer: 1 }] : null) });
-                  }}>
-                    {[0, 1, 2, 3, 4].map(n => <option key={n} value={n}>{n === 0 ? "Ingen" : n}</option>)}
-                  </select>
-                </div>
-              )}
-              {edit.stops ? (
+              {/* 2026-10-19: Antal hængere er kerne; indhold pr. hænger er premium. */}
+              <div>
+                <label className={labelCls}>Hængere</label>
+                <select className={inputCls} value={edit.trailer_count} onChange={(e) => {
+                  const n = Number(e.target.value);
+                  setEdit({ ...edit, trailer_count: n, lines: caps.trailer_cargo && !isOrder ? (edit.lines || (n >= 2 ? [{ text: edit.fraction, trailer: 1 }] : null)) : edit.lines });
+                }}>
+                  {[0, 1, 2, 3, 4].map(n => <option key={n} value={n}>{n === 0 ? "Ingen" : n}</option>)}
+                </select>
+              </div>
+              {isOrder ? null : edit.stops && caps.stops ? (
                 <div className="sm:col-span-2 space-y-3">
                   <label className={labelCls}>Stop</label>
                   {edit.stops.map((st, i) => (
@@ -1031,8 +1394,8 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
                     <Plus className="w-4 h-4" /> Tilføj et stop mere på turen</button>}
                 </>
               )}
-              {!isGoods(tour) && <div><label className={labelCls}>Container nr.</label><input className={inputCls} value={edit.container} onChange={(e) => setEdit({ ...edit, container: e.target.value })} /></div>}
-              {!isGoods(tour) && <div><label className={labelCls}>Kapacitet</label><input className={inputCls} value={edit.capacity_label} onChange={(e) => setEdit({ ...edit, capacity_label: e.target.value })} /></div>}
+              {!isGoods(tour) && !isOrder && <div><label className={labelCls}>Container nr.</label><input className={inputCls} value={edit.container} onChange={(e) => setEdit({ ...edit, container: e.target.value })} /></div>}
+              {!isGoods(tour) && !isOrder && <div><label className={labelCls}>Kapacitet</label><input className={inputCls} value={edit.capacity_label} onChange={(e) => setEdit({ ...edit, capacity_label: e.target.value })} /></div>}
               <div><label className={labelCls}>Tidligst</label><input type="time" className={inputCls} value={edit.open_from} onChange={(e) => setEdit({ ...edit, open_from: e.target.value })} /></div>
               <div><label className={labelCls}>Senest</label><input type="time" className={inputCls} value={edit.open_to} onChange={(e) => setEdit({ ...edit, open_to: e.target.value })} /></div>
               <div>
@@ -1042,12 +1405,12 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
                 </select>
               </div>
               <div className="sm:col-span-2"><label className={labelCls}>Note til chaufføren</label><textarea rows={2} className={inputCls} value={edit.remark} onChange={(e) => setEdit({ ...edit, remark: e.target.value })} /></div>
-              <div className="sm:col-span-2 flex flex-wrap gap-4 text-sm">
+              {caps.capture && !isOrder && <div className="sm:col-span-2 flex flex-wrap gap-4 text-sm">
                 <label className="flex items-center gap-2"><input type="checkbox" className="w-4 h-4 accent-emerald-600" checked={!!edit.capture?.quantity} onChange={(e) => setEdit({ ...edit, capture: { ...edit.capture, quantity: e.target.checked } })} /> Chaufføren registrerer mængde</label>
                 <label className="flex items-center gap-2"><input type="checkbox" className="w-4 h-4 accent-emerald-600" checked={!!edit.capture?.photo} onChange={(e) => setEdit({ ...edit, capture: { ...edit.capture, photo: e.target.checked } })} /> Chaufføren tager billede</label>
-              </div>
+              </div>}
             </div>
-            {tour.series_id && seriesLeft > 0 && (
+            {tour.series_id && seriesLeft > 0 && caps.series && (
               <label className="flex items-center gap-2 text-sm bg-slate-50 dark:bg-slate-900 rounded-lg px-3 py-2" data-testid="panel-series-apply">
                 <input type="checkbox" className="w-4 h-4 accent-emerald-600" checked={applySeries} onChange={(e) => setApplySeries(e.target.checked)} />
                 Gem også for de {seriesLeft} kommende ture i serien (ikke datoen)
@@ -1060,7 +1423,7 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
           </div>
         ) : (
           <div className="flex flex-wrap gap-2">
-            {can("tours_edit") && <button className={btnGhost} disabled={tour.completed} data-testid="panel-edit" onClick={() => setEdit({
+            {can("tours_edit") && <button className={btnGhost} disabled={tour.completed || tour.cancelled} data-testid="panel-edit" onClick={() => setEdit({
               date: tour.date || "", fraction: tour.fraction || "",
               addr: Object.keys(tour.address_parts || {}).length ? tour.address_parts : parseAddress(tour.address),
               deliv: Object.keys(tour.facility_parts || {}).length ? tour.facility_parts : parseAddress(tour.facility === tour.plads ? "" : tour.facility),
@@ -1071,14 +1434,31 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
               container: tour.container || "", capacity_label: tour.capacity_label || "", open_from: oh.from || "", open_to: oh.to || "",
               tour_type: tour.tour_type || "normal", priority: isHaster(tour) ? "urgent" : (tour.priority || "normal"), remark: tour.remark || "",
             })}><Edit2 className="w-4 h-4" /> Ret</button>}
-            {tour.not_completed && can("tours_edit") && <button className={btnGhost} onClick={reactivate}><RotateCcw className="w-4 h-4" /> Genaktivér</button>}
-            {tour.series_id && seriesLeft > 0 && can("tours_delete") && <button className={btnGhost} onClick={deleteRestOfSeries} data-testid="panel-series-delete"><Trash2 className="w-4 h-4" /> Slet resten af serien ({seriesLeft})</button>}
+            {byUs && !started && !tour.cancelled && can("tours_edit") && onOrderForm && (
+              <button className={btnGhost} data-testid="panel-order-edit"
+                onClick={() => onOrderForm({ mode: "edit", initial: { ...orderInitial(tour.date), order_id: tour.order_id, tour_id: tour.id } })}>
+                <Edit2 className="w-4 h-4" /> Ret bestilling</button>
+            )}
+            {isOrder && !started && !tour.cancelled && can("tours_edit") && (
+              <button className={btnDanger} onClick={cancelOrder} data-testid="panel-order-cancel"><X className="w-4 h-4" /> Annullér bestilling</button>
+            )}
+            {isOrder && tour.cancelled && !tour.completed && can("tours_edit") && (
+              <button className={btnGhost} onClick={restoreOrder} data-testid="panel-order-restore"><RotateCcw className="w-4 h-4" /> {tour.cancelled_on_way ? "Genoptag (kørt alligevel)" : "Genoptag bestilling"}</button>
+            )}
+            {tour.not_completed && !tour.cancelled && can("tours_edit") && <button className={btnGhost} onClick={reactivate}><RotateCcw className="w-4 h-4" /> Genaktivér</button>}
+            {tour.series_id && seriesLeft > 0 && caps.series && can("tours_delete") && <button className={btnGhost} onClick={deleteRestOfSeries} data-testid="panel-series-delete"><Trash2 className="w-4 h-4" /> Slet resten af serien ({seriesLeft})</button>}
             {can("tours_edit") && <div className="inline-flex items-stretch rounded-lg border border-slate-200 dark:border-slate-600 overflow-hidden">
-              <input type="date" value={copyDate} onChange={(e) => setCopyDate(e.target.value)} className="px-2 text-base sm:text-sm bg-white dark:bg-slate-900 border-0 focus:outline-none" aria-label="Kopiér til dato" />
-              <button className="px-3 text-sm font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 inline-flex items-center gap-1.5 border-l border-slate-200 dark:border-slate-600"
-                onClick={() => copyDate && duplicate(copyDate)} data-testid="panel-copy"><Copy className="w-4 h-4" /> Kopiér</button>
+              <input type="date" value={copyDate} onChange={(e) => setCopyDate(e.target.value)} className="px-2 text-base sm:text-sm bg-white dark:bg-slate-900 border-0 focus:outline-none" aria-label={isOrder ? "Bestil igen til dato" : "Kopiér til dato"} />
+              {isOrder ? (
+                // 2026-10-19: En kopi af en bestilling er en ny bestilling for kunden.
+                <button className="px-3 text-sm font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 inline-flex items-center gap-1.5 border-l border-slate-200 dark:border-slate-600"
+                  onClick={() => copyDate && onOrderForm?.({ mode: "create", initial: { ...orderInitial(copyDate), again: true } })} data-testid="panel-order-again"><Copy className="w-4 h-4" /> Bestil igen</button>
+              ) : (
+                <button className="px-3 text-sm font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 inline-flex items-center gap-1.5 border-l border-slate-200 dark:border-slate-600"
+                  onClick={() => copyDate && duplicate(copyDate)} data-testid="panel-copy"><Copy className="w-4 h-4" /> Kopiér</button>
+              )}
             </div>}
-            {can("tours_delete") && <button className={btnDanger} disabled={tour.on_way || tour.source === "customer_order"}
+            {can("tours_delete") && !isOrder && <button className={btnDanger} disabled={tour.on_way || tour.source === "customer_order"}
               title={tour.source === "customer_order" ? "Kundebestillinger annulleres af kunden" : undefined} onClick={() => askConfirm({
               title: "Slet tur?", text: `${tour.fraction || "Turen"} · ${tour.address || ""} slettes permanent.`, danger: true, okLabel: "Slet",
               onOk: async () => {
@@ -1119,11 +1499,11 @@ function PlanBoard({ tours, drivers, canAssign, selected, setSelected, onAssign,
   const [search, setSearch] = useState("");
   const [driverQ, setDriverQ] = useState("");
   const blocked = tours.filter(t => t.not_completed && !t.completed);
-  const unassigned = tours.filter(t => !t.completed && !t.not_completed && !assigneeName(t) && (t.tour_type || "") !== "estimat")
+  const unassigned = tours.filter(t => !t.completed && !t.not_completed && !t.cancelled && !assigneeName(t) && (t.tour_type || "") !== "estimat")
     .sort((a, b) => (isHaster(b) - isHaster(a)) || String(a.open_from || "99").localeCompare(String(b.open_from || "99")) || String(a.created_at || "").localeCompare(String(b.created_at || "")));
   // Kan vælges: ikke-tildelte + tildelte ture der ikke er startet (kan gives
   // til en anden chauffør). Startede/færdige ture bliver hos chaufføren.
-  const movableAssigned = tours.filter(t => assigneeName(t) && !t.on_way && !t.completed && !t.not_completed);
+  const movableAssigned = tours.filter(t => assigneeName(t) && !t.on_way && !t.completed && !t.not_completed && !t.cancelled);
   const ids = new Set([...unassigned, ...movableAssigned].map(t => t.id));
   const sel = [...selected].filter(id => ids.has(id));
   const byDriver = drivers.map(d => {
@@ -1336,6 +1716,9 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
   // 2026-10-17: Koordinator-rettigheder - mangler en nøgle, er den tilladt.
   const can = useCallback((k) => perms[k] !== false, [perms]);
   const canSelect = can("tours_assign") || can("tours_edit") || can("tours_delete");
+  // Premium-evner (/logistics/profile). Indtil profilen er hentet vises ingen
+  // opret-knap, så premium ikke et øjeblik ser partner-formularen (2026-10-19).
+  const caps = useMemo(() => profile?.capabilities || {}, [profile]);
   // 2026-10-18: "Planlæg" = den tidligere Planlægning › Planlæg ture (ikke-
   // tildelte ture → chauffører → tildelte pr. chauffør), nu inde i Ture med
   // samme dato, filtre og tur-panel. Det er det ENE sted man tildeler ture;
@@ -1362,6 +1745,9 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
   const [collapsed, setCollapsed] = useState({});
   const [openId, setOpenId] = useState(null);
   const [formOpen, setFormOpen] = useState(false);
+  const [formPlads, setFormPlads] = useState("");
+  // 2026-10-19: "Bestil for kunden" / "Ret bestilling" / "Bestil igen".
+  const [orderForm, setOrderForm] = useState(null);
   const [confirm, setConfirm] = useState(null);
   const [materials, setMaterials] = useState([]);
   const [registry, setRegistry] = useState([]);
@@ -1461,8 +1847,8 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
   }, [tours]);
 
   const counts = useMemo(() => {
-    const c = { all: 0, open: 0, assigned: 0, onway: 0, done: 0, blocked: 0, haster: 0 };
-    source.forEach(t => { c.all++; c[tourStatus(t).id]++; if (isHaster(t) && !t.completed) c.haster++; });
+    const c = { all: 0, open: 0, assigned: 0, onway: 0, done: 0, blocked: 0, cancelled: 0, haster: 0 };
+    source.forEach(t => { c.all++; c[tourStatus(t).id]++; if (isHaster(t) && !t.completed && !t.cancelled) c.haster++; });
     return c;
   }, [source]);
 
@@ -1514,7 +1900,7 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
   }, [filtered, ownName]);
 
   const unreadTotal = Object.values(unread).reduce((s, n) => s + n, 0);
-  const hasterOpen = (tours || []).filter(t => isHaster(t) && !t.completed && !assigneeName(t) && !t.not_completed);
+  const hasterOpen = (tours || []).filter(t => isHaster(t) && !t.completed && !assigneeName(t) && !t.not_completed && !t.cancelled);
   const blocked = (tours || []).filter(t => t.not_completed);
   const missingPrice = (tours || []).filter(t => priceStatus[t.id]?.status === "missing");
   const dayOverview = useMemo(() => {
@@ -1523,7 +1909,7 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
       total: list.length,
       done: list.filter(t => t.completed).length,
       kg: Math.round(list.filter(t => t.completed).reduce((s, t) => s + (Number(t.weight) || 0), 0)),
-      noDriver: list.filter(t => !t.completed && !t.not_completed && !assigneeName(t)).length,
+      noDriver: list.filter(t => !t.completed && !t.not_completed && !t.cancelled && !assigneeName(t)).length,
     };
   }, [tours]);
   const withDeviation = (tours || []).filter(t => devs(t).length > 0);
@@ -1564,7 +1950,7 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
     } catch (e) { toast.error(formatApiError(e)); }
   };
   const bulkMove = async (d) => {
-    const movable = selectedTours.filter(t => !t.completed && !t.on_way);
+    const movable = selectedTours.filter(t => !t.completed && !t.on_way && !t.cancelled);
     if (!movable.length) { toast.error("Kun ture der ikke er startet kan flyttes"); return; }
     try {
       await Promise.all(movable.map(t => axios.put(`${API}/tours/${t.id}`, { date: d })));
@@ -1572,10 +1958,14 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
     } catch (e) { toast.error(formatApiError(e)); }
   };
   const bulkCopy = async (d) => {
+    // 2026-10-19: Bestillinger kopieres ikke som frie ture - de bestilles igen
+    // for kunden én ad gangen (åbn turen › "Bestil igen").
+    const copyable = selectedTours.filter(t => !t.order_id);
+    if (!copyable.length) { toast.error("Bestillinger kopieres ikke - åbn turen og vælg \"Bestil igen\""); return; }
     try {
-      if (!(await postToursBulk(selectedTours.map(t => copyBody(t, d))))) return;
-      toast.success(`${selectedTours.length} tur${selectedTours.length === 1 ? "" : "e"} kopieret til ${fmtDayLong(d)}`); clearSel(); refresh();
-    } catch (e) { toast.error(formatApiError(e)); }
+      if (!(await postToursBulk(copyable.map(t => copyBody(t, d))))) return;
+      toast.success(`${copyable.length} tur${copyable.length === 1 ? "" : "e"} kopieret til ${fmtDayLong(d)}${copyable.length < selectedTours.length ? ` · ${selectedTours.length - copyable.length} bestilling(er) sprunget over` : ""}`); clearSel(); refresh();
+    } catch (e) { const dd = e?.response?.data?.detail; toast.error(typeof dd === "object" && dd?.message ? dd.message : formatApiError(e)); }
   };
   const bulkDelete = () => {
     const deletable = selectedTours.filter(t => !t.on_way && !t.completed && t.source !== "customer_order");
@@ -1673,7 +2063,24 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" /> Live · {updatedAt.toLocaleTimeString("da-DK", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
           </span>
         )}
-        {can("tours_edit") && <button className={btnPrimary} onClick={() => setFormOpen(true)} data-testid="tours-new"><Plus className="w-4 h-4" /> Ny tur</button>}
+        {can("tours_edit") && profile && (caps.own_tours ? (
+          <>
+            <button className={btnPrimary} data-testid="tours-new" onClick={() => {
+              const def = fPlads || (pladsList.length === 1 ? pladsList[0].name : "");
+              const p = pladsList.find(x => x.name === def);
+              if (p && !p.own_location) { setOrderForm({ mode: "create", initial: { plads: def, date: showOverdue ? todayStr() : date } }); return; }
+              setFormPlads(def); setFormOpen(true);
+            }}><Plus className="w-4 h-4" /> Ny tur</button>
+            {pladsList.some(p => !p.own_location) && <button className={btnGhost} data-testid="tours-order"
+              onClick={() => setOrderForm({ mode: "create", initial: { plads: pladsList.find(p => p.name === fPlads && !p.own_location)?.name || "", date: showOverdue ? todayStr() : date } })}>
+              <Building2 className="w-4 h-4" /> Bestil for kunde</button>}
+          </>
+        ) : (
+          // En partner kører kun for genbrugsplads-kunderne: altid en bestilling for kunden.
+          <button className={btnPrimary} data-testid="tours-new"
+            onClick={() => setOrderForm({ mode: "create", initial: { plads: fPlads || "", date: showOverdue ? todayStr() : date } })}>
+            <Plus className="w-4 h-4" /> Bestil for kunde</button>
+        ))}
         {can("tours_edit") && <Menu testid="tours-more" items={[
           { label: "Importér fra Excel-skabelon", icon: Upload, onClick: () => fileRef.current?.click() },
           { label: "Hent tom Excel-skabelon", icon: Download, onClick: downloadTemplate },
@@ -1750,7 +2157,7 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
 
           {/* Status-faner (kun Dagsplan - Planlæg viser altid ikke-tildelte + chauffører) */}
           {view === "day" && <div className="flex gap-1.5 overflow-x-auto pb-1 -mx-1 px-1 scrollbar-none">
-            {STATUS_FILTERS.filter(s => s.id !== "blocked" || counts.blocked > 0).map(s => (
+            {STATUS_FILTERS.filter(s => (s.id !== "blocked" && s.id !== "cancelled") || counts[s.id] > 0).map(s => (
               <button key={s.id} onClick={() => setStatus(s.id)} data-testid={`tours-status-${s.id}`}
                 className={`shrink-0 px-3 py-2 rounded-xl text-sm font-semibold border inline-flex items-center gap-2 ${status === s.id
                   ? "bg-slate-900 text-white border-slate-900 dark:bg-white dark:text-slate-900 dark:border-white"
@@ -1804,7 +2211,7 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
               <span className="text-sm font-semibold px-2">{selected.size} valgt</span>
               {can("tours_assign") && view === "day" && (() => {
                 // Kun ture der ikke er startet/færdige kan gives til en (anden) chauffør.
-                const movable = selectedTours.filter(t => !t.on_way && !t.completed && !t.not_completed);
+                const movable = selectedTours.filter(t => !t.on_way && !t.completed && !t.not_completed && !t.cancelled);
                 return (
                   <button disabled={!movable.length} data-testid="bulk-plan"
                     title={movable.length ? "Vælg chauffør i Planlæg" : "De valgte ture er startet eller færdige - de kan ikke gives til en anden chauffør"}
@@ -1846,7 +2253,7 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
             <div className={`${card} p-10 text-center`}>
               <Truck className="w-10 h-10 text-slate-300 mx-auto" />
               <div className="mt-3 font-semibold text-slate-700 dark:text-slate-200">{activeFilters ? "Ingen ture matcher filtrene" : showOverdue ? "Ingen uafsluttede ture fra de sidste 14 dage" : "Ingen ture denne dag"}</div>
-              <div className="mt-1 text-sm text-slate-500">{activeFilters ? <button className="underline" onClick={resetFilters}>Nulstil filtre</button> : "Opret en tur, eller importér fra Excel via ⋯-menuen."}</div>
+              <div className="mt-1 text-sm text-slate-500">{activeFilters ? <button className="underline" onClick={resetFilters}>Nulstil filtre</button> : (caps.own_tours ? "Opret en tur, bestil for en kunde, eller importér fra Excel via ⋯-menuen." : "Bestil for en kunde, eller importér fra Excel via ⋯-menuen. Kundernes egne bestillinger dukker op her af sig selv.")}</div>
             </div>
           ) : (
             <div className="space-y-3">
@@ -1945,12 +2352,18 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
         </>
       )}
 
-      <TourForm open={formOpen} canPrice={can("economy_edit")} customers={registry} caps={profile?.capabilities || {}} onClose={() => setFormOpen(false)} initialDate={showOverdue ? todayStr() : date} pladsList={pladsList}
-        drivers={drivers} materials={materials} defaultPlads={fPlads || (pladsList.length === 1 ? pladsList[0].name : "")}
+      <TourForm open={formOpen} canPrice={can("economy_edit")} customers={registry} caps={caps} onClose={() => setFormOpen(false)} initialDate={showOverdue ? todayStr() : date} pladsList={pladsList}
+        drivers={drivers} materials={materials} defaultPlads={formPlads}
         siteWord={siteWord}
+        onOrderMode={(pl, d) => { setFormOpen(false); setOrderForm({ mode: "create", initial: { plads: pl, date: d } }); }}
+        onCreated={(d) => { setShowOverdue(false); if (d && d !== date) setDate(d); else refresh(); }} />
+      <CustomerOrderForm open={!!orderForm} mode={orderForm?.mode} initial={orderForm?.initial} onClose={() => setOrderForm(null)}
+        pladsList={pladsList} drivers={drivers} siteWord={siteWord}
+        onSwitchToTour={caps.own_tours ? (pl) => { setOrderForm(null); setFormPlads(pl); setFormOpen(true); } : null}
         onCreated={(d) => { setShowOverdue(false); if (d && d !== date) setDate(d); else refresh(); }} />
       <TourPanel tour={openTour} onClose={() => setOpenId(null)} drivers={drivers} load={load} onAssign={assign}
-        onChanged={refresh} onUnreadChanged={fetchUnread} ownName={ownName} siteWord={siteWord} askConfirm={setConfirm} can={can} caps={profile?.capabilities || {}}
+        onChanged={refresh} onUnreadChanged={fetchUnread} ownName={ownName} siteWord={siteWord} askConfirm={setConfirm} can={can} caps={caps}
+        onOrderForm={(o) => { setOpenId(null); setOrderForm(o); }}
         priceStatus={openTour ? priceStatus[openTour.id] : null} />
       <Confirm state={confirm} onClose={() => setConfirm(null)} />
     </div>

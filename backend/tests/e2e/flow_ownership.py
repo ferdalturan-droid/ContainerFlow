@@ -1,7 +1,8 @@
 """P0 (2026-10-18): Ejerskab af en tur følger lokationen.
 En tur på en genbrugsplads-kundes plads er kundens tur (priser, arkiv,
-koordinator-scope) - også når logistikfirmaet opretter den via "Ny tur" eller
-Kopiér. En tur på firmaets egen lokation er firmaets egen tur."""
+koordinator-scope). 2026-10-19: Logistikfirmaet opretter den som en bestilling
+for kunden ("Bestil for kunden") - en fri tur/kopi på kundens plads afvises.
+En tur på firmaets egen lokation er firmaets egen tur."""
 import subprocess
 import sys
 import time
@@ -24,11 +25,16 @@ def run():
         day = today()
         base = {"date": day, "plads": "Cirklen", "fraction": "Pap til HCS", "tour_type": "normal",
                 "address": "E2E Ejer Vej 1, 3000 Helsingør", "remark": "E2E ejerskab"}
-        tid = call("POST", "/tours/bulk", [base], t=la)[0]["id"]
-        c.tours.append(tid)
+        cir = db.plads.find_one({"name": "Cirklen"}, {"_id": 0, "location_code": 1})
+        r = call("POST", "/logistics/customer-orders", {"location_code": cir["location_code"], "plads_name": "Cirklen",
+                                                        "material": base["fraction"], "container_number": "E2E Ejer container",
+                                                        "order_date": day, "custom_address": base["address"],
+                                                        "comment": "E2E ejerskab", "requested_by": "E2E telefon"}, t=la)
+        tid = r["tour_id"]
+        c.tours.append(tid); c.orders.append(r["order_id"])
         t = db.tours.find_one({"id": tid}, {"_id": 0})
-        ok(t["company_id"] == hf and t.get("customer_name") == "Helsingør Forsyning" and ilk in (t.get("assigned_logistics_company_ids") or []),
-           "1 'Ny tur' på Cirklen ejes af Helsingør Forsyning (ILK står som tildelt)")
+        ok(t["company_id"] == hf and t.get("assigned_logistics_company_ids") == [ilk] and t.get("order_id"),
+           "1 'Bestil for kunden' på Cirklen ejes af Helsingør Forsyning (ILK står som tildelt)")
         ok(not t.get("customer_ref_id") and not t.get("private_company"), "2 ingen registerkunde/fritekst-kunde på kundens plads")
         row = next((x for x in call("GET", "/tours", t=la, params={"date": day, "limit": 500}) if x["id"] == tid), None)
         ok(row is not None and row.get("customer_name") == "Helsingør Forsyning", "3 ILK ser turen under Cirklen med kunden Helsingør Forsyning")
@@ -73,11 +79,8 @@ def run():
         src = db.tours.find_one({"id": o["tour_id"]}, {"_id": 0})
         copy = {k: src.get(k) for k in ("plads", "fraction", "facility", "address", "tour_type", "container", "capacity_label",
                                         "open_from", "open_to", "priority", "remark")}
-        cp = call("POST", "/tours/bulk", [{**copy, "date": in_days(1)}], t=la)[0]["id"]
-        c.tours.append(cp)
-        ct2 = db.tours.find_one({"id": cp}, {"_id": 0})
-        ok(ct2["company_id"] == hf and ct2.get("customer_name") == "Helsingør Forsyning" and not ct2.get("order_id"),
-           "10 kopi af en Helsingør-bestilling er Helsingørs tur")
+        ok(status_of("POST", "/tours/bulk", [{**copy, "date": in_days(1)}], t=la) == 409,
+           "10 en kopi af en Helsingør-bestilling som fri tur afvises - Ture-siden bruger 'Bestil igen' (en ny bestilling)")
 
         # Migrering: en gammel tur gemt med ILK's id på Cirklen bliver kundens
         old = new_id()
@@ -90,13 +93,20 @@ def run():
         c.tours += [old, locked]
         print("  (kører migreringen i en separat proces)")
         out = subprocess.run([sys.executable, "-c", (
-            "import asyncio, sys; sys.path.insert(0, '/app/backend'); import server;"
-            "asyncio.run(server._migrate_tour_owner_from_plads())")], capture_output=True, text=True, cwd="/app/backend", timeout=120)
+            "import asyncio, sys\nsys.path.insert(0, '/app/backend')\nimport server\n"
+            "async def m():\n    await server._migrate_tour_owner_from_plads()\n"
+            "    await server._migrate_manual_customer_tours_to_orders()\n"
+            "asyncio.run(m())")], capture_output=True, text=True, cwd="/app/backend", timeout=120)
         mo = db.tours.find_one({"id": old}, {"_id": 0})
         ml = db.tours.find_one({"id": locked}, {"_id": 0})
         ok(mo["company_id"] == hf and ilk in mo.get("assigned_logistics_company_ids", []) and not mo.get("private_company"),
            f"11 migrering: gammel tur på Cirklen bliver Helsingørs (ILK beholdt som tildelt){'' if out.returncode == 0 else ' - ' + out.stderr[-200:]}")
         ok(ml["company_id"] == ilk, "12 migrering rører ikke en faktureret tur")
+        mord = db.container_orders.find_one({"tour_id": old}, {"_id": 0})
+        ok(mo.get("order_id") and mord and mord["company_id"] == hf and mord["on_behalf_company_id"] == ilk
+           and mord["status"] == "pending" and mord.get("migrated_from_tour"),
+           "13 migrering: den åbne tur uden bestilling får en bestilling 'for kunden' - kunden kan nu se og annullere den")
+        ok(not db.container_orders.find_one({"tour_id": locked}), "14 ...men en afsluttet/faktureret tur får ingen (kundens rapporter ændres ikke)")
     finally:
         c.run()
 

@@ -95,6 +95,8 @@ export const assigneeName = (t) => t?.claimed_by || t?.driver_name || "";
 
 /** Én status pr. tur - samme ord hos planlægger og chauffør. */
 export const tourStatus = (t) => {
+  // 2026-10-19: Annulleret (af kunden, eller af logistikfirmaet på kundens anmodning).
+  if (t?.cancelled) return { id: "cancelled", label: t.cancelled_on_way ? "Annulleret undervejs" : "Annulleret", dot: "bg-slate-300", chip: "bg-slate-100 text-slate-500 border-slate-300 line-through decoration-slate-400 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-600" };
   if (t?.not_completed) return { id: "blocked", label: "Kan ikke gennemføres", dot: "bg-rose-500", chip: "bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950/40 dark:text-rose-300 dark:border-rose-900" };
   if (t?.completed) return { id: "done", label: "Færdig", dot: "bg-emerald-500", chip: "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300 dark:border-emerald-900" };
   if (t?.on_way) return { id: "onway", label: "På vej", dot: "bg-amber-500", chip: "bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-900" };
@@ -112,6 +114,59 @@ export const daysLate = (t) => {
 
 export const mapsUrl = (address) =>
   `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${address}, Denmark`)}`;
+
+/** 2026-10-19: Google Maps-vejvisning til én adresse (Danmark, så "Folehaven 1" ikke lander i udlandet). */
+export const navUrl = (address) => {
+  const a = String(address || "").trim();
+  return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(/danmark|denmark/i.test(a) ? a : `${a}, Danmark`)}&travelmode=driving`;
+};
+/** Hele ruten (fra første til sidste sted) - til planlæggerens "Kort". */
+export const routeUrl = (legs) => {
+  const ls = (legs || []).filter(l => (l.address || "").trim());
+  if (ls.length < 2) return navUrl(ls[0]?.address || "");
+  const dk = (a) => (/danmark|denmark/i.test(a) ? a : `${a}, Danmark`);
+  const mid = ls.slice(1, -1).map(l => dk(l.address)).join("|");
+  return `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(dk(ls[0].address))}&destination=${encodeURIComponent(dk(ls[ls.length - 1].address))}${mid ? `&waypoints=${encodeURIComponent(mid)}` : ""}&travelmode=driving`;
+};
+
+/**
+ * 2026-10-19: Turens steder i køreorden: [{ role: "pickup"|"delivery", label, name, address }].
+ * Felterne betyder noget forskelligt på en bestilling og en manuel tur, så
+ * kort, chauffør og planlægger bruger alle denne ene funktion:
+ *  - Bestilling, afhent container: Hent på pladsen (plads_address) -> aflever
+ *    på leveringsadressen (address, navn i delivery_name).
+ *  - Byt container: kun pladsen.
+ *  - Til værksted: pladsen -> værkstedet. Afhent fra værksted: værkstedet -> pladsen.
+ *  - Manuel tur: afhentning (address) -> aflevering (facility; pladsen når tom).
+ *  - Ture med stop: stoppene.
+ */
+export const routeOf = (t) => {
+  if (!t) return [];
+  const st = Array.isArray(t.stops) ? t.stops : [];
+  if (st.length) return st.map(s => ({ role: s.kind === "delivery" ? "delivery" : "pickup", label: s.kind === "delivery" ? "Aflevering" : "Afhentning", name: s.contact_name || "", address: s.address || "" }));
+  const pladsName = t.plads || "Pladsen";
+  if ((t.tour_type === "vaerksted" || t.tour_type === "afhent_vaerksted") && t.workshop_address) {
+    const w = { name: t.workshop_name || "Værksted", address: t.workshop_address };
+    const home = { name: pladsName, address: (t.tour_type === "vaerksted" ? t.address : t.facility) || t.plads_address || "" };
+    return t.tour_type === "vaerksted"
+      ? [{ role: "pickup", label: "Hent", ...home }, { role: "delivery", label: "Aflever", ...w }]
+      : [{ role: "pickup", label: "Hent", ...w }, { role: "delivery", label: "Aflever", ...home }];
+  }
+  if (t.tour_type === "flyt") return [{ role: "pickup", label: "Pladsen", name: pladsName, address: t.address || t.plads_address || "" }].filter(l => l.address);
+  const facIsPlads = !t.facility || t.facility === t.plads;
+  if (t.order_id && facIsPlads) {
+    const legs = [];
+    if (t.plads_address && t.plads_address !== t.address) legs.push({ role: "pickup", label: "Hent", name: pladsName, address: t.plads_address });
+    if (t.address) legs.push({ role: "delivery", label: "Aflever", name: t.delivery_name || "", address: t.address });
+    return legs;
+  }
+  const legs = [];
+  if (t.address) legs.push({ role: "pickup", label: "Hent", name: "", address: t.address });
+  if (facIsPlads ? t.plads_address : (t.facility && t.facility !== t.address)) {
+    legs.push({ role: "delivery", label: "Aflever", name: facIsPlads ? pladsName : "", address: facIsPlads ? t.plads_address : t.facility });
+  }
+  return legs;
+};
 
 /** Stop på turen (2026-10-17). Tom liste = almindelig tur med én adresse. */
 export const stopsOf = (t) => (Array.isArray(t?.stops) ? t.stops : []);
@@ -161,7 +216,10 @@ export const deviationsOf = (t, opts = {}) => {
     if (cap.photo && !(Number(t.photo_count) > 0)) out.push("Mangler billede");
     if (stopsOf(t).some(s => !s.done_at)) out.push("Stop ikke krydset af");
   }
-  if (t.trailer_count_actual != null && Number(t.trailer_count || 0) !== Number(t.trailer_count_actual)) out.push(`Hængere ${t.trailer_count || 0} → ${t.trailer_count_actual}`);
+  // 2026-10-19: Kun når planlæggeren faktisk har planlagt hængere. Uden planlagt
+  // antal er chaufførens svar en oplysning, ikke en afvigelse (før fik alle
+  // partner- og bestillings-ture "Hængere 0 → 1").
+  if (t.trailer_count_actual != null && Number(t.trailer_count || 0) > 0 && Number(t.trailer_count) !== Number(t.trailer_count_actual)) out.push(`Hængere ${t.trailer_count} → ${t.trailer_count_actual}`);
   if (stopsOf(t).some(s => s.issue?.code)) out.push("Stop ikke gennemført");
   if (stopsOf(t).some(s => s.added_by_driver && !s.approved)) out.push("Ekstra stop fra chaufføren");
   if (t.finish_issue?.code) out.push(t.finish_issue.code);

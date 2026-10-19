@@ -109,16 +109,21 @@ def run():
         ok(status_of("PUT", f"/tours/{own}", {"remark": "E2E rettet af fremmed"}, t=cu) == 403
            and db.tours.find_one({"id": own}, {"_id": 0, "remark": 1}).get("remark") != "E2E rettet af fremmed",
            "16 en kunde-bruger kan ikke rette et andet firmas tur (før: 200 og turen blev ændret)")
-        pl = db.plads.find_one({"location_code": "1101"}, {"_id": 0, "name": 1})["name"]
+        # En ældre tur på kundens plads uden bestilling (fra før "Bestil for kunden"),
+        # ejet af kunden - logistikfirmaet skal stadig kunne finde og slette den.
+        pl = db.plads.find_one({"location_code": "1101"}, {"_id": 0, "name": 1, "company_id": 1})
+        ilk_id = db.users.find_one({"email": ILK_ADMIN}, {"_id": 0, "company_id": 1})["company_id"]
         sid = "e2e-serie-" + new_id()
-        cust = call("POST", "/tours/bulk?force=true", [{"date": in_days(d), "plads": pl, "fraction": "E2E sikkerhed", "series_id": sid,
-                                                         "address": "Energivej 10, 3000 Helsingør", "facility": pl} for d in (4, 5)], t=la)
-        c.tours += [x["id"] for x in cust]
-        if db.tours.find_one({"id": cust[0]["id"]}, {"_id": 0, "series_id": 1}).get("series_id"):
-            ok(call("GET", f"/tours/series/{sid}", t=la, params={"from_date": in_days(1)})["count"] == 2,
-               "17 serien findes også når turene ligger på en kundes plads (før: 0)")
-        ok(status_of("DELETE", f"/tours/{cust[0]['id']}", t=la) == 200 and not db.tours.find_one({"id": cust[0]["id"]}),
-           "18 logistikfirmaet kan slette en tur det har oprettet på kundens plads (før: 404)")
+        cust = [new_id(), new_id()]
+        for i, d in zip(cust, (4, 5)):
+            db.tours.insert_one({"id": i, "date": in_days(d), "plads": pl["name"], "fraction": "E2E sikkerhed", "series_id": sid,
+                                 "company_id": pl["company_id"], "assigned_logistics_company_ids": [ilk_id], "completed": False,
+                                 "on_way": False, "source": "manual", "order_id": ""})
+        c.tours += cust
+        ok(call("GET", f"/tours/series/{sid}", t=la, params={"from_date": in_days(1)})["count"] == 2,
+           "17 serien findes også når turene ligger på en kundes plads (før: 0)")
+        ok(status_of("DELETE", f"/tours/{cust[0]}", t=la) == 200 and not db.tours.find_one({"id": cust[0]}),
+           "18 logistikfirmaet kan slette en tur på kundens plads (før: 404)")
         ou = login("ferdalturan+hf.1121.medarbejder1@gmail.com")
         ilk = db.users.find_one({"email": ILK_ADMIN}, {"_id": 0, "company_id": 1})["company_id"]
         mat = (call("GET", "/locations/code/1121").get("materials") or ["Pap"])[0]

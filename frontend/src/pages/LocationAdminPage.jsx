@@ -1222,7 +1222,13 @@ function OrdersTab({ locations = [] }) {
                       </td>
                       <td className="px-4 py-3 text-slate-500 max-w-xs truncate">{o.customer_address || "-"}</td>
                       <td className="px-4 py-3 text-slate-500">
-                        {o.created_by_name || o.created_by_email || "-"}
+                        {/* 2026-10-19: Bestilt af logistikfirmaet på jeres vegne */}
+                        {o.on_behalf_company_name ? (
+                          <span data-testid={`order-on-behalf-${o.id}`}><span className="font-semibold text-sky-700 dark:text-sky-300">{o.on_behalf_company_name}</span> for jer{o.requested_by ? <span className="block text-xs">{o.requested_by}</span> : null}</span>
+                        ) : (o.created_by_name || o.created_by_email || "-")}
+                        {o.status === "cancelled" && (o.cancel_reason || o.cancelled_by_logistics) && (
+                          <span className="block text-xs text-slate-400">Annulleret{o.cancelled_by_logistics ? " af logistikfirmaet" : ""}{o.cancel_reason ? `: ${o.cancel_reason}` : ""}</span>
+                        )}
                       </td>
                       <td className="px-4 py-3 text-slate-600 dark:text-slate-300 max-w-xs"
                           data-testid={`order-comment-${o.id}`}>
@@ -3970,7 +3976,7 @@ function ReportsCharts({ data }) {
                         <td className="px-2 py-1.5">{o.order_date}</td>
                         <td className="px-2 py-1.5">{o.material}</td>
                         <td className="px-2 py-1.5">{o.container_number || "-"}</td>
-                        <td className="px-2 py-1.5">{o.created_by_name || o.created_by_email || "-"}</td>
+                        <td className="px-2 py-1.5">{o.on_behalf_company_name ? `${o.on_behalf_company_name} for jer` : (o.created_by_name || o.created_by_email || "-")}</td>
                       </tr>
                     ))}
                   </tbody>

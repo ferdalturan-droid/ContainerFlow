@@ -4344,3 +4344,23 @@ Bestillingshistorik fremgår nu som en kompakt liste i stedet for store kort, s�
 - ✅ Webpack compiled cleanly (1 pre-existing warning).
 - Modal er korrekt nested og responder på backdrop-klik + close-knap.
 - Alle data-testid'er bevaret. Tilføjet: `history-modal-backdrop-${idx}` og `history-modal-close-${idx}`.
+
+
+## What's new 2026-10-19 (Bestil for kunden, annullering, kort-knap)
+- **Bestil for kunden (both tiers):** on a customer's genbrugsplads the logistics firm creates a real container order on the customer's behalf.
+  - Endpoints: POST /logistics/customer-orders, PUT /{id}, /{id}/cancel, /{id}/restore, GET /logistics/order-options and /logistics/order-defaults.
+  - It uses the customer's own materials, containers, delivery calendar and workshops. `requested_by` is required.
+  - The order is visible in Mine bestillinger as "Bestilt af X for jer" and counts in reports and CO2.
+  - Free tours on customer pladser now return 409.
+  - Excel rows on customer pladser become orders. Open legacy manual tours got an order through a one-time migration.
+- **Order tours:**
+  - The planner can change date, time, priority, driver and trailers; date and priority are mirrored to the order and audited.
+  - Content changes (material, container, address, task) return 409 and must be made in the order.
+- **Cancellation:**
+  - The customer can cancel until the tour is driven. While the driver is on the way, the customer must confirm; the tour then becomes a failed trip with code "Annulleret af kunden".
+  - The driver gets a push. A cancelled tour cannot be started or finished.
+  - Restore with a reason is possible.
+  - The Tour model now returns the `cancelled*` fields; before, a cancelled tour could still be driven.
+- **Route:** `routeOf` in tourHelpers is used by the driver's map chooser, the driver panel and the planner's map. Tours have `plads_address` and `delivery_name`.
+- **Partner:** trailer count is now core. Premium-only UI and pricing options are hidden. /import-argo is super-admin only.
+- **Security:** the customer roles' PUT /tours hole is closed (commit 0fa5e79).

@@ -48,22 +48,32 @@ def run():
                 "stops": [{"kind": "pickup", "street": "E2E Vej 1", "postal": "3000", "city": "Helsingør"},
                           {"kind": "pickup", "street": "E2E Vej 2", "postal": "3000", "city": "Helsingør"},
                           {"kind": "delivery", "street": "E2E Vej 3", "postal": "3000", "city": "Helsingør"}]}
-        tid = call("POST", "/tours/bulk?force=true", [body], t=ca)[0]["id"]
-        c.tours.append(tid)
+        # 2026-10-19: På kundens plads er det en bestilling for kunden - ingen fri tur.
+        try:
+            call("POST", "/tours/bulk?force=true", [body], t=ca)
+            ok(False, "3 partner: fri tur på kundens plads afvises")
+        except ApiError as ex:
+            ok(ex.status == 409 and ex.body["detail"].get("code") == "use_customer_order",
+               "3 partner: fri tur på kundens plads afvises - det skal være 'Bestil for kunden'")
+        r = call("POST", "/logistics/customer-orders", {"location_code": site["location_code"], "plads_name": site["name"],
+                                                        "material": "E2E Pap", "container_number": "E2E Container P",
+                                                        "order_date": next_weekday(), "custom_address": "E2E Partnervej 1, 3000 Helsingør",
+                                                        "requested_by": "E2E telefon", "trailer_count": 2}, t=ca)
+        tid = r["tour_id"]
+        c.tours.append(tid); c.orders.append(r["order_id"])
         t = db.tours.find_one({"id": tid}, {"_id": 0})
-        ok(t["tour_kind"] == "container" and t["trailer_count"] == 0 and not t.get("cargo_lines") and not t.get("stops")
-           and not t.get("series_id") and not t.get("capture"),
-           "3 partner: Fragt, hængere/indhold, stop, Gentag og 'Ved afslutning' fjernes - en almindelig containertur")
-        ok(t["company_id"] == hf and city in (t.get("assigned_logistics_company_ids") or []),
-           "4 ...og turen er kundens (Helsingør Forsyning) med partneren som tildelt")
+        ok(t["company_id"] == hf and t["assigned_logistics_company_ids"] == [city] and t["tour_kind"] == "container"
+           and t["trailer_count"] == 2 and t.get("order_id"),
+           "4 partner bestiller for kunden: kundens bestilling, kun partneren tildelt, antal hængere er kerne")
         ok(status_of("POST", "/tours/bulk", [{**body, "plads": ""}], t=ca) == 403, "5 partner kan ikke oprette egne ture uden plads")
 
         # --- Ret tur / stop / serier ----------------------------------------------------
-        ok(status_of("PUT", f"/tours/{tid}", {"trailer_count": 2, "stops": body["stops"]}, t=ca) == 403,
-           "6 partner kan ikke sætte hængere eller stop på en eksisterende tur")
-        call("PUT", f"/tours/{tid}", {"remark": "E2E note", "trailer_count": 3}, t=ca)
+        ok(status_of("PUT", f"/tours/{tid}", {"stops": body["stops"]}, t=ca) == 403,
+           "6 partner kan ikke sætte stop på en eksisterende tur")
+        call("PUT", f"/tours/{tid}", {"remark": "E2E note", "trailer_count": 3, "cargo_lines": body["cargo_lines"]}, t=ca)
         t = db.tours.find_one({"id": tid}, {"_id": 0})
-        ok(t["remark"] == "E2E note" and t["trailer_count"] == 0, "7 ...en almindelig rettelse virker, premium-feltet ignoreres")
+        ok(t["remark"] == "E2E note" and t["trailer_count"] == 3 and not t.get("cargo_lines"),
+           "7 ...en almindelig rettelse virker; antal hængere gemmes, indhold pr. hænger (premium) ignoreres")
         ok(status_of("POST", f"/tours/{tid}/stops", {"kind": "delivery", "street": "E2E Vej 9", "postal": "3000", "city": "Helsingør"},
                      t=login(CITY_DRIVER)) == 403, "8 partner-chauffør kan ikke tilføje stop")
 
@@ -82,6 +92,9 @@ def run():
                                              "base": {"pricing": {"model": "fixed", "amount": "555"}}, "surcharges": [], "effective": "all"}, t=ca)
         c.bundles.append(b["bundle_id"])
         ok(price_of(ca, tid)["price"].get("total") == 555, "13 ...men kan lave en prisaftale for sin genbrugsplads-kunde, og den gælder turen")
+
+        ok("stop" not in opts["categories"] and "per_unit" not in opts["models"] and "levering" not in opts["task_types"]
+           and "normal" in opts["task_types"], "13a partner: ingen prisvalg der aldrig kan ramme en partnertur (stop, pr. enhed, gods)")
 
         # --- Pladser og indstillinger -------------------------------------------------------
         ok(not any(p.get("company_id") == city for p in call("GET", "/plads", t=ca)), "14 partner ser ingen egne lokationer")

@@ -457,6 +457,25 @@ class Tour(BaseModel):
     workshop_name: str = ""
     workshop_address: str = ""
     workshop_phone: str = ""
+    # 2026-10-19: Ruten. plads_address = pladsens egen adresse (hvor
+    # containeren hentes på en afhentning); delivery_name = leveringsstedets
+    # navn fra kundens kalender (fx "HCS A/S Helsingør").
+    plads_address: str = ""
+    delivery_name: str = ""
+    # 2026-10-19: Bestilt af logistikfirmaet på kundens vegne ("Bestil for
+    # kunden") - hvem hos firmaet, og hvem hos kunden der bad om det.
+    on_behalf_company_name: str = ""
+    on_behalf_user_name: str = ""
+    requested_by: str = ""
+    # 2026-10-19: Annulleret (af kunden eller af logistikfirmaet på kundens
+    # anmodning). Før blev felterne gemt, men aldrig sendt med ud - chaufføren
+    # kunne starte og køre en annulleret tur.
+    cancelled: bool = False
+    cancelled_at: str = ""
+    cancelled_by_name: str = ""
+    cancelled_by_role: str = ""
+    cancelled_on_way: bool = False
+    cancel_reason: str = ""
 
 class TourCreate(BaseModel):
     date: str = Field(default_factory=get_dk_date_str)
@@ -1451,6 +1470,12 @@ async def get_tours(report_id: Optional[str] = None, plads: Optional[str] = None
                 query = preassign_clause
 
         tours = await _raw_db.tours.find(query, {"_id": 0, "receipt_image": 0}).to_list(min(limit, 500))
+        if payload.get("role") == "driver":
+            # 2026-10-19: En annulleret tur vises kun for den chauffør der havde
+            # den (tildelt eller i gang) - som "Annulleret", så han ved det.
+            _me = payload.get("sub") or payload.get("user_id") or ""
+            tours = [t for t in tours if not t.get("cancelled")
+                     or t.get("driver_id") == _me or t.get("claimed_by_id") == _me]
         if payload.get("role") == "logistics_admin":
             _scope = await _la_scope(payload)
             if _scope:
@@ -1655,8 +1680,10 @@ async def _normalize_tour_doc(td: dict, payload: Optional[dict], profile_cache: 
     customer_site = False
     if td.get("plads"):
         await _require_plads_allowed(payload, td["plads"])
-        pl = await _raw_db.plads.find_one({"name": td["plads"]}, {"_id": 0, "company_id": 1})
+        pl = await _raw_db.plads.find_one({"name": td["plads"]}, {"_id": 0, "company_id": 1, "address": 1, "city": 1})
         customer_site = bool(pl and la and pl.get("company_id") != la)
+        if pl:
+            td["plads_address"] = _plads_home(pl)
         # 2026-10-18 (P0): Ejerskab følger lokationen. En tur på en
         # genbrugsplads-kundes plads er KUNDENS tur (deres priser, deres arkiv,
         # koordinator-scope) - uanset om den kom fra bestilling, Excel, Kopiér
@@ -1665,6 +1692,14 @@ async def _normalize_tour_doc(td: dict, payload: Optional[dict], profile_cache: 
             owner = await _raw_db.companies.find_one(
                 {"id": pl.get("company_id")}, {"_id": 0, "id": 1, "name": 1, "customer_id": 1, "company_type": 1})
             if owner and owner.get("company_type") == COMPANY_TYPE_CUSTOMER:
+                # 2026-10-19: På en genbrugsplads-kundes plads bliver det en
+                # bestilling for kunden (kundens data, Mine bestillinger, CO2).
+                # En fri tur her endte uden bestilling - kunden så den aldrig.
+                if not profile_cache.get("__allow_customer_site"):
+                    raise HTTPException(status_code=409, detail={
+                        "code": "use_customer_order", "plads": td["plads"], "customer": owner.get("name") or "",
+                        "message": f'{td["plads"]} er {owner.get("name") or "kundens"}s genbrugsplads - '
+                                   "opret det som en bestilling for kunden (Bestil for kunden)."})
                 td["company_id"] = owner["id"]
                 td["customer_name"] = owner.get("name") or ""
                 td["customer_code"] = owner.get("customer_id") or ""
@@ -1681,7 +1716,8 @@ async def _normalize_tour_doc(td: dict, payload: Optional[dict], profile_cache: 
     if (td.get("priority") or "normal") == "normal" and _remark_says_haster(td.get("remark") or ""):
         td["priority"] = "urgent"
     if not premium:
-        td["trailer_count"] = 0
+        # 2026-10-19: Antal hængere er kerne (krogløfter med anhænger = to
+        # containere); indhold og pris pr. hænger er premium.
         td["cargo_lines"] = []
     tc = max(0, min(int(td.get("trailer_count") or 0), 9))
     td["trailer_count"] = tc
@@ -2657,6 +2693,7 @@ TOUR_TEMPLATE_HEADERS = [
     "Åbningstid",      # → open_from (e.g. "09:00")
     "Lukketid",        # → open_to (e.g. "16:00")
     "Note",            # → remark
+    "Dato",            # 2026-10-19: køredato (ÅÅÅÅ-MM-DD), tom = i dag
 ]
 TOUR_TEMPLATE_TEMPLATE_ROWS = 50  # how many rows the dropdown pre-populates
 
@@ -2719,7 +2756,7 @@ async def download_tours_template(payload: dict = Depends(get_current_user_paylo
         cell.alignment = align_center
 
     # Column widths (rough but readable)
-    widths = [40, 16, 18, 22, 36, 12, 12, 36]
+    widths = [40, 16, 18, 22, 36, 12, 12, 36, 14]
     for idx, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(idx)].width = w
 
@@ -2755,6 +2792,8 @@ async def download_tours_template(payload: dict = Depends(get_current_user_paylo
     ws.cell(row=instr_row + 4, column=1, value="• Containertype: f.eks. 'Lav åben 20 m³'.")
     ws.cell(row=instr_row + 5, column=1, value="• Åbningstid/Lukketid: format HH:MM (f.eks. 09:00, 16:00).")
     ws.cell(row=instr_row + 6, column=1, value="• Note: valgfri kommentar til chaufføren.")
+    ws.cell(row=instr_row + 7, column=1, value="• Dato: køredato, fx 2026-11-03. Tom = i dag.")
+    ws.cell(row=instr_row + 8, column=1, value="• En række på en kundes genbrugsplads bliver en bestilling for kunden (kunden ser den under Mine bestillinger).")
 
     buf = BytesIO()
     wb.save(buf)
@@ -2827,17 +2866,23 @@ async def upload_tours_template(
     created = 0
     errors = []
     today = get_dk_date_str()
+    la = payload.get("company_id") if payload.get("role") == "logistics_admin" else ""
     for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
         if not row or all(cell in (None, "") for cell in row):
             continue  # blank line — skip
-        # Defensive: pad to 8 columns
-        cells = list(row[:8]) + [""] * (8 - len(row[:8]))
-        loc_val, material, container_num, container_type, address, open_from, open_to, note = cells
+        # Defensive: pad to 9 columns (ældre skabeloner har 8 - uden Dato)
+        cells = list(row[:9]) + [""] * (9 - len(row[:9]))
+        loc_val, material, container_num, container_type, address, open_from, open_to, note, row_date = cells
 
         # Trim everything to strings
         def _s(x):
+            if isinstance(x, datetime):
+                return x.date().isoformat()
             return "" if x is None else (str(x).strip() if not isinstance(x, str) else x.strip())
         loc_val = _s(loc_val)
+        # 2026-10-19: Skabelonens vejledning står nederst i arket - ikke ture.
+        if loc_val.startswith(("ℹ️", "•")):
+            continue
         material = _s(material)
         container_num = _s(container_num)
         container_type = _s(container_type)
@@ -2845,6 +2890,7 @@ async def upload_tours_template(
         open_from = _s(open_from)
         open_to = _s(open_to)
         note = _s(note)
+        row_date = normalize_date(_s(row_date)[:10]) if _s(row_date) else today
 
         if not loc_val:
             errors.append({"row": row_idx, "reason": "Lokation mangler"})
@@ -2862,48 +2908,40 @@ async def upload_tours_template(
             continue
 
         plads_company_id = p.get("company_id") or ""
-        cust_info = cust_map.get(plads_company_id, {})
         plads_full_name = p.get("name") or ""
         loc_code = p.get("location_code") or ""
 
-        tour_doc = {
-            "id": str(uuid.uuid4()),
-            "date": today,
-            "container": container_num,
-            "container_type": container_type,
-            "fraction": material,
-            "facility": plads_full_name,
-            "address": address,
-            "plads": plads_full_name,
-            "open_from": open_from,
-            "open_to": open_to,
-            "remark": note,
-            "priority": "normal",
-            "tour_type": "normal",
-            "company_id": plads_company_id,
-            # 2026-10-19: Kun firmaet der importerer (ikke alle pladsens partnere),
-            # så to firmaer aldrig kan tage den samme tur.
-            "assigned_logistics_company_ids": ([payload["company_id"]] if payload.get("role") == "logistics_admin" and payload.get("company_id")
-                                               else list(p.get("assigned_logistics_company_ids") or [])[:1]),
-            "source": "manual",
-            "customer_name": cust_info.get("name", ""),
-            "customer_code": cust_info.get("customer_id", ""),
-            "claimed_by": "", "claimed_by_id": "", "claimed_at": "",
-            "driver_id": "", "driver_name": "",
-            "report_id": "", "sort_order": 0,
-            "completed": False, "on_way": False, "is_pause": False,
-            "is_same_day": False, "is_private": False, "private_company": "",
-            "weight": None, "time": "",
-            "lat": p.get("lat"), "lng": p.get("lng"),
-            "route_distance_km": None, "route_order": None,
-            "transport_mode": "", "on_way_time": "",
-            "receipt_image": "", "order_id": "",
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        await _raw_db.tours.insert_one(tour_doc)
-        # Track which plads-code this row maps to for the UI summary
-        tour_doc["_plads_code"] = loc_code
-        created += 1
+        def _why(e: HTTPException) -> str:
+            d = e.detail
+            return d.get("message") if isinstance(d, dict) else str(d)
+
+        # 2026-10-19: Kundens genbrugsplads -> en bestilling for kunden (samme
+        # vej som "Bestil for kunden": kundens data, dobbelt-tjek, CO2).
+        owner_is_customer = bool(la and plads_company_id and plads_company_id != la and plads_company_id in cust_map
+                                 and (await _raw_db.companies.find_one({"id": plads_company_id}, {"_id": 0, "company_type": 1}) or {})
+                                 .get("company_type") == COMPANY_TYPE_CUSTOMER)
+        try:
+            if owner_is_customer:
+                if not address:
+                    d = await logistics_order_defaults(loc_code, material, row_date, container_num, plads_full_name, payload)
+                    address = d.get("address") or ""
+                    open_from = open_from or d.get("open_from") or ""
+                    open_to = open_to or d.get("open_to") or ""
+                await logistics_create_customer_order(OnBehalfOrder(
+                    location_code=loc_code, plads_name=plads_full_name, material=material,
+                    container_number=container_num, tour_type="normal", order_date=row_date, comment=note,
+                    custom_address=address, open_from=open_from, open_to=open_to,
+                    requested_by=f"Excel-import ({(file.filename or 'fil')[:60]})"), payload)
+            else:
+                # Egen lokation (premium) / super admin: samme vej som "Ny tur"
+                # (turnummer, dobbelt-tjek, haster fra noten).
+                await create_tours_bulk([TourCreate(
+                    date=row_date, container=container_num, fraction=material, facility=plads_full_name,
+                    address=address, plads=plads_full_name, open_from=open_from, open_to=open_to, remark=note,
+                    tour_type="normal")], False, payload)
+            created += 1
+        except HTTPException as e:
+            errors.append({"row": row_idx, "reason": _why(e)})
 
     return {
         "created": created,
@@ -3011,7 +3049,7 @@ async def update_tour(tour_id: str, update: TourUpdate, payload: dict = Depends(
     # 2026-10-18: Hængere/indhold, stop og krav ved afslutning er premium.
     if payload.get("role") in ("logistics_admin", "driver") and \
             await _company_tier(payload.get("company_id") or "") == "partner":
-        for k in ("trailer_count", "cargo_lines", "stops", "capture", "series_id", "customer_ref_id"):
+        for k in ("cargo_lines", "stops", "capture"):  # antal hængere er kerne (2026-10-19)
             update_data.pop(k, None)
         if not update_data:
             raise HTTPException(status_code=403, detail="Det er en del af ContainerFlow Premium")
@@ -3054,9 +3092,34 @@ async def update_tour(tour_id: str, update: TourUpdate, payload: dict = Depends(
     # en kunde-bruger rette en hvilken som helst tur, hvis id'et var kendt.
     if not _tour_write_ok(payload, existing_tour):
         raise HTTPException(status_code=403, detail="Tur tilhører anden virksomhed")
+    # 2026-10-19: En annulleret tur kan ikke startes, tages eller afsluttes.
+    # Planlæggeren genoptager bestillingen først (fx kørt alligevel).
+    if existing_tour.get("cancelled") and set(update_data) - {"remark"}:
+        raise HTTPException(status_code=409, detail="Turen er annulleret af kunden - kontakt planlæggeren")
+    # 2026-10-19: På en bestillings-tur hører materiale, container, adresse og
+    # opgavetype til bestillingen (kundens CO2, rapporter, Mine bestillinger).
+    # Planlæggeren flytter dato/tid/prioritet/chauffør; indholdet rettes i
+    # bestillingen, så turen og bestillingen aldrig siger noget forskelligt.
+    if existing_tour.get("order_id") and role == "logistics_admin":
+        _content = ("fraction", "container", "address", "facility", "plads", "tour_type", "capacity_label",
+                    "loose_estimated_count", "address_parts", "facility_parts")
+        _diff = [k for k in _content if k in update_data and (update_data[k] or None) != (existing_tour.get(k) or None)]
+        if _diff:
+            raise HTTPException(status_code=409, detail=(
+                "Materiale, container, adresse og opgave hører til kundens bestilling. "
+                + ("Ret bestillingen i stedet." if existing_tour.get("on_behalf_company_name") else "Kunden retter sin bestilling.")))
     if role in ("logistics_admin", "driver"):
         if update_data.get("plads") and update_data["plads"] != existing_tour.get("plads"):
             await _require_plads_allowed(payload, update_data["plads"])
+            # 2026-10-19: En tur flyttes ikke ind på en kundes genbrugsplads (så
+            # skal det være en bestilling for kunden), og en partner kan ikke
+            # flytte en tur til en egen lokation (egne ture er premium).
+            _np = await _raw_db.plads.find_one({"name": update_data["plads"]}, {"_id": 0, "company_id": 1})
+            _la = payload.get("company_id") or ""
+            if _np and _np.get("company_id") and _np.get("company_id") != _la:
+                raise HTTPException(status_code=409, detail="En tur kan ikke flyttes til en kundes genbrugsplads - bestil for kunden i stedet")
+            if _np and _np.get("company_id") == _la and await _company_tier(_la) == "partner":
+                raise HTTPException(status_code=403, detail="Egne lokationer er en del af ContainerFlow Premium")
 
     # 2026-10-18: En faktureret tur er frosset. Registreringen (vægt, mængde,
     # status, tider, hængere) må ikke ændres bagefter, ellers passer den ikke
@@ -3447,6 +3510,25 @@ async def update_tour(tour_id: str, update: TourUpdate, payload: dict = Depends(
             mirror["status"] = "in_progress"
         else:
             mirror["status"] = "pending"
+        if tour.get("cancelled") or tour.get("not_completed"):
+            mirror.pop("status", None)  # annulleret/forgæves forbliver det
+        # 2026-10-19: Planlæggeren flytter dato eller prioritet på turen ->
+        # kundens bestilling følger med (før stod den gamle dato i Mine bestillinger).
+        _ord_change = {}
+        if "date" in update_data and tour.get("date") and tour.get("date") != existing_tour.get("date"):
+            mirror["order_date"] = tour["date"]
+            mirror["date"] = tour["date"]
+            _ord_change["order_date"] = tour["date"]
+            await _raw_db.tours.update_one({"id": tour_id}, {"$set": {"order_date": tour["date"]}})
+        if "priority" in update_data and tour.get("priority") != existing_tour.get("priority"):
+            mirror["priority"] = {"urgent": "haster", "low": "senere"}.get(tour.get("priority") or "", "normal")
+            _ord_change["priority"] = mirror["priority"]
+        if _ord_change and role in ("logistics_admin", "super_admin"):
+            try:
+                await _co_audit(order_id, "edit_by_logistics", {**payload, "name": await _actor_name(payload)},
+                                {k: (existing_tour.get("date") if k == "order_date" else None) for k in _ord_change}, _ord_change)
+            except Exception:
+                pass
 
         # Fase 9 (2026-06-17): When chaufføren leverer vægten (kg), mirror den
         # over på ordren som `weight_kg` og genberegn `co2_kg` baseret på det
@@ -3569,6 +3651,8 @@ async def mark_tour_not_completed(
         raise HTTPException(status_code=409, detail="Turen er allerede afsluttet")
     if tour.get("not_completed"):
         raise HTTPException(status_code=409, detail="Turen er allerede markeret som ikke-gennemført")
+    if tour.get("cancelled"):
+        raise HTTPException(status_code=409, detail="Kunden har annulleret turen")
     if not tour.get("on_way"):
         raise HTTPException(status_code=409, detail="Chaufføren skal være 'På vej' før turen kan markeres ikke-gennemført")
     now_iso = datetime.now(DK_TZ).isoformat()
@@ -3809,10 +3893,13 @@ async def reactivate_tour(
     if role not in ("super_admin", "logistics_admin"):
         raise HTTPException(status_code=403, detail="Kun logistik-admin må gen-aktivere ture")
     tour = await _raw_db.tours.find_one({"id": tour_id}, {"_id": 0})
-    if not tour:
+    if not tour or not _tour_write_ok(payload, tour):
         raise HTTPException(status_code=404, detail="Tur ikke fundet")
     if not tour.get("not_completed"):
         raise HTTPException(status_code=409, detail="Turen er ikke markeret som ikke-gennemført")
+    if tour.get("cancelled"):
+        # Kunden annullerede - "Genoptag bestilling" (med begrundelse kunden ser).
+        raise HTTPException(status_code=409, detail="Kunden har annulleret bestillingen - brug 'Genoptag bestilling'")
     now_iso = datetime.now(DK_TZ).isoformat()
     by_name = (payload.get("name") or payload.get("email") or "").strip()
     admin_comment = (body.get("comment") or "").strip()
@@ -4255,8 +4342,10 @@ async def parse_argo(request: ArgoParseRequest):
     return ArgoParseResponse(tours=parsed, count=len(parsed))
 
 @api_router.post("/import-argo")
-async def import_argo(request: dict = Body(...)):
-    """Import parsed Argo tours into the database."""
+async def import_argo(request: dict = Body(...), _sa: dict = Depends(require_role("super_admin"))):
+    """Import parsed Argo tours into the database.
+    2026-10-19: Kun super admin - importen går uden om pladskontrol og
+    ejerskab, og den har ingen knap i appen."""
     tours_data = request.get("tours", [])
     date = request.get("date", "")
     plads = request.get("plads", "")
@@ -9075,27 +9164,53 @@ async def check_duplicate_order(
     }
 
 
-def _order_tour_route(tour_type: str, container_addr: str, plads_doc: Optional[dict], location_name: str,
-                      w_name: str = "", w_addr: str = "", w_phone: str = "") -> dict:
-    """2026-10-19: Hvor turen starter (`address`) og slutter (`facility`).
-    - Afhent container / byt container / løs: containerens adresse; slut som før.
-    - Til værksted: pladsen (containeren) -> værkstedet.
-    - Afhent fra værksted: værkstedet -> pladsen.
-    Containeradressen får byens navn med, så Google Maps-linket rammer rigtigt
-    ("Folehaven 1" alene kan ligge mange steder)."""
+def _plads_home(plads_doc: Optional[dict], fallback: str = "") -> str:
+    """Pladsens adresse med by, så Google Maps rammer rigtigt ("Folehaven 1"
+    alene kan ligge mange steder)."""
+    a = ((plads_doc or {}).get("address") or fallback or "").strip()
     city = ((plads_doc or {}).get("city") or "").strip()
-    a = (container_addr or (plads_doc or {}).get("address") or "").strip()
-    home = f"{a}, {city}" if a and city and "," not in a and city.lower() not in a.lower() else a
-    out = {"address": home, "workshop_name": (w_name or "").strip(), "workshop_address": (w_addr or "").strip(),
-           "workshop_phone": (w_phone or "").strip()}
+    return f"{a}, {city}" if a and city and "," not in a and city.lower() not in a.lower() else a
+
+
+def _order_tour_route(tour_type: str, order_addr: str, plads_doc: Optional[dict], location_name: str,
+                      w_name: str = "", w_addr: str = "", w_phone: str = "", delivery_name: str = "") -> dict:
+    """2026-10-19: Hvor turen starter og slutter. Felternes betydning er den
+    samme som altid på bestillings-ture (de bruges af priser, rapporter og CO2):
+    - Afhent container / løs afhentning: `address` = leveringsadressen (fx
+      HCS), `facility` = pladsens navn. Containeren hentes på pladsen
+      (`plads_address`) og køres til leveringsadressen.
+    - Byt container: kun pladsen.
+    - Til værksted: pladsen -> værkstedet. Afhent fra værksted: værkstedet -> pladsen.
+    Kun pladsens egen adresse får byen på - ikke en leveringsadresse kunden
+    selv har skrevet (før blev "Energivej 10" til "Energivej 10, Hornbæk")."""
+    home = _plads_home(plads_doc, order_addr if tour_type in ("flyt", "vaerksted", "afhent_vaerksted") else "")
+    out = {"plads_address": home, "workshop_name": (w_name or "").strip(), "workshop_address": (w_addr or "").strip(),
+           "workshop_phone": (w_phone or "").strip(), "delivery_name": ""}
     if tour_type == "vaerksted" and out["workshop_address"]:
-        out["facility"] = out["workshop_address"]
+        out["address"], out["facility"] = home or order_addr, out["workshop_address"]
     elif tour_type == "afhent_vaerksted" and out["workshop_address"]:
-        out["address"] = out["workshop_address"]
-        out["facility"] = home
+        out["address"], out["facility"] = out["workshop_address"], home or order_addr
+    elif tour_type in ("flyt", "vaerksted", "afhent_vaerksted"):
+        out["address"], out["facility"] = home or order_addr, location_name
     else:
-        out["facility"] = location_name
+        out["address"], out["facility"] = (order_addr or "").strip(), location_name
+        out["delivery_name"] = (delivery_name or "").strip()
     return out
+
+
+async def _delivery_name(location_code: str, addr_line: str, address_id: str = "") -> str:
+    """Navnet på leveringsstedet i kundens kalender (fx "HCS A/S Helsingør")."""
+    if address_id:
+        a = await _raw_db.delivery_addresses.find_one({"id": address_id}, {"_id": 0, "label": 1})
+        if a and a.get("label"):
+            return a["label"]
+    line = _pricing.norm_label(addr_line or "")
+    if not line:
+        return ""
+    async for a in _raw_db.delivery_addresses.find({"location_code": location_code}, {"_id": 0}):
+        if _pricing.norm_label(_da_format_address_line(a)) == line or _pricing.norm_label(a.get("street") or "") == line:
+            return a.get("label") or ""
+    return ""
 
 
 def _single_partner(partners: List[str], chosen: str, material: str, partner_materials: Optional[dict]) -> List[str]:
@@ -9118,28 +9233,37 @@ def _single_partner(partners: List[str], chosen: str, material: str, partner_mat
 @api_router.post("/customer-orders/submit")
 async def submit_customer_order(order: StructuredOrderCreate, request: Request):
     """Submit a structured customer order - creates both container_order and tour for drivers."""
-    # Get location info
-    location = await _lookup_site_by_code(order.location_code)
-    if not location:
-        raise HTTPException(status_code=404, detail="Location not found")
     # Optional: capture which order-user submitted (so Lokation Admin can see
     # who ordered what in the dashboard). The endpoint stays public for the
     # legacy QR-code flow (`/order` page on a kiosk).
-    submitter_user_id = ""
-    submitter_user_name = ""
-    submitter_user_email = ""
+    submitter = {"id": "", "name": "", "email": ""}
     auth_header = request.headers.get("Authorization", "") if hasattr(request, "headers") else ""
     if auth_header.startswith("Bearer "):
         try:
             tk_payload = decode_token(auth_header.split(" ", 1)[1])
-            submitter_user_id = tk_payload.get("sub") or ""
-            if submitter_user_id:
-                u = await _raw_db.users.find_one({"id": submitter_user_id}, {"_id": 0, "name": 1, "email": 1})
+            submitter["id"] = tk_payload.get("sub") or ""
+            if submitter["id"]:
+                u = await _raw_db.users.find_one({"id": submitter["id"]}, {"_id": 0, "name": 1, "email": 1})
                 if u:
-                    submitter_user_name = u.get("name") or u.get("email") or ""
-                    submitter_user_email = u.get("email") or ""
+                    submitter["name"] = u.get("name") or u.get("email") or ""
+                    submitter["email"] = u.get("email") or ""
         except Exception:  # noqa: BLE001 — best-effort; anonymous flow still allowed
-            submitter_user_id = ""
+            submitter["id"] = ""
+    return await _create_customer_order(order, submitter)
+
+
+async def _create_customer_order(order: StructuredOrderCreate, submitter: dict,
+                                 on_behalf: Optional[dict] = None) -> dict:
+    """Selve oprettelsen af en bestilling + tur. Bruges af bestillingssiden og
+    (2026-10-19) af logistikfirmaets "Bestil for kunden" (`on_behalf`), så en
+    bestilling er den samme uanset hvem der taster den: kundens materialer,
+    containere, leveringskalender, dobbeltbestillings-tjek, CO2 og rapporter."""
+    location = await _lookup_site_by_code(order.location_code)
+    if not location:
+        raise HTTPException(status_code=404, detail="Location not found")
+    submitter_user_id = submitter.get("id") or ""
+    submitter_user_name = submitter.get("name") or ""
+    submitter_user_email = submitter.get("email") or ""
     # Enforce: when an authenticated user creates the order, leveringsaddresse
     # (custom_address) is OBLIGATORISK. The public QR-kiosk flow keeps the old
     # behaviour (falls back to the location's default address).
@@ -9196,7 +9320,8 @@ async def submit_customer_order(order: StructuredOrderCreate, request: Request):
             if existing:
                 raise HTTPException(
                     status_code=409,
-                    detail="Der findes allerede en ikke-fuldført bestilling for denne container og opgavetype.",
+                    detail=("Der findes allerede en ikke-fuldført bestilling for denne container og opgavetype"
+                            + (f" (bestilt til {existing.get('order_date')})" if existing.get("order_date") else "") + "."),
                 )
     
     # Look up plads address
@@ -9281,6 +9406,13 @@ async def submit_customer_order(order: StructuredOrderCreate, request: Request):
     doc["created_by_user_id"] = submitter_user_id
     doc["created_by_name"] = submitter_user_name
     doc["created_by_email"] = submitter_user_email
+    # 2026-10-19: "Bestil for kunden" - logistikfirmaet taster bestillingen for
+    # kunden (telefon, mail, chaufføren så en fuld container ...).
+    if on_behalf:
+        doc["on_behalf_company_id"] = on_behalf.get("company_id") or ""
+        doc["on_behalf_company_name"] = on_behalf.get("company_name") or ""
+        doc["on_behalf_user_name"] = submitter_user_name
+        doc["requested_by"] = (on_behalf.get("requested_by") or "").strip()[:120]
     # Leveringsadresse audit fields — persist primary + alternative IDs (and
     # the original address line in case the row is later edited / deleted).
     doc["delivery_address_id"] = (order.delivery_address_id or "").strip()
@@ -9426,8 +9558,11 @@ async def submit_customer_order(order: StructuredOrderCreate, request: Request):
         lng=(picked_plads or plads or {}).get("lng") if (picked_plads or plads) else None
     )
     tour_doc = tour_obj.model_dump()
-    tour_doc.update(_order_tour_route(tour_doc["tour_type"], final_address, picked_plads or plads or location, location["name"],
-                                      order.workshop_name, order.workshop_address, order.workshop_phone))
+    tour_doc.update(_order_tour_route(
+        tour_doc["tour_type"], final_address, picked_plads or plads or location, location["name"],
+        order.workshop_name, order.workshop_address, order.workshop_phone,
+        await _delivery_name(order.location_code, final_address,
+                             doc.get("alternative_delivery_address_id") or doc.get("delivery_address_id") or "")))
     tour_doc["company_id"] = resolved_company_id
     tour_doc["order_id"] = doc["id"]  # link tour -> order for status sync
     tour_doc["assigned_logistics_company_ids"] = doc["assigned_logistics_company_ids"]
@@ -9436,6 +9571,10 @@ async def submit_customer_order(order: StructuredOrderCreate, request: Request):
     # admin-UI'et kan vise det via OrderInfoLine uden et ekstra DB-opslag.
     tour_doc["created_by_name"] = doc.get("created_by_name", "")
     tour_doc["created_by_email"] = doc.get("created_by_email", "")
+    if on_behalf:
+        tour_doc["on_behalf_company_name"] = doc.get("on_behalf_company_name", "")
+        tour_doc["on_behalf_user_name"] = doc.get("on_behalf_user_name", "")
+        tour_doc["requested_by"] = doc.get("requested_by", "")
     tour_doc["capacity_label"] = doc.get("capacity_label", "")
     tour_doc["capacity_volume_m3"] = doc.get("capacity_volume_m3")
     tour_doc["order_date"] = doc.get("order_date", "")
@@ -16445,7 +16584,9 @@ async def org_report_orders(
     for o in orders:
         mat = o.get("material") or "(ukendt)"
         by_material[mat] = by_material.get(mat, 0) + 1
-        emp = o.get("created_by_name") or o.get("created_by_email") or "(ukendt)"
+        # 2026-10-19: Bestilt af logistikfirmaet for kunden tæller under firmaet.
+        emp = (f"{o['on_behalf_company_name']} (logistik)" if o.get("on_behalf_company_name")
+               else o.get("created_by_name") or o.get("created_by_email") or "(ukendt)")
         by_employee[emp] = by_employee.get(emp, 0) + 1
         # Brugerkrav 2026-06-15 (runde 13): "Værksteder"-KPI tæller KUN
         # `vaerksted` (til værksted) — `afhent_vaerksted` (afhent fra
@@ -16453,7 +16594,8 @@ async def org_report_orders(
         # tælle dobbelt.
         if o.get("tour_type") == "vaerksted":
             workshop_count += 1
-        if (o.get("status_label") or "afventer") == "afventer":
+        # 2026-10-19: status_label gemmes ikke - "afventer" = status pending.
+        if (o.get("status") or "pending") == "pending" and o.get("tour_type") != "estimat":
             pending_count += 1
         # Brugerkrav 2026-06-15 (runde 12): Haste bestillinger (priority='haster')
         # erstatter den tidligere lidet meningsfulde "Afventer (i alt)" KPI.
@@ -16529,7 +16671,7 @@ async def org_report_orders(
     all_pending = await _raw_db.container_orders.count_documents({
         "company_id": ctx["caller"]["company_id"],
         "location_code": location_code,
-        "status_label": "afventer",
+        "status": {"$in": ["pending", "", None]}, "tour_type": {"$ne": "estimat"},
         "$or": [{"deleted": {"$exists": False}}, {"deleted": False}],
     })
 
@@ -16537,7 +16679,7 @@ async def org_report_orders(
     pending_orders = await _raw_db.container_orders.find({
         "company_id": ctx["caller"]["company_id"],
         "location_code": location_code,
-        "status_label": "afventer",
+        "status": {"$in": ["pending", "", None]}, "tour_type": {"$ne": "estimat"},
         "$or": [{"deleted": {"$exists": False}}, {"deleted": False}],
     }, {"_id": 0}).sort([("order_date", -1)]).limit(50).to_list(50)
 
@@ -16687,11 +16829,14 @@ async def org_report_orders_multi(
     for o in orders:
         mat = o.get("material") or "(ukendt)"
         by_material[mat] = by_material.get(mat, 0) + 1
-        emp = o.get("created_by_name") or o.get("created_by_email") or "(ukendt)"
+        # 2026-10-19: Bestilt af logistikfirmaet for kunden tæller under firmaet.
+        emp = (f"{o['on_behalf_company_name']} (logistik)" if o.get("on_behalf_company_name")
+               else o.get("created_by_name") or o.get("created_by_email") or "(ukendt)")
         by_employee[emp] = by_employee.get(emp, 0) + 1
         loc = o.get("location_code") or "(ukendt)"
         by_location_count[loc] = by_location_count.get(loc, 0) + 1
-        if (o.get("status_label") or "afventer") == "afventer":
+        # 2026-10-19: status_label gemmes ikke - "afventer" = status pending.
+        if (o.get("status") or "pending") == "pending" and o.get("tour_type") != "estimat":
             pending_count += 1
             by_location_pending[loc] = by_location_pending.get(loc, 0) + 1
         if o.get("tour_type") == "vaerksted":
@@ -16763,7 +16908,7 @@ async def org_report_orders_multi(
     all_pending = await _raw_db.container_orders.count_documents({
         "company_id": caller["company_id"],
         "location_code": {"$in": wanted},
-        "status_label": "afventer",
+        "status": {"$in": ["pending", "", None]}, "tour_type": {"$ne": "estimat"},
         "$or": [{"deleted": {"$exists": False}}, {"deleted": False}],
     })
 
@@ -16771,7 +16916,7 @@ async def org_report_orders_multi(
     pending_orders = await _raw_db.container_orders.find({
         "company_id": caller["company_id"],
         "location_code": {"$in": wanted},
-        "status_label": "afventer",
+        "status": {"$in": ["pending", "", None]}, "tour_type": {"$ne": "estimat"},
         "$or": [{"deleted": {"$exists": False}}, {"deleted": False}],
     }, {"_id": 0}).sort([("order_date", -1)]).limit(100).to_list(100)
 
@@ -17023,7 +17168,8 @@ async def org_tour_archive(
             "time": t.get("time", ""),
             "priority": t.get("priority") or order.get("priority") or "normal",
             "comment": order.get("comment", "") or t.get("remark", ""),
-            "ordered_by": order.get("created_by_name", ""),
+            "ordered_by": (f"{order['on_behalf_company_name']} for jer" if order.get("on_behalf_company_name")
+                           else order.get("created_by_name", "")),
             "ordered_by_email": order.get("created_by_email", ""),
             "customer_address": order.get("customer_address", ""),
             "tour_number": t.get("tour_number", ""),
@@ -17285,20 +17431,30 @@ async def edit_customer_order(order_id: str, body: dict,
                               payload: dict = Depends(get_current_user_payload)):
     caller_role = payload.get("role")
     caller_cid = payload.get("company_id")
-    if caller_role in ("driver", "genbrug_plads"):
-        raise HTTPException(status_code=403, detail="Denne rolle må ikke redigere bestillinger")
-    if caller_role not in ("super_admin", "customer_admin", "location_admin", "order"):
-        raise HTTPException(status_code=403, detail="Adgang nægtet")
+    on_behalf = bool(payload.get("_on_behalf_edit"))  # logistikfirmaet retter sin egen bestilling for kunden
+    if not on_behalf:
+        if caller_role in ("driver", "genbrug_plads"):
+            raise HTTPException(status_code=403, detail="Denne rolle må ikke redigere bestillinger")
+        if caller_role not in ("super_admin", "customer_admin", "location_admin", "order"):
+            raise HTTPException(status_code=403, detail="Adgang nægtet")
     order = await _raw_db.container_orders.find_one({"id": order_id}, {"_id": 0})
     if not order:
         raise HTTPException(status_code=404, detail="Bestilling ikke fundet")
-    if caller_role != "super_admin" and order.get("company_id") != caller_cid:
+    if not on_behalf and caller_role != "super_admin" and order.get("company_id") != caller_cid:
         raise HTTPException(status_code=403, detail="Bestilling tilhører et andet firma")
-    if order.get("status_label") in ("paa_vej", "fuldfoert"):
+    # 2026-10-19: Før tjekkede serveren et felt (status_label), der aldrig blev
+    # gemt - kun skærmen forhindrede rettelser af en tur der var i gang.
+    _st = (order.get("status") or "").lower()
+    _t = await _raw_db.tours.find_one({"id": order.get("tour_id") or "__none__"},
+                                      {"_id": 0, "on_way": 1, "completed": 1, "not_completed": 1}) or {}
+    if _st in ("completed", "cancelled", "not_completed", "in_progress") or _t.get("on_way") or _t.get("completed") \
+            or _t.get("not_completed"):
         raise HTTPException(
             status_code=409,
-            detail="Bestillingen er allerede påbegyndt og kan ikke længere redigeres",
+            detail="Bestillingen er allerede påbegyndt, afsluttet eller annulleret og kan ikke længere rettes",
         )
+    if not payload.get("name"):
+        payload = {**payload, "name": await _actor_name(payload)}
 
     raw = body or {}
     proposed = {k: v for k, v in raw.items() if k in EDITABLE_ORDER_FIELDS}
@@ -17368,10 +17524,12 @@ async def edit_customer_order(order_id: str, body: dict,
         # 2026-10-19: Opgavetype, værksted eller adresse ændret -> ny rute på turen.
         merged = {**order, **proposed}
         pl = await _raw_db.plads.find_one({"location_code": merged.get("location_code")}, {"_id": 0, "address": 1, "city": 1})
+        _addr = merged.get("custom_address") or merged.get("customer_address") or ""
         tour_update.update(_order_tour_route(
-            merged.get("tour_type") or "normal", merged.get("custom_address") or merged.get("customer_address") or "",
+            merged.get("tour_type") or "normal", _addr,
             pl, merged.get("location_name") or "", merged.get("workshop_name") or "",
-            merged.get("workshop_address") or "", merged.get("workshop_phone") or ""))
+            merged.get("workshop_address") or "", merged.get("workshop_phone") or "",
+            await _delivery_name(merged.get("location_code") or "", _addr)))
     if tour_update and order.get("tour_id"):
         await _raw_db.tours.update_one({"id": order["tour_id"]}, {"$set": tour_update})
 
@@ -17401,32 +17559,84 @@ async def delete_customer_order(order_id: str,
     return {"success": True}
 
 
+async def _actor_name(payload: dict) -> str:
+    n = (payload.get("name") or "").strip()
+    if n:
+        return n
+    u = await _raw_db.users.find_one({"id": payload.get("sub") or payload.get("user_id") or ""}, {"_id": 0, "name": 1, "email": 1})
+    return ((u or {}).get("name") or (u or {}).get("email") or payload.get("email") or "").strip()
+
+
+async def _cancel_order(order: dict, payload: dict, *, by_logistics: bool, reason: str = "",
+                        confirm_on_way: bool = False) -> dict:
+    """2026-10-19: Annullering af en bestilling - samme regler uanset hvem.
+    - Afhentet (afsluttet): kan ikke annulleres. Arbejdet er gjort, og vægt,
+      CO2 og pris hører til.
+    - Chaufføren er på vej: kunden kan annullere, men skal bekræfte (det kan
+      koste en forgæves kørsel efter aftalen). Turen bliver "forgæves" med
+      koden "Annulleret af kunden", så aftalens forgæves-pris gælder.
+      Logistikfirmaet annullerer ikke en tur der er i gang - chaufføren
+      melder den "kunne ikke gennemføres".
+    - Chaufføren (tildelt eller i gang) får besked med det samme, og turen
+      vises som annulleret hos planlæggeren og chaufføren."""
+    status = (order.get("status") or "").lower()
+    if status == "completed":
+        raise HTTPException(status_code=409, detail="Bestillingen er afhentet og kan ikke annulleres")
+    if status == "cancelled":
+        raise HTTPException(status_code=409, detail="Bestillingen er allerede annulleret")
+    tour = None
+    if order.get("tour_id"):
+        tour = await _raw_db.tours.find_one({"id": order["tour_id"]}, {"_id": 0})
+    on_way = bool(tour and tour.get("on_way") and not tour.get("not_completed"))
+    if tour and tour.get("completed"):
+        raise HTTPException(status_code=409, detail="Turen er kørt og kan ikke annulleres")
+    if tour and tour.get("not_completed") and not tour.get("cancelled"):
+        raise HTTPException(status_code=409, detail="Chaufføren har meldt turen 'kunne ikke gennemføres' - kontakt logistikfirmaet")
+    if on_way and by_logistics:
+        raise HTTPException(status_code=409, detail="Chaufføren er på vej. Bed chaufføren melde turen 'kunne ikke gennemføres'")
+    if on_way and not confirm_on_way:
+        raise HTTPException(status_code=409, detail={
+            "code": "on_way", "driver": (tour or {}).get("claimed_by") or "",
+            "message": "Chaufføren er på vej. Annullerer I nu, kan det koste en forgæves kørsel efter aftalen."})
+    now_iso = datetime.now(DK_TZ).isoformat()
+    by_name = await _actor_name(payload)
+    role = payload.get("role") or ""
+    reason = (reason or "").strip()[:200]
+    who = "logistikfirmaet" if by_logistics else "kunden"
+    await _raw_db.container_orders.update_one({"id": order["id"]}, {"$set": {
+        "status": "cancelled", "cancelled_at": now_iso,
+        "cancelled_by_id": payload.get("sub") or payload.get("user_id") or "",
+        "cancelled_by_name": by_name, "cancelled_by_role": role,
+        "cancelled_by_logistics": by_logistics, "cancelled_on_way": on_way, "cancel_reason": reason}})
+    if tour:
+        tset = {"cancelled": True, "cancelled_at": now_iso, "cancelled_by_name": by_name,
+                "cancelled_by_role": role, "cancelled_on_way": on_way, "cancel_reason": reason}
+        if on_way:
+            # Forgæves kørsel: turen er startet, så den kan prissættes som
+            # forgæves efter aftalen (planlæggeren ser den i Økonomi før faktura).
+            tset.update({"not_completed": True, "not_completed_at": now_iso, "not_completed_code": "Annulleret af kunden",
+                         "not_completed_comment": reason or "Kunden annullerede mens chaufføren var på vej",
+                         "not_completed_by_name": by_name})
+        await _raw_db.tours.update_one({"id": tour["id"]}, {"$set": tset})
+        holder = (tour.get("claimed_by_id") or tour.get("driver_id") or "").strip()
+        la = ((tour.get("assigned_logistics_company_ids") or [""])[0]) or ""
+        if holder:
+            what = f"{tour.get('fraction') or 'Tur'} · {tour.get('plads') or tour.get('address') or ''}"
+            _push_later(_push_driver(la, holder, tour.get("claimed_by") or tour.get("driver_name") or "",
+                                     "Tur annulleret" + (" - du er på vej" if on_way else ""),
+                                     f"{what} er annulleret af {who}{': ' + reason if reason else ''}"))
+    await _co_audit(order["id"], "cancel", {**payload, "name": by_name}, {"status": order.get("status")},
+                    {"status": "cancelled", "cancelled_at": now_iso, "by_logistics": by_logistics,
+                     "on_way": on_way, "reason": reason})
+    return {"success": True, "cancelled_at": now_iso, "cancelled_by": by_name, "on_way": on_way}
+
+
 @api_router.post("/customer-orders/{order_id}/cancel")
-async def cancel_customer_order(order_id: str,
+async def cancel_customer_order(order_id: str, body: dict = Body(default={}),
                                 payload: dict = Depends(get_current_user_payload)):
-    """Fase 15.51 (2026-02-22): Annuller en bestilling (soft-cancel).
-    Erstatter den tidligere "slet"-flow på Mine bestillinger.
-
-    Regler:
-    - Kun customer_admin/location_admin/order/super_admin må annullere.
-    - Multi-tenant: bestillingen skal tilhøre callerens firma (super_admin
-      bypass'er).
-    - En bestilling KAN IKKE annulleres hvis:
-        * status er allerede 'completed' eller 'cancelled', ELLER
-        * den tilhørende tour er markeret `on_way=True` eller `completed=True`.
-      Frontend skal allerede skjule knappen i disse tilfælde, men backend er
-      defense-in-depth.
-    - Annullering er ENDELIG — der findes ingen revert-endpoint. Hvis kunden
-      fortryder, skal de oprette en ny bestilling.
-
-    Sideeffekter:
-    - Ordre: status='cancelled', cancelled_at=now (ISO).
-    - Tour (hvis findes): cancelled=True, cancelled_at=now. Vi sletter IKKE
-      turen så driver-UI'en kan vise den grået ud nederst i listen og admin/
-      rapport kan vise den i statistik.
-    - Overlap-check (POST /api/order/check-overlap) ekskluderer allerede
-      'cancelled'-ordrer så en ny bestilling kan oprettes uden konflikt.
-    """
+    """Fase 15.51 (2026-02-22): Annuller en bestilling (soft-cancel) - kundens
+    side. 2026-10-19: også mens chaufføren er på vej (med `confirm_on_way`),
+    se `_cancel_order`."""
     caller_role = payload.get("role")
     caller_cid = payload.get("company_id")
     if caller_role in ("driver", "genbrug_plads"):
@@ -17438,55 +17648,11 @@ async def cancel_customer_order(order_id: str,
         raise HTTPException(status_code=404, detail="Bestilling ikke fundet")
     if caller_role != "super_admin" and order.get("company_id") != caller_cid:
         raise HTTPException(status_code=403, detail="Bestilling tilhører et andet firma")
-    current_status = (order.get("status") or "").lower()
-    if current_status == "completed":
-        raise HTTPException(status_code=409, detail="Bestillingen er allerede afsluttet — kan ikke annulleres")
-    if current_status == "cancelled":
-        raise HTTPException(status_code=409, detail="Bestillingen er allerede annulleret")
-    tour_id = order.get("tour_id")
-    if tour_id:
-        tour = await _raw_db.tours.find_one({"id": tour_id}, {"_id": 0, "on_way": 1, "completed": 1, "claimed_by": 1})
-        if tour:
-            if tour.get("completed"):
-                raise HTTPException(status_code=409, detail="Turen er allerede afsluttet — kan ikke annulleres")
-            if tour.get("on_way"):
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"Chaufføren ({tour.get('claimed_by') or 'ukendt'}) er allerede på vej — kan ikke annulleres",
-                )
-    now_iso = datetime.now(DK_TZ).isoformat()
-    cancelled_by_name = (payload.get("name") or payload.get("email") or "").strip()
-    # Update order
-    await _raw_db.container_orders.update_one(
-        {"id": order_id},
-        {"$set": {
-            "status": "cancelled",
-            "cancelled_at": now_iso,
-            "cancelled_by_id": payload.get("user_id") or payload.get("sub") or "",
-            "cancelled_by_name": cancelled_by_name,
-            "cancelled_by_role": caller_role,
-        }},
-    )
-    # Mirror to tour (so driver UI viser den som annulleret nederst)
-    if tour_id:
-        await _raw_db.tours.update_one(
-            {"id": tour_id},
-            {"$set": {
-                "cancelled": True,
-                "cancelled_at": now_iso,
-                "cancelled_by_name": cancelled_by_name,
-                "cancelled_by_role": caller_role,
-            }},
-        )
-    # Audit log
-    await _co_audit(
-        order_id, "cancel", payload, order,
-        {"status": "cancelled", "cancelled_at": now_iso},
-    )
-    return {"success": True, "cancelled_at": now_iso, "cancelled_by": cancelled_by_name}
+    return await _cancel_order(order, payload, by_logistics=False, reason=(body or {}).get("reason") or "",
+                               confirm_on_way=bool((body or {}).get("confirm_on_way")))
 
 
-
+@api_router.get("/customer-orders/{order_id}/history")
 async def get_customer_order_history(order_id: str,
                                      payload: dict = Depends(get_current_user_payload)):
     caller_role = payload.get("role")
@@ -17505,6 +17671,251 @@ async def get_customer_order_history(order_id: str,
         if first_before.get("company_id") and first_before["company_id"] != caller_cid:
             raise HTTPException(status_code=403, detail="Adgang nægtet")
     return entries
+
+
+# =====================================================================
+#   "BESTIL FOR KUNDEN" (2026-10-19)
+#   På en genbrugsplads-kundes plads opretter logistikfirmaet ikke længere en
+#   fri tur, men en rigtig bestilling på kundens vegne. Den bruger kundens
+#   materialer, containere, leveringskalender og værksteder, vises under
+#   kundens "Mine bestillinger" (mærket "Bestilt af X for jer"), tæller i
+#   rapporter og CO2 og kan rettes/annulleres af kunden som deres egen.
+#   Gælder både partner- og premium-firmaer: kundens data afhænger ikke af
+#   logistikfirmaets pakke. Premium-firmaets egne ture (egne lokationer, egne
+#   kunder, fri adresse) oprettes som før med "Ny tur".
+# =====================================================================
+class OnBehalfOrder(BaseModel):
+    location_code: str
+    plads_name: str = ""
+    material: str
+    container_number: str = ""
+    custom_container_id: str = ""
+    tour_type: str = "normal"
+    order_date: str = ""
+    priority: str = "normal"  # haster | normal | senere (som bestillingssiden)
+    comment: str = ""
+    custom_address: str = ""
+    open_from: str = ""
+    open_to: str = ""
+    workshop_id: str = ""
+    workshop_name: str = ""
+    workshop_address: str = ""
+    workshop_phone: str = ""
+    loose_estimated_count: int = 0
+    requested_by: str = ""
+    driver_id: str = ""
+    trailer_count: int = 0
+
+
+async def _la_customer_site(payload: dict, location_code: str, plads_name: str = "") -> tuple:
+    """Pladsen skal tilhøre en genbrugsplads-kunde, som logistikfirmaet kører
+    for (og som koordinatoren har adgang til)."""
+    if payload.get("role") != "logistics_admin":
+        raise HTTPException(status_code=403, detail="Kun logistikfirmaets planlæggere kan bestille for en kunde")
+    la = payload.get("company_id") or ""
+    pl = None
+    if plads_name:
+        pl = await _raw_db.plads.find_one({"name": plads_name}, {"_id": 0})
+    if not pl and location_code:
+        pl = await _raw_db.plads.find_one({"location_code": location_code}, {"_id": 0})
+    if not pl:
+        raise HTTPException(status_code=404, detail="Pladsen findes ikke")
+    owner = await _raw_db.companies.find_one({"id": pl.get("company_id")},
+                                             {"_id": 0, "id": 1, "name": 1, "company_type": 1, "customer_id": 1})
+    if not owner or owner.get("company_type") != COMPANY_TYPE_CUSTOMER:
+        raise HTTPException(status_code=400, detail="Pladsen tilhører ikke en genbrugsplads-kunde")
+    if la not in (pl.get("assigned_logistics_company_ids") or []):
+        raise HTTPException(status_code=403, detail=f'I kører ikke for pladsen "{pl.get("name")}"')
+    scope = await _la_scope(payload)
+    if scope and not _scope_ok({"company_id": owner["id"]}, scope, la):
+        raise HTTPException(status_code=403, detail="Du har ikke adgang til denne kunde")
+    return pl, owner
+
+
+async def _open_orders_for(location_code: str, material: str, container: str) -> List[dict]:
+    if not (material and container):
+        return []
+    return await _raw_db.container_orders.find(
+        {"location_code": location_code, "material": material, "container_number": container,
+         "status": {"$nin": ["completed", "cancelled", "not_completed"]}},
+        {"_id": 0, "id": 1, "tour_type": 1, "order_date": 1, "created_by_name": 1, "on_behalf_company_name": 1},
+    ).to_list(20)
+
+
+@api_router.get("/logistics/order-options")
+async def logistics_order_options(location_code: str, plads_name: str = "",
+                                  payload: dict = Depends(get_current_user_payload)):
+    """Det kunden selv kan vælge på bestillingssiden: materialer og containere
+    (kun dem logistikfirmaet kører), værksteder og pladsens adresse."""
+    pl, owner = await _la_customer_site(payload, location_code, plads_name)
+    la = payload.get("company_id") or ""
+    code = pl.get("location_code") or location_code
+    mats = await get_location_containers(code, material="", partner_id=la, authorization=None)
+    materials = []
+    for m in mats.get("materials") or []:
+        det = await get_location_containers(code, material=m["material"], partner_id=la, authorization=None)
+        materials.append({"material": m["material"], "containers": [
+            {"label": c.get("label"), "container_id": c.get("container_id") or "", "capacity_label": c.get("capacity_label") or "",
+             "locked_address": bool(c.get("locked_address")), "address": c.get("address") or ""}
+            for c in det.get("containers") or []]})
+    workshops = await _raw_db.workshops.find({"company_id": owner["id"]}, {"_id": 0}).sort("name", 1).to_list(500)
+    site = await _lookup_site_by_code(code) or {}
+    return {"location_code": code, "plads_name": pl.get("name"), "customer_id": owner["id"], "customer_name": owner.get("name") or "",
+            "plads_address": _plads_home(pl), "materials": materials, "workshops": workshops,
+            "loes_enabled": bool(site.get("loes_afhentning_enabled") or pl.get("loes_afhentning_enabled"))}
+
+
+@api_router.get("/logistics/order-defaults")
+async def logistics_order_defaults(location_code: str, material: str, date: str, container: str = "",
+                                   plads_name: str = "", payload: dict = Depends(get_current_user_payload)):
+    """Leveringsadresse og åbningstid for netop den dag - samme kilde som
+    bestillingssiden (containerens låste adresse, ellers kundens kalender) -
+    og åbne bestillinger på containeren, så planlæggeren ser en dobbelt-
+    bestilling før den sendes."""
+    pl, _owner = await _la_customer_site(payload, location_code, plads_name)
+    code = pl.get("location_code") or location_code
+    ov = await _raw_db.container_overrides.find_one(
+        {"location_code": code, "material": material, "container_label": container}, {"_id": 0}) if container else None
+    ov = ov or {}
+    try:
+        sched = await resolve_delivery_address(location_code=code, material=material, date=date)
+    except HTTPException:
+        sched = {}
+    addr, name = "", ""
+    if ov.get("locked_address") and (ov.get("custom_address") or "").strip():
+        addr = ov["custom_address"].strip()
+    else:
+        src = sched.get("resolved_delivery_address") or sched.get("selected") or ((sched.get("alternatives") or [None])[0])
+        if src:
+            addr, name = _da_format_address_line(src), src.get("label") or ""
+        elif (ov.get("custom_address") or "").strip():
+            addr = ov["custom_address"].strip()
+    if addr and not name:
+        name = await _delivery_name(code, addr)
+    hours_locked = bool(ov.get("locked_hours"))
+    return {"address": addr, "delivery_name": name, "locked_address": bool(ov.get("locked_address") and ov.get("custom_address")),
+            "open_from": ov.get("open_from") or sched.get("open_from") or "", "open_to": ov.get("open_to") or sched.get("open_to") or "",
+            "locked_hours": hours_locked, "is_closed": bool(sched.get("is_closed")), "holiday_name": sched.get("holiday_name") or "",
+            "container_id": ov.get("custom_container_id") or "", "open_orders": await _open_orders_for(code, material, container)}
+
+
+@api_router.post("/logistics/customer-orders")
+async def logistics_create_customer_order(body: OnBehalfOrder, payload: dict = Depends(get_current_user_payload)):
+    """Bestil for kunden. Kræver "Hvem bad om det?" - det er det man har at
+    holde sig til, hvis kunden siger "det har vi aldrig bestilt"."""
+    await _require_perm(payload, "tours_edit")
+    pl, owner = await _la_customer_site(payload, body.location_code, body.plads_name)
+    if not (body.requested_by or "").strip():
+        raise HTTPException(status_code=400, detail='Skriv hvem hos kunden der bad om det (fx "Jens, telefon")')
+    la = payload.get("company_id") or ""
+    comp = await _raw_db.companies.find_one({"id": la}, {"_id": 0, "name": 1}) or {}
+    me = await _raw_db.users.find_one({"id": payload.get("sub") or ""}, {"_id": 0, "id": 1, "name": 1, "email": 1}) or {}
+    tt = (body.tour_type or "normal").strip()
+    if tt not in ("normal", "flyt", "vaerksted", "afhent_vaerksted", "loes_afhentning"):
+        raise HTTPException(status_code=400, detail="Ukendt opgavetype")
+    if not (body.container_number or "").strip() and tt != "loes_afhentning":
+        raise HTTPException(status_code=400, detail="Vælg containeren")
+    order = StructuredOrderCreate(
+        location_code=pl.get("location_code") or body.location_code, material=body.material.strip(),
+        container_number=(body.container_number or "").strip() or "Løs afhentning",
+        priority=body.priority if body.priority in ("haster", "normal", "senere") else "normal",
+        comment=body.comment, custom_address=body.custom_address if tt in ("normal", "loes_afhentning") else "",
+        custom_container_id=body.custom_container_id, order_date=normalize_date(body.order_date) if body.order_date else "",
+        open_from=body.open_from, open_to=body.open_to, tour_type=tt, plads_name=pl.get("name") or "",
+        workshop_id=body.workshop_id, workshop_name=body.workshop_name, workshop_address=body.workshop_address,
+        workshop_phone=body.workshop_phone, partner_id=la, loose_estimated_count=int(body.loose_estimated_count or 0))
+    # Pladsens data ligger hos kunden - opret uden logistikfirmaets tenant-filter.
+    tok = current_company_id.set(SUPER_ADMIN_BYPASS)
+    try:
+        res = await _create_customer_order(order, {"id": me.get("id") or "", "name": me.get("name") or me.get("email") or "",
+                                                   "email": me.get("email") or ""},
+                                           on_behalf={"company_id": la, "company_name": comp.get("name") or "",
+                                                      "requested_by": body.requested_by})
+    finally:
+        current_company_id.reset(tok)
+    await _co_audit(res["order_id"], "create_on_behalf", {**payload, "name": me.get("name") or ""}, {},
+                    {"on_behalf_company_name": comp.get("name") or "", "requested_by": body.requested_by.strip()})
+    extra: Dict[str, Any] = {}
+    if body.trailer_count:
+        extra["trailer_count"] = max(0, min(int(body.trailer_count), 9))
+    if body.driver_id:
+        d = await _raw_db.users.find_one({"id": body.driver_id, "company_id": la, "role": "driver"}, {"_id": 0, "id": 1, "name": 1})
+        if d:
+            extra.update({"driver_id": d["id"], "driver_name": d.get("name") or "",
+                          "assigned_by_name": me.get("name") or "", "assigned_at": datetime.now(timezone.utc).isoformat()})
+    if extra:
+        await _raw_db.tours.update_one({"id": res["tour_id"]}, {"$set": extra})
+    return {**res, "customer_name": owner.get("name") or ""}
+
+
+@api_router.put("/logistics/customer-orders/{order_id}")
+async def logistics_edit_customer_order(order_id: str, body: dict, payload: dict = Depends(get_current_user_payload)):
+    """Ret en bestilling logistikfirmaet selv har lavet for kunden (fx en
+    tastefejl), så længe turen ikke er startet. Kundens egne bestillinger
+    retter kunden - logistikfirmaet flytter dato/prioritet på turen."""
+    await _require_perm(payload, "tours_edit")
+    order = await _raw_db.container_orders.find_one({"id": order_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Bestilling ikke fundet")
+    await _la_customer_site(payload, order.get("location_code") or "", order.get("plads_name") or "")
+    if order.get("on_behalf_company_id") != payload.get("company_id"):
+        raise HTTPException(status_code=403, detail="Kunden har selv lavet bestillingen - kunden retter den")
+    return await edit_customer_order(order_id, body, {**payload, "_on_behalf_edit": True})
+
+
+@api_router.post("/logistics/customer-orders/{order_id}/cancel")
+async def logistics_cancel_customer_order(order_id: str, body: dict = Body(default={}),
+                                          payload: dict = Depends(get_current_user_payload)):
+    """Annullér på kundens anmodning (fx de ringer). Kræver en begrundelse,
+    som kunden kan se. En tur der er i gang annulleres ikke herfra."""
+    await _require_perm(payload, "tours_edit")
+    order = await _raw_db.container_orders.find_one({"id": order_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Bestilling ikke fundet")
+    await _la_customer_site(payload, order.get("location_code") or "", order.get("plads_name") or "")
+    if payload.get("company_id") not in (order.get("assigned_logistics_company_ids") or []):
+        raise HTTPException(status_code=403, detail="Bestillingen køres af et andet logistikfirma")
+    reason = ((body or {}).get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail='Skriv hvorfor (fx "Jens ringede - containeren er ikke fuld")')
+    return await _cancel_order(order, payload, by_logistics=True, reason=reason)
+
+
+@api_router.post("/logistics/customer-orders/{order_id}/restore")
+async def logistics_restore_customer_order(order_id: str, body: dict = Body(default={}),
+                                           payload: dict = Depends(get_current_user_payload)):
+    """Genoptag en annulleret bestilling - fx kunden fortrød i telefonen, eller
+    chaufføren nåede at køre turen før annulleringen kom frem. Chaufføren
+    beholder turen, så han kan afslutte den. Kunden ser begrundelsen."""
+    await _require_perm(payload, "tours_edit")
+    order = await _raw_db.container_orders.find_one({"id": order_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Bestilling ikke fundet")
+    await _la_customer_site(payload, order.get("location_code") or "", order.get("plads_name") or "")
+    if payload.get("company_id") not in (order.get("assigned_logistics_company_ids") or []):
+        raise HTTPException(status_code=403, detail="Bestillingen køres af et andet logistikfirma")
+    if (order.get("status") or "") != "cancelled":
+        raise HTTPException(status_code=409, detail="Bestillingen er ikke annulleret")
+    reason = ((body or {}).get("reason") or "").strip()[:200]
+    if not reason:
+        raise HTTPException(status_code=400, detail="Skriv hvorfor bestillingen genoptages")
+    tour = await _raw_db.tours.find_one({"id": order.get("tour_id") or ""}, {"_id": 0}) if order.get("tour_id") else None
+    if tour and tour.get("completed"):
+        raise HTTPException(status_code=409, detail="Turen er afsluttet")
+    by_name = await _actor_name(payload)
+    now_iso = datetime.now(DK_TZ).isoformat()
+    on_way = bool(tour and tour.get("on_way"))
+    await _raw_db.container_orders.update_one({"id": order_id}, {"$set": {
+        "status": "in_progress" if on_way else "pending", "restored_at": now_iso, "restored_by_name": by_name,
+        "restore_reason": reason}})
+    if tour:
+        tset = {"cancelled": False, "restored_at": now_iso, "restored_by_name": by_name, "restore_reason": reason}
+        if tour.get("cancelled_on_way"):
+            tset.update({"not_completed": False, "not_completed_code": ""})
+        await _raw_db.tours.update_one({"id": tour["id"]}, {"$set": tset})
+    await _co_audit(order_id, "restore", {**payload, "name": by_name}, {"status": "cancelled"},
+                    {"status": "in_progress" if on_way else "pending", "reason": reason})
+    return {"success": True}
 
 
 # =====================================================================
@@ -18192,11 +18603,16 @@ async def pricing_options(payload: dict = Depends(get_current_user_payload)):
         "delivery_labels": labels,
         "container_labels": caps,
         "materials": sorted(materials),
-        "task_types": _pricing.TASK_TYPES,
+        # 2026-10-19: En partner kører kun containerture uden stop og
+        # indholdslinjer - gods-opgaver, "Ekstra stop" og "Pris pr. enhed"
+        # kan aldrig ramme en af partnerens ture, så de vises ikke.
+        "task_types": ({k: v for k, v in _pricing.TASK_TYPES.items() if k in CONTAINER_TASK_TYPES} if partner
+                       else _pricing.TASK_TYPES),
         "priorities": _pricing.PRIORITIES,
         "day_types": _pricing.DAY_TYPES,
-        "categories": _pricing.SURCHARGE_CATEGORIES,
-        "models": _pricing.BASE_MODELS,
+        "categories": ({k: v for k, v in _pricing.SURCHARGE_CATEGORIES.items() if k != "stop"} if partner
+                       else _pricing.SURCHARGE_CATEGORIES),
+        "models": ({k: v for k, v in _pricing.BASE_MODELS.items() if k != "per_unit"} if partner else _pricing.BASE_MODELS),
         "legacy_prices": legacy,
     }
 
@@ -19043,6 +19459,10 @@ async def tour_finish(tour_id: str, body: dict, payload: dict = Depends(get_curr
         raise HTTPException(status_code=404, detail="Tur ikke fundet")
     if t.get("price_locked"):
         raise HTTPException(status_code=409, detail="Turen er faktureret - kontakt din logistik admin")
+    if t.get("cancelled"):
+        # Fx afsluttet offline efter kunden annullerede. Planlæggeren kan
+        # genoptage bestillingen ("kørt alligevel"), så kan turen afsluttes.
+        raise HTTPException(status_code=409, detail="Kunden har annulleret turen - kontakt planlæggeren")
     steps: Dict[str, Any] = {}
     # 1) Hængere (mens turen ikke er afsluttet - bagefter via rettelse)
     if not t.get("completed") and (body.get("trailer_count") not in (None, "") or body.get("used_trailer") in (True, False)):
@@ -19443,6 +19863,8 @@ async def startup_db_client():
         await _migrate_haster_from_remark()
         await _migrate_tour_owner_from_plads()
         await _migrate_workshop_routes()
+        await _migrate_manual_customer_tours_to_orders()
+        await _migrate_tour_routes()
         await _migrate_driver_matches_claimer()
     except Exception as e:
         logger.warning(f"Startup tasks warning: {e}")
@@ -19489,6 +19911,101 @@ async def _migrate_workshop_routes():
             logger.info(f"Værksted på turen: {n} åbne værksteds-ture fik værkstedets adresse")
     except Exception as e:
         logger.warning(f"Værksteds-migrering: {e}")
+
+
+async def _migrate_tour_routes():
+    """2026-10-19: Engangsrettelse af åbne bestillings-ture:
+    - pladsens adresse (hvor containeren hentes) og leveringsstedets navn på
+      turen, så chaufførens kort-knap kan vise begge steder;
+    - fejlen fra 2026-10-19, hvor pladsens by blev sat på en leveringsadresse
+      uden by ("Energivej 10" -> "Energivej 10, Hornbæk"). Kun præcis den
+      fejl rettes - en adresse planlæggeren selv har ændret, røres ikke."""
+    try:
+        n = 0
+        q = {"order_id": {"$nin": ["", None]}, "completed": {"$ne": True}, "deleted": {"$ne": True},
+             "$or": [{"plads_address": {"$exists": False}}, {"plads_address": ""}, {"delivery_name": {"$exists": False}}]}
+        async for t in _raw_db.tours.find(q, {"_id": 0, "id": 1, "order_id": 1, "tour_type": 1, "address": 1, "plads": 1}):
+            o = await _raw_db.container_orders.find_one({"id": t["order_id"]}, {"_id": 0}) or {}
+            pl = (await _raw_db.plads.find_one({"name": t.get("plads") or ""}, {"_id": 0, "address": 1, "city": 1})
+                  or await _raw_db.plads.find_one({"location_code": o.get("location_code") or "__none__"}, {"_id": 0, "address": 1, "city": 1}))
+            st: Dict[str, Any] = {"plads_address": _plads_home(pl)}
+            tt = t.get("tour_type") or "normal"
+            if tt not in ("flyt", "vaerksted", "afhent_vaerksted"):
+                orig = (o.get("customer_address") or "").strip()
+                city = ((pl or {}).get("city") or "").strip()
+                if orig and city and t.get("address") == f"{orig}, {city}" and "," not in orig:
+                    st["address"] = orig
+                st["delivery_name"] = await _delivery_name(o.get("location_code") or "", st.get("address") or t.get("address") or "",
+                                                           o.get("alternative_delivery_address_id") or o.get("delivery_address_id") or "")
+            if st["plads_address"] or len(st) > 1:
+                await _raw_db.tours.update_one({"id": t["id"]}, {"$set": st})
+                n += 1
+        if n:
+            logger.info(f"Ruten på turen: {n} åbne bestillings-ture fik pladsens adresse/leveringsstedets navn")
+    except Exception as e:
+        logger.warning(f"Rute-migrering: {e}")
+
+
+async def _migrate_manual_customer_tours_to_orders():
+    """2026-10-19: Engangsrettelse - åbne ture, som et logistikfirma har
+    oprettet direkte på en genbrugsplads-kundes plads (Ny tur/Kopiér/Excel),
+    havde ingen bestilling. Kunden så dem derfor ikke under Mine bestillinger
+    og kunne ikke annullere dem. De får nu en bestilling "for kunden".
+    Afsluttede ture røres ikke (kundens tidligere rapporter ændres ikke)."""
+    try:
+        customers = {c["id"]: c async for c in _raw_db.companies.find(
+            {"company_type": COMPANY_TYPE_CUSTOMER}, {"_id": 0, "id": 1, "name": 1})}
+        logistics = {c["id"]: c async for c in _raw_db.companies.find(
+            {"company_type": COMPANY_TYPE_LOGISTICS}, {"_id": 0, "id": 1, "name": 1})}
+        if not customers:
+            return
+        q = {"order_id": {"$in": ["", None]}, "company_id": {"$in": list(customers)}, "completed": {"$ne": True},
+             "not_completed": {"$ne": True}, "deleted": {"$ne": True}, "is_pause": {"$ne": True},
+             "tour_type": {"$ne": "estimat"}, "plads": {"$nin": ["", None]}}
+        n = 0
+        async for t in _raw_db.tours.find(q, {"_id": 0, "receipt_image": 0}):
+            pl = await _raw_db.plads.find_one({"name": t["plads"], "company_id": t["company_id"]}, {"_id": 0})
+            la = next((x for x in (t.get("assigned_logistics_company_ids") or []) if x in logistics), "")
+            if not pl or not la:
+                continue
+            mco2 = (pl.get("material_co2_categories") or {}).get(t.get("fraction") or "") or ""
+            co2 = await _raw_db.co2_types.find_one({"id": mco2}, {"_id": 0, "name": 1, "factor": 1}) if mco2 else None
+            prio = {"urgent": "haster", "low": "senere"}.get(t.get("priority") or "", "normal")
+            on_way = bool(t.get("on_way") or t.get("claimed_by"))
+            order = {
+                "id": str(uuid.uuid4()), "location_code": pl.get("location_code") or "", "location_name": pl.get("name") or "",
+                "plads_name": pl.get("name") or "", "address_id": "", "customer_name": pl.get("name") or "",
+                "customer_address": t.get("address") or "", "container_number": t.get("container") or "",
+                "material": t.get("fraction") or "", "co2_type_id": mco2, "co2_type_name": (co2 or {}).get("name", ""),
+                "co2_factor": float((co2 or {}).get("factor", 0) or 0), "weight_kg": 0.0, "co2_kg": 0.0,
+                "order_date": t.get("date") or "", "priority": prio, "comment": t.get("remark") or "",
+                "status": "in_progress" if on_way else "pending", "tour_type": t.get("tour_type") or "normal",
+                "open_from": t.get("open_from") or "", "open_to": t.get("open_to") or "",
+                "company_id": t["company_id"], "assigned_logistics_company_ids": [la], "partner_id": la,
+                "tour_id": t["id"], "created_by_name": t.get("created_by_name") or "", "created_by_email": "",
+                "on_behalf_company_id": la, "on_behalf_company_name": logistics[la].get("name") or "",
+                "on_behalf_user_name": t.get("created_by_name") or "",
+                "requested_by": "Oprettet af logistikfirmaet før 'Bestil for kunden'",
+                "workshop_name": t.get("workshop_name") or "", "workshop_address": t.get("workshop_address") or "",
+                "workshop_phone": t.get("workshop_phone") or "", "migrated_from_tour": True,
+                "created_at": t.get("created_at") or datetime.now(timezone.utc).isoformat(),
+            }
+            await _raw_db.container_orders.insert_one(order)
+            await _raw_db.tours.update_one({"id": t["id"]}, {"$set": {
+                "order_id": order["id"], "source": "customer_order", "order_date": order["order_date"],
+                "on_behalf_company_name": order["on_behalf_company_name"], "on_behalf_user_name": order["on_behalf_user_name"],
+                "requested_by": order["requested_by"], "plads_address": _plads_home(pl),
+                "delivery_name": await _delivery_name(order["location_code"], order["customer_address"])}})
+            await _raw_db.customer_orders_history.insert_one({
+                "id": str(uuid.uuid4()), "order_id": order["id"], "action": "create_on_behalf", "user_id": "",
+                "user_name": "ContainerFlow", "user_email": "", "before": {},
+                "after": {"note": "Turen var oprettet direkte af logistikfirmaet - bestillingen er lavet bagefter"},
+                "at": datetime.now(timezone.utc).isoformat()})
+            n += 1
+        if n:
+            logger.info(f"Bestil for kunden: {n} åbne ture på kunders pladser fik en bestilling")
+    except Exception as e:
+        logger.warning(f"Migrering af ture uden bestilling: {e}")
 
 
 async def _migrate_tour_owner_from_plads():

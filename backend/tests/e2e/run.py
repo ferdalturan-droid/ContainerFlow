@@ -7,7 +7,7 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _e2e import RESULTS  # noqa: E402
 
-FLOWS = ["b2b", "ownership", "workshop", "goods", "pricing", "stops", "finish", "time", "assign", "security", "tiers"]
+FLOWS = ["b2b", "ownership", "workshop", "goods", "pricing", "stops", "finish", "time", "assign", "security", "tiers", "behalf"]
 
 if __name__ == "__main__":
     wanted = sys.argv[1:] or FLOWS

@@ -1795,7 +1795,7 @@ function HolidaysView({ profile }) {
             </button>
           ))}
         </div>
-        <p className="text-xs text-slate-500">Kundens kalender gælder kun for den kundes ture - dine egne ture bruger altid din egen kalender. Om et tillæg gælder på helligdage styres i prisreglerne (dagtype "Helligdag"), så et helligdagstillæg kan gælde for ét materiale eller én kunde og ikke for andre.</p>
+        <p className="text-xs text-slate-500">{profile?.tier === "partner" ? "Hver kundes kalender gælder for den kundes ture." : "Kundens kalender gælder kun for den kundes ture - dine egne ture bruger altid din egen kalender."} Om et tillæg gælder på helligdage styres i prisreglerne (dagtype "Helligdag"), så et helligdagstillæg kan gælde for ét materiale eller én kunde og ikke for andre.</p>
       </div>
       )}
 

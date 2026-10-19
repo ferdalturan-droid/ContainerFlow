@@ -32,6 +32,7 @@ import DriverTodayView from "@/components/DriverTodayView";
 import FinishSheet, { effectiveCapture } from "@/components/FinishSheet";
 import DriverStopList from "@/components/DriverStopList";
 import { initTourOpQueue, enqueueOp, isNetworkError, subscribeOps } from "@/lib/tourOpQueue";
+import { routeOf, navUrl } from "@/lib/tourHelpers";
 import { enablePush, disablePush, syncPush, pushSupported, isIOS, isStandalone, permission as pushPermission } from "@/lib/push";
 import EconomyPanel, { FinishSettingsCard } from "@/pages/EconomyPanel";
 import LogisticsLocations from "@/pages/LogisticsLocations";
@@ -346,12 +347,22 @@ const OrderInfoLine = ({ order, dark = false, compact = false, testid = "" }) =>
           og i Logistik Admin Planlægning split-view. Backend lægger
           `created_by_name` (eller `created_by_email` som fallback) på selve
           turen via mirror-update fra ordren. */}
-      {(order.created_by_name || order.created_by_email) && (<>
+      {!order.on_behalf_company_name && (order.created_by_name || order.created_by_email) && (<>
         {(orderDate || showCap || isLoes || tt) && sep}
         <span className="inline-flex items-center gap-1" title="Bestilt af">
           <Users className="w-3 h-3 text-blue-500" />
           <span className={lblCls}>Bestilt af</span>
           <span className="font-semibold">{order.created_by_name || order.created_by_email}</span>
+        </span>
+      </>)}
+      {/* 2026-10-19: Bestilt af logistikfirmaet på kundens vegne */}
+      {order.on_behalf_company_name && (<>
+        {sep}
+        <span className="inline-flex items-center gap-1" data-testid={`order-on-behalf-line-${order.id || order.tour_id || "x"}`}>
+          <Users className="w-3 h-3 text-sky-500" />
+          <span className={lblCls}>Bestilt af</span>
+          <span className="font-semibold">{order.on_behalf_company_name} for {dark ? "jer" : "kunden"}</span>
+          {order.requested_by && <span className={lblCls}>({order.requested_by})</span>}
         </span>
       </>)}
     </div>
@@ -1791,18 +1802,20 @@ const CustomerOrderPage = ({ locationCode, pladsName = "", prefillAddress = "", 
       list = list.filter(o =>
         (me && o.created_by_user_id === me) ||
         (myEmail && (o.created_by_email || "").toLowerCase() === myEmail) ||
-        (!o.created_by_user_id && !o.created_by_email)
+        (!o.created_by_user_id && !o.created_by_email) ||
+        // 2026-10-19: Bestilt af logistikfirmaet for pladsen - alle på pladsen skal se den.
+        !!o.on_behalf_company_id
       );
     }
     // "Afventende" = ikke fuldført (dvs. afventer + på vej + taget).
     if (pendingOnly) {
-      list = list.filter(o => !o.completed);
+      list = list.filter(o => !o.completed && o.status !== "cancelled" && o.status !== "not_completed");
     }
     // Skjul fuldførte: enten via eksplicit toggle ELLER fordi vi er i
     // "Alle bestillinger"-mode (mode-default ifølge brugerkrav).
     const effectiveHide = hideCompleted || historyMode === "all";
     if (effectiveHide) {
-      list = list.filter(o => !o.completed);
+      list = list.filter(o => !o.completed && o.status !== "cancelled");
     }
     // Fase 15.20 (2026-02-21): Estimater filtreres fra som default; når
     // toggle er ON inkluderes de men placeres nederst i listen (efter
@@ -1810,7 +1823,7 @@ const CustomerOrderPage = ({ locationCode, pladsName = "", prefillAddress = "", 
     const estimates = list.filter(o => (o.tour_type || "") === "estimat");
     let nonEstimates = list.filter(o => (o.tour_type || "") !== "estimat");
     // Sortér de almindelige: afventer → på vej → fuldført; nyeste først indenfor gruppen.
-    const rank = (o) => o.completed ? 3 : ((o.on_way || o.claimed_by) ? 2 : 1);
+    const rank = (o) => o.status === "cancelled" ? 4 : o.completed ? 3 : ((o.on_way || o.claimed_by) ? 2 : 1);
     nonEstimates = [...nonEstimates].sort((a, b) => {
       const r = rank(a) - rank(b);
       if (r !== 0) return r;
@@ -3863,7 +3876,13 @@ const CustomerOrderPage = ({ locationCode, pladsName = "", prefillAddress = "", 
                 </div>
                 <div className="rounded-xl border border-slate-700/70 bg-slate-800/40 overflow-hidden divide-y divide-slate-700/50" data-testid="history-list">
                 {visibleHistory.map((order, idx) => {
-                  const canEdit = !order.claimed_by && !order.on_way && !order.completed;
+                  // 2026-10-19: Annulleret/ikke gennemført = lukket (før stod en annulleret
+                  // bestilling som "Afventer" med Redigér/Annullér). Annullér kan bruges
+                  // til turen er kørt - også når chaufføren er på vej (med advarsel).
+                  const isCancelled = order.status === "cancelled";
+                  const isNotDone = order.status === "not_completed";
+                  const canEdit = !isCancelled && !isNotDone && !order.claimed_by && !order.on_way && !order.completed;
+                  const canCancel = !isCancelled && !isNotDone && !order.completed;
                   // Fase 15.18 (2026-02-21): Estimat-bestillinger har ingen
                   // status/opgavetype/afhentes/container-nr - det er et
                   // forventet ressourcebehov, ikke en konkret opgave.
@@ -3873,8 +3892,8 @@ const CustomerOrderPage = ({ locationCode, pladsName = "", prefillAddress = "", 
                   // eller tour_type === "estimat" (estimat).
                   const isCustom = isEstimat || (order.container_number === "Tilpasset bestilling");
                   const isExpanded = expandedHistoryId === (order.id || idx);
-                  const statusLabel = isEstimat ? "Estimat" : order.completed ? "Færdig" : order.on_way ? "På vej" : order.claimed_by ? "Påbegyndt" : "Afventer";
-                  const statusColor = isEstimat ? "amber" : order.completed ? "emerald" : order.on_way ? "yellow" : order.claimed_by ? "blue" : "slate";
+                  const statusLabel = isEstimat ? "Estimat" : isCancelled ? "Annulleret" : isNotDone ? "Ikke gennemført" : order.completed ? "Færdig" : order.on_way ? "På vej" : order.claimed_by ? "Påbegyndt" : "Afventer";
+                  const statusColor = isEstimat ? "amber" : isCancelled ? "slate" : isNotDone ? "red" : order.completed ? "emerald" : order.on_way ? "yellow" : order.claimed_by ? "blue" : "slate";
                   const tourTypeLabel = (() => {
                     const tt = order.tour_type || "normal";
                     if (tt === "flyt") return "Flyt";
@@ -4033,9 +4052,16 @@ const CustomerOrderPage = ({ locationCode, pladsName = "", prefillAddress = "", 
                               <OrderInfoLine order={order} dark testid={`order-info-line-${idx}`} />
                             )}
                           </div>
-                          {!isEstimat && historyScope === "all" && (order.created_by_name || order.created_by_email) && (
+                          {/* "Bestilt af X for jer" står i info-linjen ovenfor (OrderInfoLine). */}
+                          {!order.on_behalf_company_name && !isEstimat && historyScope === "all" && (order.created_by_name || order.created_by_email) && (
                             <p className="text-emerald-400 text-[11px] mt-1" data-testid={`order-created-by-${idx}`}>
                               Bestilt af {order.created_by_name || order.created_by_email}
+                            </p>
+                          )}
+                          {isCancelled && (
+                            <p className="text-slate-400 text-[11px] mt-1" data-testid={`order-cancelled-${idx}`}>
+                              Annulleret{order.cancelled_by_logistics ? " af logistikfirmaet" : order.cancelled_by_name ? ` af ${order.cancelled_by_name}` : ""}
+                              {order.cancelled_on_way ? " mens chaufføren var på vej" : ""}{order.cancel_reason ? `: ${order.cancel_reason}` : ""}
                             </p>
                           )}
                         </div>
@@ -4045,12 +4071,14 @@ const CustomerOrderPage = ({ locationCode, pladsName = "", prefillAddress = "", 
                       {!isEstimat && (
                         <div className="flex items-center gap-1.5 mr-10 flex-shrink-0">
                           <span className={`px-3 py-1 rounded-full text-xs font-bold uppercase whitespace-nowrap ${
+                            isCancelled ? "bg-slate-600/40 text-slate-300" :
+                            isNotDone ? "bg-rose-500/20 text-rose-300" :
                             order.completed ? "bg-emerald-500/20 text-emerald-400" :
                             order.on_way ? "bg-yellow-500/20 text-yellow-400" :
                             order.claimed_by ? "bg-blue-500/20 text-blue-400" :
                             "bg-orange-500/20 text-orange-400"
                           }`} data-testid={`order-status-${idx}`}>
-                            {order.completed ? "Fuldført" : order.on_way ? "På vej" : order.claimed_by ? "Taget" : "Afventer"}
+                            {isCancelled ? "Annulleret" : isNotDone ? "Ikke gennemført" : order.completed ? "Fuldført" : order.on_way ? "På vej" : order.claimed_by ? "Taget" : "Afventer"}
                           </span>
                         </div>
                       )}
@@ -4215,22 +4243,22 @@ const CustomerOrderPage = ({ locationCode, pladsName = "", prefillAddress = "", 
                         <History className="w-3 h-3" /> Historik
                       </button>
                       {canEdit && (
-                        <>
-                          <button onClick={() => setEditingOrder(order)}
-                            className="text-[11px] inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 font-bold"
-                            data-testid={`order-edit-btn-${idx}`}>
-                            <Edit2 className="w-3 h-3" /> Redigér
-                          </button>
-                          <button onClick={() => setConfirmDeleteOrder(order)}
-                            className="text-[11px] inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 font-bold"
-                            data-testid={`order-cancel-btn-${idx}`}>
-                            <XCircle className="w-3 h-3" /> Annullér
-                          </button>
-                        </>
+                        <button onClick={() => setEditingOrder(order)}
+                          className="text-[11px] inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 font-bold"
+                          data-testid={`order-edit-btn-${idx}`}>
+                          <Edit2 className="w-3 h-3" /> Redigér
+                        </button>
                       )}
-                      {!canEdit && (
+                      {canCancel && (
+                        <button onClick={() => setConfirmDeleteOrder(order)}
+                          className="text-[11px] inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 font-bold"
+                          data-testid={`order-cancel-btn-${idx}`}>
+                          <XCircle className="w-3 h-3" /> Annullér
+                        </button>
+                      )}
+                      {!canEdit && !isCancelled && !order.completed && (
                         <span className="text-[11px] text-slate-500 italic">
-                          Bestillingen er allerede påbegyndt - kan ikke redigeres/slettes
+                          {isNotDone ? "Chaufføren kunne ikke gennemføre turen - kontakt logistikfirmaet" : "Chaufføren er i gang - kan ikke længere redigeres"}
                         </span>
                       )}
                     </div>
@@ -4843,14 +4871,18 @@ const OrderEditModal = ({ order, onClose, onSaved }) => {
    fortryder. */
 const OrderCancelConfirmModal = ({ order, onCancel, onDeleted }) => {
   const [busy, setBusy] = useState(false);
+  // 2026-10-19: Er chaufføren på vej, kan kunden stadig annullere - men skal
+  // bekræfte, at det kan koste en forgæves kørsel. Chaufføren får besked med det samme.
+  const onWay = !!(order.on_way && !order.completed);
   const doCancel = async () => {
     setBusy(true);
     try {
-      await axios.post(`${API}/customer-orders/${order.id}/cancel`);
-      toast.success("Bestilling annulleret");
+      await axios.post(`${API}/customer-orders/${order.id}/cancel`, { confirm_on_way: onWay });
+      toast.success(onWay ? "Bestilling annulleret - chaufføren har fået besked" : "Bestilling annulleret");
       onDeleted();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Kunne ikke annullere bestilling");
+      const d = e?.response?.data?.detail;
+      toast.error(typeof d === "object" && d?.message ? d.message : (d || "Kunne ikke annullere bestilling"));
     } finally {
       setBusy(false);
     }
@@ -4870,6 +4902,11 @@ const OrderCancelConfirmModal = ({ order, onCancel, onDeleted }) => {
             <span className="text-rose-400 text-xs font-bold uppercase tracking-wider mt-2 block">
               Handlingen er endelig
             </span>
+            {onWay && (
+              <span className="block mt-2 text-amber-300 text-xs font-semibold" data-testid="order-cancel-onway">
+                Chaufføren{order.claimed_by ? ` (${order.claimed_by})` : ""} er på vej. Annullerer I nu, kan det koste en forgæves kørsel efter jeres aftale med logistikfirmaet. Chaufføren får besked med det samme.
+              </span>
+            )}
             <span className="text-slate-400 text-xs">
               Bestillingen kan ikke genåbnes. Hvis du fortryder skal du oprette en ny bestilling.
             </span>
@@ -6704,7 +6741,8 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
   const [logisticsProfile, setLogisticsProfile] = useState(null);
   useEffect(() => {
     if (authUser?.role !== "logistics_admin") return;
-    axios.get(`${API}/logistics/profile`).then(r => setLogisticsProfile(r.data)).catch(() => setLogisticsProfile(null));
+    // Fejler profilen, vises kerne-funktionerne (serveren håndhæver premium).
+    axios.get(`${API}/logistics/profile`).then(r => setLogisticsProfile(r.data)).catch(() => setLogisticsProfile({ capabilities: {}, failed: true }));
   }, [authUser?.role, authUser?.company_id]);
   const isPremiumLogistics = !!logisticsProfile?.is_premium;
   // Premium-firmaer arbejder med "lokationer"; partnere med genbrugspladser.
@@ -11999,6 +12037,9 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
   const isMultiLoadTour = !hasCapture && (tour.tour_type === "loes_afhentning" || cargoLines.length > 1);
   const isGoodsTour = tour.tour_kind === "goods";
   const isWorkshopRoute = (tour.tour_type === "vaerksted" || tour.tour_type === "afhent_vaerksted") && !!tour.workshop_address;
+  // 2026-10-19: Ruten i køreorden for alle ture uden stop (se routeOf) - før
+  // stod pladsens navn som "Modtageanlæg" på en almindelig afhentning.
+  const routeLegs = routeOf(tour);
   const multiTitle = tour.tour_type === "loes_afhentning" ? "LØS AFHENTNING" : "turen";
   const tourStops = localStops || (Array.isArray(tour.stops) ? tour.stops : []);
   const loadLabel = (idx) => (cargoLines.length > 1
@@ -12427,45 +12468,33 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
         <div className="p-4 space-y-3 text-sm">
           {/* 2026-10-19: Værksteds-ture viser hvor containeren hentes og hvor den skal hen
               (begge med Google Maps) + ring til værkstedet. */}
-          {isWorkshopRoute && tourStops.length === 0 && (
+          {tour.cancelled && !tour.completed && (
+            <div className="rounded-xl bg-slate-100 border border-slate-300 px-3 py-2.5" data-testid="mobile-tour-panel-cancelled">
+              <div className="font-bold text-slate-800">{tour.cancelled_on_way ? "Annulleret mens du var på vej" : "Turen er annulleret"}</div>
+              <div className="text-slate-600">{tour.cancelled_by_name ? `Af ${tour.cancelled_by_name}` : "Af kunden"}{tour.cancel_reason ? `: ${tour.cancel_reason}` : ""}</div>
+              <div className="text-xs text-slate-500 mt-0.5">Kør ikke turen. Har du allerede kørt den, så skriv til planlæggeren.</div>
+            </div>
+          )}
+          {tourStops.length === 0 && routeLegs.length > 0 && (
             <div className="space-y-2.5" data-testid="mobile-tour-panel-route">
-              {[["Afhentning", tour.address, tour.tour_type === "afhent_vaerksted"], ["Aflevering", tour.facility, tour.tour_type === "vaerksted"]].map(([lbl, addr, isWs]) => (
-                <div key={lbl}>
-                  <div className="text-xs uppercase tracking-wide text-slate-500 mb-0.5">{lbl} · {isWs ? (tour.workshop_name || "Værksted") : "Pladsen"}</div>
-                  <a href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(addr || "")}&travelmode=driving`}
-                    target="_blank" rel="noopener noreferrer" data-testid={`mobile-tour-panel-route-${isWs ? "workshop" : "plads"}`}
-                    className="inline-flex items-center gap-1.5 text-blue-600 dark:text-blue-400 hover:underline font-medium">
-                    <MapPin className="w-4 h-4" />{addr}<ExternalLink className="w-3 h-3" />
-                  </a>
-                  {isWs && tour.workshop_phone && (
-                    <a href={`tel:${tour.workshop_phone.replace(/\s/g, "")}`} className="mt-1 flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400 font-semibold">
-                      <Phone className="w-4 h-4" /> Ring til værkstedet ({tour.workshop_phone})
+              {routeLegs.map((l, i) => {
+                const isWs = isWorkshopRoute && l.name === (tour.workshop_name || "Værksted") && l.address === tour.workshop_address;
+                return (
+                  <div key={i}>
+                    <div className="text-xs uppercase tracking-wide text-slate-500 mb-0.5">{routeLegs.length > 1 ? `${i + 1} · ` : ""}{l.label}{l.name ? ` · ${l.name}` : ""}</div>
+                    <a href={navUrl(l.address)} target="_blank" rel="noopener noreferrer"
+                      data-testid={isWorkshopRoute ? `mobile-tour-panel-route-${isWs ? "workshop" : "plads"}` : `mobile-tour-panel-route-${i}`}
+                      className="inline-flex items-center gap-1.5 text-blue-600 dark:text-blue-400 hover:underline font-medium">
+                      <MapPin className="w-4 h-4" />{l.address}<ExternalLink className="w-3 h-3" />
                     </a>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-          {!isWorkshopRoute && tour.facility && tourStops.length === 0 && (
-            <div>
-              <div className="text-xs uppercase tracking-wide text-slate-500 mb-0.5">{isGoodsTour ? "Aflevering" : "Modtageanlæg"}</div>
-              <div className="text-slate-800 dark:text-slate-200">{tour.facility}</div>
-            </div>
-          )}
-          {!isWorkshopRoute && tour.address && tourStops.length === 0 && (
-            <div>
-              <div className="text-xs uppercase tracking-wide text-slate-500 mb-0.5">Adresse</div>
-              <a
-                href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(tour.address)}&travelmode=driving`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 text-blue-600 dark:text-blue-400 hover:underline font-medium"
-                data-testid="mobile-tour-panel-address-link"
-              >
-                <MapPin className="w-4 h-4" />
-                {tour.address}
-                <ExternalLink className="w-3 h-3" />
-              </a>
+                    {isWs && tour.workshop_phone && (
+                      <a href={`tel:${tour.workshop_phone.replace(/\s/g, "")}`} className="mt-1 flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400 font-semibold">
+                        <Phone className="w-4 h-4" /> Ring til værkstedet ({tour.workshop_phone})
+                      </a>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
           {(tourStops.length > 0 || (canAddStop && tour.on_way && !tour.completed && !isClaimedByOther)) && (
@@ -12879,7 +12908,7 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
               )}
             </div>
           )}
-          {!isClaimedByOther && !tour.completed && (
+          {!isClaimedByOther && !tour.completed && !tour.cancelled && (
             <>
               {/* Fase 11 (2026-06-18): "På vej" kan KUN aktiveres én gang -
                   klik igen gør ingenting. For at fjerne status bruger

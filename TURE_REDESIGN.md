@@ -198,3 +198,31 @@ Begge dele er rettet. Desuden:
   - Excel-importen giver turen kun til det importerende firma.
 - **Ture-siden** opdaterer sig selv i både Dagsplan og Planlæg og henter med det samme ved skift af visning. Før opdaterede Planlæg aldrig.
 
+
+### Bestil for kunden, annullering og kort-knappen (2026-10-19)
+Se BESLUTNINGER_2026-10-19.md for alternativer og runder.
+- **På en genbrugsplads-kundes plads opretter logistikfirmaet en bestilling for kunden** (Ny tur › kundens plads, eller "Bestil for kunde"). Det gælder både partner og premium.
+  - Formularen bruger kundens materialer, containere, leveringskalender og værksteder, og "Hvem bad om det?" er påkrævet.
+  - Kunden ser bestillingen under Mine bestillinger som "Bestilt af X for jer", og den tæller i rapporter og CO2.
+  - En fri tur på kundens plads afvises (409 `use_customer_order`).
+  - Premiums egne ture er uændrede.
+- **En bestillings-tur:** planlæggeren flytter dato, tid, prioritet, chauffør og antal hængere, og kundens bestilling følger med.
+  - Materiale, container, adresse og opgave rettes i bestillingen: "Ret bestilling" for egne bestillinger for kunden; kundens egne retter kunden.
+  - Kopiér hedder "Bestil igen".
+- **Annullering:**
+  - Kunden kan annullere, indtil turen er kørt. Er chaufføren på vej, skal kunden bekræfte "kan koste en forgæves kørsel", og turen bliver forgæves med koden "Annulleret af kunden".
+  - Logistikfirmaet kan annullere på kundens anmodning før start, med en begrundelse.
+  - Chaufføren får push, ser "Turen er annulleret" og kan ikke starte eller afslutte den.
+  - Planlæggeren ser status "Annulleret".
+  - "Genoptag bestilling" (med begrundelse) bruges, hvis kunden fortryder, eller hvis turen var kørt alligevel.
+  - Før kunne en annulleret tur stadig køres.
+- **Kort-knappen:** én rute pr. tur (`routeOf`).
+  - Har turen to steder, vælger chaufføren mellem dem i køreorden: "1 Hent · Pladsen" og "2 Aflever · HCS". Afhent fra værksted: værkstedet først.
+  - Ét sted eller næste stop åbner Google Maps direkte.
+  - Detaljevisningen og planlæggerens "Kort" (hele ruten) bruger samme rute.
+  - Turen har nu `plads_address` og `delivery_name`.
+- **Partner:** "Ret" viser ikke længere premium-felter, som serveren smed væk.
+  - Antal hængere er kerne.
+  - Afvigelsen "Hængere 0 → 1" vises kun, når der er planlagt hængere.
+  - Økonomi skjuler prisvalg, der aldrig kan ramme en partnertur.
+- **Excel:** skabelonen har en dato-kolonne, vejledningen tælles ikke som fejl, og rækker på kundepladser bliver bestillinger.
