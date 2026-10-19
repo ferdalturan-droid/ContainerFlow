@@ -100,6 +100,34 @@ def run():
             time.sleep(16)  # rettighedscache
             ok(status_of("GET", "/admin/time-entries", t=login(ILK_COORD), params={"date": today()}) == 403,
                "15 koordinator uden 'Planlægning og tidsregistrering' afvises også på serveren")
+
+        # --- 4. Rette/slette ture (2026-10-19) --------------------------------------
+        hans, cu, la = login(HANSEN_ADMIN), login(HF_ORDER_USER), login(ILK_ADMIN)
+        own = call("POST", "/tours/bulk?force=true", [{"date": in_days(5), "plads": "Hansen Depot Køge", "fraction": "E2E sikkerhed",
+                                                        "address": "Vej 1, 4600 Køge", "facility": "Vej 2, 4600 Køge"}], t=hans)[0]["id"]
+        c.tours.append(own)
+        ok(status_of("PUT", f"/tours/{own}", {"remark": "E2E rettet af fremmed"}, t=cu) == 403
+           and db.tours.find_one({"id": own}, {"_id": 0, "remark": 1}).get("remark") != "E2E rettet af fremmed",
+           "16 en kunde-bruger kan ikke rette et andet firmas tur (før: 200 og turen blev ændret)")
+        pl = db.plads.find_one({"location_code": "1101"}, {"_id": 0, "name": 1})["name"]
+        sid = "e2e-serie-" + new_id()
+        cust = call("POST", "/tours/bulk?force=true", [{"date": in_days(d), "plads": pl, "fraction": "E2E sikkerhed", "series_id": sid,
+                                                         "address": "Energivej 10, 3000 Helsingør", "facility": pl} for d in (4, 5)], t=la)
+        c.tours += [x["id"] for x in cust]
+        if db.tours.find_one({"id": cust[0]["id"]}, {"_id": 0, "series_id": 1}).get("series_id"):
+            ok(call("GET", f"/tours/series/{sid}", t=la, params={"from_date": in_days(1)})["count"] == 2,
+               "17 serien findes også når turene ligger på en kundes plads (før: 0)")
+        ok(status_of("DELETE", f"/tours/{cust[0]['id']}", t=la) == 200 and not db.tours.find_one({"id": cust[0]["id"]}),
+           "18 logistikfirmaet kan slette en tur det har oprettet på kundens plads (før: 404)")
+        ou = login("ferdalturan+hf.1121.medarbejder1@gmail.com")
+        ilk = db.users.find_one({"email": ILK_ADMIN}, {"_id": 0, "company_id": 1})["company_id"]
+        mat = (call("GET", "/locations/code/1121").get("materials") or ["Pap"])[0]
+        o = call("POST", "/customer-orders/submit", {"location_code": "1121", "material": mat, "container_number": "Container 9",
+                                                     "priority": "normal", "tour_type": "flyt", "order_date": in_days(3),
+                                                     "partner_id": ilk, "comment": "E2E sikkerhed"}, t=ou)
+        c.tours.append(o["tour_id"]); c.orders.append(o["order_id"])
+        ok(status_of("DELETE", f"/tours/{o['tour_id']}", t=la) == 409 and db.tours.find_one({"id": o["tour_id"]}),
+           "19 en kundebestillings tur kan ikke slettes af logistikfirmaet (kunden annullerer den)")
     finally:
         db.companies.delete_one({"id": e2e_logi})
         db.users.delete_many({"email": "e2e-overtag@example.com"})

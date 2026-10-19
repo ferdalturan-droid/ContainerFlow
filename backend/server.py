@@ -2925,9 +2925,12 @@ _SERIES_FIELDS = {"address", "address_parts", "facility", "facility_parts", "sto
 async def _series_tours(series_id: str, from_date: str, payload: dict) -> List[dict]:
     if not series_id:
         raise HTTPException(status_code=400, detail="Mangler serie")
+    # 2026-10-19: Rå samling + adgangsfilter. Ture på en kundes plads ejes af
+    # kunden, så det tenant-filtrerede opslag fandt 0 ture for logistikfirmaet.
     q = {"series_id": series_id, "date": {"$gte": normalize_date(from_date or get_dk_date_str())},
-         "completed": {"$ne": True}, "on_way": {"$ne": True}, "not_completed": {"$ne": True}}
-    return await db.tours.find(q, {"_id": 0, "id": 1, "date": 1}).sort("date", 1).to_list(500)
+         "completed": {"$ne": True}, "on_way": {"$ne": True}, "not_completed": {"$ne": True},
+         "deleted": {"$ne": True}, **_tour_access_query(payload)}
+    return await _raw_db.tours.find(q, {"_id": 0, "id": 1, "date": 1}).sort("date", 1).to_list(500)
 
 
 @api_router.get("/tours/series/{series_id}")
@@ -2970,6 +2973,34 @@ async def series_delete(series_id: str, from_date: str = "", payload: dict = Dep
 
 _LOCKED_REG_FIELDS = ("weight", "container_weights", "cargo_actuals", "completed", "time", "on_way_time",
                       "not_completed", "used_trailer", "trailer_count_actual")
+
+
+def _tour_write_ok(payload: dict, tour: dict) -> bool:
+    """2026-10-19: Må brugeren rette/slette turen? Logistikfirmaet: egne ture
+    og ture det kører for en kunde. Andre roller: kun egen virksomheds ture
+    (plus virksomheder den betjener)."""
+    role = (payload or {}).get("role")
+    if role == "super_admin":
+        return True
+    cid = (payload or {}).get("company_id") or ""
+    if not cid:
+        return False
+    if tour.get("company_id") == cid:
+        return True
+    if role in ("logistics_admin", "driver"):
+        return cid in (tour.get("assigned_logistics_company_ids") or [])
+    return tour.get("company_id") in (current_extra_visible_company_ids.get() or [])
+
+
+def _tour_access_query(payload: dict) -> dict:
+    """Samme regel som `_tour_write_ok`, som database-filter (rå samling)."""
+    role = (payload or {}).get("role")
+    if role == "super_admin":
+        return {}
+    cid = (payload or {}).get("company_id") or "__none__"
+    if role in ("logistics_admin", "driver"):
+        return {"$or": [{"company_id": cid}, {"assigned_logistics_company_ids": cid}]}
+    return {"company_id": {"$in": [cid] + list(current_extra_visible_company_ids.get() or [])}}
 
 
 @api_router.put("/tours/{tour_id}", response_model=Tour)
@@ -3018,13 +3049,12 @@ async def update_tour(tour_id: str, update: TourUpdate, payload: dict = Depends(
 
     # Tenant guard: LA/driver may only touch their own company tours OR tours
     # from customer companies that have partnered with their logistics_admin
-    # company. super_admin bypasses.
+    # company. super_admin bypasses. 2026-10-19: Alle andre roller (kunde,
+    # lokation, bestiller) må kun røre deres egen virksomheds ture - før kunne
+    # en kunde-bruger rette en hvilken som helst tur, hvis id'et var kendt.
+    if not _tour_write_ok(payload, existing_tour):
+        raise HTTPException(status_code=403, detail="Tur tilhører anden virksomhed")
     if role in ("logistics_admin", "driver"):
-        la_company = payload.get("company_id") or ""
-        tour_cid = existing_tour.get("company_id", "")
-        partners = existing_tour.get("assigned_logistics_company_ids") or []
-        if not (tour_cid == la_company or la_company in partners):
-            raise HTTPException(status_code=403, detail="Tur tilhører anden virksomhed")
         if update_data.get("plads") and update_data["plads"] != existing_tour.get("plads"):
             await _require_plads_allowed(payload, update_data["plads"])
 
@@ -3481,9 +3511,22 @@ async def delete_tour(tour_id: str, _auth: dict = Depends(get_current_user_paylo
     # 2026-10-16: Kræver login (før kunne alle slette en tur med et id).
     if _auth.get("role") == "logistics_admin" and not await _require_tour_scope(_auth, [tour_id]):
         raise HTTPException(status_code=403, detail="Turen hører til en kunde du ikke har adgang til")
-    before = await db.tours.find_one({"id": tour_id}, {"_id": 0, "driver_id": 1, "claimed_by_id": 1, "driver_name": 1,
-                                                       "claimed_by": 1, "fraction": 1, "address": 1, "completed": 1, "date": 1})
-    result = await db.tours.delete_one({"id": tour_id})
+    # 2026-10-19: Rå opslag + samme adgangsregel som ved rettelse. Ture på en
+    # kundes plads ejes af kunden, så det tenant-filtrerede opslag gav 404, når
+    # logistikfirmaet slettede en tur det selv havde oprettet.
+    before = await _raw_db.tours.find_one({"id": tour_id}, {"_id": 0, "driver_id": 1, "claimed_by_id": 1, "driver_name": 1,
+                                                            "claimed_by": 1, "fraction": 1, "address": 1, "completed": 1, "date": 1,
+                                                            "company_id": 1, "assigned_logistics_company_ids": 1, "source": 1,
+                                                            "order_id": 1})
+    if not before:
+        raise HTTPException(status_code=404, detail="Tour not found")
+    if not _tour_write_ok(_auth, before):
+        raise HTTPException(status_code=403, detail="Tur tilhører anden virksomhed")
+    if before.get("order_id") and _auth.get("role") != "super_admin":
+        # Turen hører til en bestilling - slettes den alene, står bestillingen
+        # tilbage uden tur. Kunden annullerer under "Mine bestillinger".
+        raise HTTPException(status_code=409, detail="Turen hører til en kundebestilling - kunden annullerer den under Mine bestillinger")
+    result = await _raw_db.tours.delete_one({"id": tour_id})
     holder = ((before or {}).get("driver_id") or (before or {}).get("claimed_by_id") or "").strip()
     if result.deleted_count and holder and not before.get("completed") and _auth.get("role") in ("logistics_admin", "super_admin"):
         _push_later(_push_driver(_auth.get("company_id") or "", holder, before.get("driver_name") or before.get("claimed_by") or "",
