@@ -109,6 +109,10 @@ def run():
         ok(fin.get("waiting") == "noted" and tt["completed"] and tt["waiting_reported_min"] == 15
            and not db.tour_change_requests.find_one({"tour_id": tid}),
            "12d basic: chaufførens ventetid står på turen (til fakturagrundlaget) - ingen godkendelse uden Økonomi")
+        r = _session.post(f"{BASE}/driver/tours/{tid}/change-request", json={"waiting_min": 30, "comment": "E2E ventede"},
+                          headers={"Authorization": f"Bearer {cd}"}, timeout=20)
+        ok(r.status_code == 403 and r.json().get("premium_required") == "economy",
+           "12e basic: rettelser til godkendelse kræver Økonomi (ingen Godkendelser at sende dem til)")
 
         # Super admin giver Økonomi enkeltvis (overgang / prøve)
         sa = login(os.environ["SUPER_ADMIN_EMAIL"])
@@ -128,6 +132,38 @@ def run():
         ok(price_of(ca, tid)["price"].get("total") == 555, "13c ...og prisaftalen for genbrugsplads-kunden gælder turen")
         ok("stop" not in opts["categories"] and "per_unit" not in opts["models"] and "levering" not in opts["task_types"]
            and "normal" in opts["task_types"], "13d basic: ingen prisvalg der aldrig kan ramme en partnertur (stop, pr. enhed, gods)")
+
+        # --- 2026-10-20: Pakkeskift slår igennem med det samme (begge veje) ---------------
+        def gate(method, path, tok, body=None):
+            """premium_required-nøglen hvis serveren afviser (ugyldig body = ingen sideeffekt)."""
+            r = _session.request(method, f"{BASE}{path}", json=body if body is not None else {},
+                                 headers={"Authorization": f"Bearer {tok}"}, timeout=20)
+            try:
+                j = r.json()
+            except ValueError:
+                j = {}
+            return j.get("premium_required") if r.status_code == 403 and isinstance(j, dict) else None
+
+        flips = []
+        for _ in range(3):
+            call("PUT", f"/superadmin/companies/{city}/logistics-tier", {"tier": "premium"}, t=sa)
+            up_ok = (call("GET", "/logistics/profile", t=ca)["tier"] == "premium"
+                     and call("GET", "/logistics/profile", t=cd)["capabilities"]["time"]
+                     and gate("POST", "/driver/time-entries/punch", cd) is None
+                     and gate("POST", "/logistics/customers", ca) is None)
+            call("PUT", f"/superadmin/companies/{city}/logistics-tier", {"tier": "partner"}, t=sa)
+            down_ok = (call("GET", "/logistics/profile", t=ca)["tier"] == "partner"
+                       and not call("GET", "/logistics/profile", t=cd)["capabilities"]["time"]
+                       and gate("POST", "/driver/time-entries/punch", cd) == "time"
+                       and gate("POST", "/logistics/customers", ca) == "own_customers")
+            flips.append(f"{'op' if up_ok else 'OP-FEJL'}/{'ned' if down_ok else 'NED-FEJL'}")
+        ok(all(f == "op/ned" for f in flips),
+           f"13e premium <-> basic slår igennem med det samme hos admin og chauffør, 3 gange i træk ({', '.join(flips)})")
+        call("PUT", f"/superadmin/companies/{city}/premium-modules", {"modules": ["economy", "time"]}, t=sa)
+        m_on = gate("POST", "/driver/time-entries/punch", cd) is None and call("GET", "/logistics/profile", t=cd)["capabilities"]["time"]
+        call("PUT", f"/superadmin/companies/{city}/premium-modules", {"modules": ["economy"]}, t=sa)
+        m_off = gate("POST", "/driver/time-entries/punch", cd) == "time" and not call("GET", "/logistics/profile", t=cd)["capabilities"]["time"]
+        ok(m_on and m_off, "13f et enkelt modul (Tid) til og fra slår også igennem med det samme")
 
         # --- Pladser og indstillinger -------------------------------------------------------
         ok(not any(p.get("company_id") == city for p in call("GET", "/plads", t=ca)), "14 partner ser ingen egne lokationer")

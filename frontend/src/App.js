@@ -33,6 +33,10 @@ import FinishSheet, { effectiveCapture } from "@/components/FinishSheet";
 import DriverStopList from "@/components/DriverStopList";
 import { initTourOpQueue, enqueueOp, isNetworkError, subscribeOps } from "@/lib/tourOpQueue";
 import { routeOf, navUrl } from "@/lib/tourHelpers";
+import { installPremiumInterceptor, subscribePremiumRefresh } from "@/lib/premium";
+import { AuthedImg, downloadAuthed, fetchBlobUrl, openAuthed } from "@/lib/authedFile";
+
+installPremiumInterceptor();
 import { enablePush, disablePush, syncPush, pushSupported, isIOS, isStandalone, permission as pushPermission } from "@/lib/push";
 import EconomyPanel, { FinishSettingsCard } from "@/pages/EconomyPanel";
 import LogisticsLocations from "@/pages/LogisticsLocations";
@@ -6330,27 +6334,16 @@ const AdminReceiptList = () => {
     try {
       // Fase 17.8 (2026-02-27): Brug binary endpoint + fetch til blob så
       // store billeder ikke loader hele base64-payload i ét hug.
-      const resp = await fetch(`${API}/api/receipts/${receiptId}/image-binary`, { credentials: "include" });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const blob = await resp.blob();
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `kvittering-${desc || receiptId}.jpg`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      // 2026-10-20: med login (axios) - fetch uden header gav 401.
+      await downloadAuthed(`${API}/api/receipts/${receiptId}/image-binary`, `kvittering-${desc || receiptId}.jpg`);
     } catch (e) { toast.error("Kunne ikke downloade"); }
   };
 
-  const viewReceiptImage = (receiptId, desc) => {
-    // Fase 17.8: åbn modal med binary-URL som <img src> - browseren
-    // streamer billedet progressivt, intet base64-præfix-besvær.
-    setViewingImage({
-      image_url: `${API}/api/receipts/${receiptId}/image-binary`,
-      description: desc || "Kvittering",
-    });
+  const viewReceiptImage = async (receiptId, desc) => {
+    // 2026-10-20: Billedet kræver login - hentes som blob og vises derfra.
+    try {
+      setViewingImage({ image_url: await fetchBlobUrl(`${API}/api/receipts/${receiptId}/image-binary`), description: desc || "Kvittering" });
+    } catch (e) { toast.error("Kunne ikke hente billedet"); }
   };
 
   const viewTourImage = async (tourId) => {
@@ -6653,12 +6646,10 @@ const AdminReceiptList = () => {
                               className="w-full h-16 bg-slate-100 dark:bg-slate-800 rounded mb-1 overflow-hidden flex items-center justify-center cursor-pointer"
                               title="Vis billede"
                             >
-                              <img
+                              <AuthedImg
                                 src={`${API}/api/receipts/${r.id}/image-binary`}
                                 alt={r.description || "Kvittering"}
                                 className="w-full h-full object-cover"
-                                loading="lazy"
-                                onError={(e) => { e.currentTarget.style.display = "none"; }}
                               />
                             </button>
                             {/* Tour-link badge */}
@@ -6777,7 +6768,12 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
   useEffect(() => {
     if (authUser?.role !== "logistics_admin") return;
     // Fejler profilen, vises kerne-funktionerne (serveren håndhæver premium).
-    axios.get(`${API}/logistics/profile`).then(r => setLogisticsProfile(r.data)).catch(() => setLogisticsProfile({ capabilities: {}, failed: true }));
+    const load = () => axios.get(`${API}/logistics/profile`)
+      .then(r => setLogisticsProfile(prev => (JSON.stringify(prev) === JSON.stringify(r.data) ? prev : r.data)))
+      .catch(() => setLogisticsProfile(prev => prev || { capabilities: {}, failed: true }));
+    load();
+    // 2026-10-20: Skifter super admin pakken, slår det igennem uden genindlæsning.
+    return subscribePremiumRefresh(load);
   }, [authUser?.role, authUser?.company_id]);
   const isPremiumLogistics = !!logisticsProfile?.is_premium;
   // 2026-10-20: Logistikfirmaets egen drift er premium (BESLUTNINGER afsnit 11):
@@ -6846,8 +6842,9 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
   }, [activeTab, can]);
   useEffect(() => {
     if (!mod.loaded) return;
-    if ((activeTab === "priser" && !mod.economy) || (activeTab === "statistics" && !mod.reports)) setActiveTab("tours");
-  }, [activeTab, mod]);
+    if ((activeTab === "priser" && !mod.economy) || (activeTab === "statistics" && !mod.reports)
+        || (activeTab === "schedule" && !mod.time && !resourcePlanningEnabled)) setActiveTab("tours");
+  }, [activeTab, mod, resourcePlanningEnabled]);
   const [archivesSubTab, setArchivesSubTab] = useState("pdf"); // pdf | receipts | tours - within "Arkiv" tab
   const [receiptsArchiveView, setReceiptsArchiveView] = useState("table"); // table | drivers - Fase 17 merged archive view mode
   
@@ -8444,7 +8441,7 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
                     : "text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700"
                 }`}
               >
-                <Camera className="w-4 h-4 inline mr-2" /> Kvittering-arkiv
+                <Camera className="w-4 h-4 inline mr-2" /> Vedhæftninger
               </button>
               {/* 2026-10-18: Genvejen "Ture → Historik" er fjernet - tur-historikken
                   findes kun under Ture > Historik. */}
@@ -8454,7 +8451,7 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
               <section className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm p-6 border border-border" data-testid="merged-receipts-archive-section">
                 <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
                   <h2 className="text-xl font-bold flex items-center gap-2">
-                    <Camera className="w-5 h-5 text-emerald-600" /> Kvittering-arkiv
+                    <Camera className="w-5 h-5 text-emerald-600" /> Vedhæftninger
                   </h2>
                   {/* Fase 17: View-mode toggle. "Tabel" viser alle
                       kvitteringer i én søgbar liste med filtre.
@@ -8480,7 +8477,7 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
                           : "text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
                       }`}
                     >
-                      <FolderOpen className="w-3.5 h-3.5 inline mr-1" /> Pr. chauffør
+                      <FolderOpen className="w-3.5 h-3.5 inline mr-1" /> Vejesedler pr. chauffør
                     </button>
                   </div>
                 </div>
@@ -8712,7 +8709,7 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
                   freshDayReportPdf(a, rep).save(dayReportFileName("dagrapport", a.report_date, a.driver_name));
                 } catch (e) {
                   toast.error(formatApiError(e) + " - åbner den gemte original i stedet");
-                  window.open(`${API}/pdf-archive/${a.id}`, "_blank");
+                  openAuthed(`${API}/pdf-archive/${a.id}`, "dagrapport.pdf").catch(() => toast.error("Kunne ikke åbne PDF'en"));
                 }
               };
               const downloadPdfZip = async (rows, filename) => {
@@ -9029,8 +9026,7 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
                                                 </button>
                                                 <a
                                                   href={`${API}/pdf-archive/${a.id}`}
-                                                  target="_blank"
-                                                  rel="noopener noreferrer"
+                                                  onClick={(ev) => { ev.preventDefault(); openAuthed(`${API}/pdf-archive/${a.id}`, "dagrapport.pdf").catch(() => toast.error("Kunne ikke åbne PDF'en")); }}
                                                   className="text-[11px] text-slate-500 hover:text-purple-600 underline"
                                                   title="Den PDF chaufføren gemte ved Afslut dag (uændret)"
                                                 >
@@ -13356,7 +13352,13 @@ function App() {
   const [driverCaps, setDriverCaps] = useState({});
   useEffect(() => {
     if (authUser?.role !== "driver") return;
-    axios.get(`${API}/logistics/profile`).then(r => setDriverCaps({ ...(r.data?.capabilities || {}), _loaded: true })).catch(() => {});
+    const load = () => axios.get(`${API}/logistics/profile`)
+      .then(r => setDriverCaps(prev => {
+        const next = { ...(r.data?.capabilities || {}), _loaded: true };
+        return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+      })).catch(() => {});
+    load();
+    return subscribePremiumRefresh(load);
   }, [authUser?.role, authUser?.company_id]);
   // 2026-10-20: Tidsregistrering (stempling) er premium. Uden den åbner
   // chaufførappen direkte på Ture, og "Tid"-fanen vises ikke.
@@ -16579,7 +16581,7 @@ function App() {
                 Fase 15.30 (2026-02-22): Pause er nu en slice-type. Når
                 chaufføren har en åben arbejds-slice vises "Start pause".
                 Når chaufføren har en åben pause-slice vises "Start arbejde". */}
-            {(() => {
+            {driverHasTime && (() => {
               const openEntry = timeEntries.find(e => !e.end_time);
               const hasOpen = !!openEntry;
               const openIsPause = (openEntry?.slice_type || "work") === "pause";
@@ -16694,8 +16696,9 @@ function App() {
                 Fase 15.30 (2026-02-22): Viser arbejdstid + pausetid separat.
                 Fase 15.31 (2026-02-22): Knappen vises ALTID (også uden
                 entries) - så chaufføren kan åbne modalet og bruge
-                "Tilføj manuel" til at oprette sin første registrering. */}
-            {(() => {
+                "Tilføj manuel" til at oprette sin første registrering.
+                2026-10-20: Kun med tidsregistrering (premium-modul). */}
+            {driverHasTime && (() => {
               const workMin = timeEntries
                 .filter(e => (e.slice_type || "work") !== "pause")
                 .reduce((sum, e) => sum + (e.duration_minutes || 0), 0);
@@ -17442,7 +17445,7 @@ function App() {
           kun oprette ÉT stempel ad gangen (IND eller UD). Periode-modalen
           er flyttet til logistik-admin → Planlægning → Tidsregistrering. */}
       <ManualPunchModal
-        open={manualTimeModalOpen}
+        open={manualTimeModalOpen && driverHasTime}
         defaultDate={reportDate}
         mode="driver"
         requireReason={requireDriverPunchReason}
@@ -17477,7 +17480,7 @@ function App() {
 
       {/* Fase 13 (2026-06-18): Day Time Overview Modal - alle perioder
           for valgt dag + total + manuel-badge. */}
-      {showTimeOverview && (
+      {showTimeOverview && driverHasTime && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-end sm:items-center justify-center p-4"
              onClick={() => setShowTimeOverview(false)}
              data-testid="time-overview-modal">

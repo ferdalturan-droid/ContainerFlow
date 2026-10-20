@@ -178,7 +178,7 @@ Begge dele er rettet. Desuden:
 - **Engangsrettelse ved opstart:** ture i gang, der står som tildelt en anden end den, der kører dem, sættes til den, der kører.
 - **Planlæg › Chauffører har et søgefelt** (navn, telefon eller e-mail) i samme kort. Listen kan stadig rulles; telefonnumre matcher uanset mellemrum og +45.
 - **"Gods og andet" hedder nu "Fragt"** i Ny tur, med en kort forklaring under hver knap: "Afhent, byt eller flyt containere" og "Paller, materialer, flytning m.m.". Mærket på turen i Dagsplan og hos chaufføren siger også "Fragt". Internt hedder typen stadig `goods`.
-- **Arkiv har ikke længere genvejen "Ture → Historik".** Tur-historikken findes kun under Ture › Historik; Arkiv har Dagrapporter (PDF) og Kvittering-arkiv.
+- **Arkiv har ikke længere genvejen "Ture → Historik".** Tur-historikken findes kun under Ture › Historik; Arkiv har Dagrapporter (PDF) og Vedhæftninger (vejesedler og billeder fra turene, 2026-10-20).
 - **Menuen** har nu seks punkter + "Mere": Ture · Tid & ressourcer · Chauffører · Rapportering · Økonomi · Arkiv. Arkiv er flyttet ud af "Mere".
 
 ### Værksted, én partner pr. bestilling og live-opdatering (2026-10-19)

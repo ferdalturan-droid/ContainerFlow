@@ -456,3 +456,66 @@ logistikfirmaer uden friktion?
   pladser, kør bestillingerne.
 
 **Test:** flow_tiers 11–13d.
+
+## 12. Vedhæftninger, skjul det man ikke har, pakkeskift og prisforklaring (2026-10-20)
+
+### 12a. Vedhæftninger i Arkiv
+
+**Fejlen:** Chaufførens billeder på en tur (fx varekørsel uden container) blev gemt, men vist ingen steder i Arkiv. Kun vejesedler stod der.
+
+**Valgt løsning:** Én fælles visning, "Vedhæftninger", med en type-kolonne (Vejeseddel / Billede) og et typefilter.
+- Vejesedler beholder deres egen logik: vægt, ret vægt og CO2.
+- Billeder følger turens adgang.
+- Endpoints: `GET /attachments-archive` og `GET /tour-photos/{id}`.
+
+**Fravalgt:**
+- To separate faner. Man skal så lede to steder efter "det chaufføren hængte på turen".
+- At gemme billeder som vejesedler. Det ville blande vægt og CO2 sammen med almindelige fotos.
+
+**Øvrige ændringer:**
+- En vejeseddel uden vægt (fx på en varetur) blev smidt væk ved afslutning. Nu gemmes den altid og vises som "Uden vægt".
+- Kunden ser ikke billederne herfra. De er logistikkens dokumentation.
+
+**Fundet undervejs:** Siden login-skærpelsen 18.10 kunne vejesedlens billede og dagrapportens "Original"-PDF ikke åbnes. `<img>` og links sender ikke login med, så de fik 401. De hentes nu med login (`lib/authedFile.js`).
+
+### 12b. Premium-funktioner vises ikke uden Premium
+
+**Årsagen** til "Tid"-fanen med fejlbesked: siden havde hentet pakken, før firmaet blev nedgraderet.
+
+**Rettelser:**
+- Skjult uden tidsregistrering:
+  - chaufførens "Stempling"-knap;
+  - stempeloverblikket;
+  - den manuelle stempel-dialog.
+- En "Tid & ressourcer"-fane, man står på, lukkes, når modulet forsvinder.
+- Chaufførens rettelser til godkendelse kræver Økonomi. Uden Økonomi er der ingen at sende dem til. Det håndhæves også af serveren.
+
+**Notifikationer:** Push-notifikationer er ikke premium. Fejlen kom fra den forældede side.
+
+### 12c. Pakkeskift slår igennem med det samme
+
+**Årsager:**
+- Siden hentede pakken kun én gang, ved indlæsning.
+- Serveren huskede pakken i 15 sekunder pr. app-instans.
+- Lige efter et skift kunne skærmen og serveren derfor være uenige, og det var forskelligt fra gang til gang.
+
+**Nu opdaterer siden pakken:**
+- hvert 30. sekund;
+- når fanen/vinduet får fokus igen;
+- straks, når serveren afviser noget som premium. Funktionen forsvinder så i stedet for at blive ved med at fejle.
+
+**Serveren** husker pakken i 3 sekunder (før 15). Med flere app-instanser rydder et skift kun cachen i den instans, der modtog det.
+
+**Fravalgt:** Ingen cache overhovedet. Det ville give et databaseopslag på hvert premium-kald, og 3 sekunder er ikke til at mærke.
+
+**Test:**
+- flow_tiers 13e: premium ↔ basic tre gange i træk hos admin og chauffør.
+- flow_tiers 13f: modulet Tid til og fra.
+- flow_tiers 12e: rettelser uden Økonomi.
+- Browsertjek: en åben side mistede Økonomi efter ca. 17 sekunder uden genindlæsning. Ved fokus gik det på 0,1 sekund. Chaufførens IND-tryk efter nedgradering fjernede "Tid" med det samme.
+
+### 12d. Prisberegning forklaret + fejl i tid
+
+- `PRISBEREGNING.md` er en komplet forklaring med 151 eksempler. Eksemplerne er regnet af prismotoren og kontrolleret af `scripts/prisberegning_eksempler.py`.
+- **Fejl fundet:** start og slut i samme minut blev regnet som 24 timer på timepris (over midnat-reglen). Nu giver det "Mangler tid" med beskeden "Start og slut er samme minut - ret tiden".
+- **Test:** flow_pricing 21-22.

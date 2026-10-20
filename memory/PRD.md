@@ -19,6 +19,16 @@ Data must be strictly isolated per company.
   and `/api/health` bypass tenant filtering so the QR-code customer flow continues to work.
 
 ## What's been implemented (2026-02-15)
+## What's new in 2026-10-20 (Vedhæftninger, pakkeskift, prisforklaring)
+- **Arkiv › Vedhæftninger** samler vejesedler og chaufførens billeder fra turene.
+  - Endpoints: `/attachments-archive` og `/tour-photos/{id}`.
+  - En vejeseddel uden vægt gemmes nu også.
+  - Filer fra API'et (vejeseddel-billeder, "Original"-PDF) hentes med login (`lib/authedFile.js`). Før gav de 401.
+- **Pakkeskift (basic/premium/moduler) slår igennem med det samme.** Profilen hentes hvert 30. sekund, ved fokus og ved `premium_required`, og serveren husker pakken i 3 sekunder. Premium-funktioner skjules helt uden adgang. Se `LOGISTICS_TIERS.md`.
+- **`PRISBEREGNING.md`** er den komplette prisforklaring med 151 kontrollerede eksempler (`scripts/prisberegning_eksempler.py`).
+- **Rettet:** start = slut på en timepris-tur gav 24 timer.
+- Se `BESLUTNINGER_2026-10-19.md` afsnit 12.
+
 ## What's new in 2026-10-19 (Værksted, én partner, live)
 - Værksteds-ture har værkstedet på turen (`_order_tour_route`), med begge adresser og Maps hos planlægger, chauffør og i Mine bestillinger. Migrering: `_migrate_workshop_routes`.
 - Én logistikpartner pr. bestilling (`_single_partner`); Excel-import kun til det importerende firma.

@@ -222,17 +222,19 @@ export default function FinishSheet({ tour, onClose, onDone, driverName, myId, c
           else if (data.waiting === "noted") toast.message("Ventetiden er registreret på turen");
           else if (data.waiting_error) toast.error(data.waiting_error);
           toast.success("Turen er afsluttet");
-          if (receipt && regs.weight > 0) {
+          // En vedhæftet seddel gemmes altid - også uden vægt (fx varekørsel).
+          if (receipt) {
             enqueueReceiptUpload({ tour_id: tour.id, image_data: receipt, content_type: "image/jpeg", description: "Vedhæftet ved afslutning",
-              final_weight_kg: regs.weight, user_name: driverName || tour.claimed_by || "", append_for_loose: false });
+              final_weight_kg: regs.weight > 0 ? regs.weight : null, user_name: driverName || tour.claimed_by || "", append_for_loose: false });
           }
           onDone?.({ queued: false });
         } catch (err) {
           if (!isNetworkError(err)) throw err;
           enqueueOp({ kind: "finish", tour_id: tour.id, op_id: opId.current, body });
-          if (receipt && regs.weight > 0) {
+          // En vedhæftet seddel gemmes altid - også uden vægt (fx varekørsel).
+          if (receipt) {
             enqueueReceiptUpload({ tour_id: tour.id, image_data: receipt, content_type: "image/jpeg", description: "Vedhæftet ved afslutning",
-              final_weight_kg: regs.weight, user_name: driverName || tour.claimed_by || "", append_for_loose: false });
+              final_weight_kg: regs.weight > 0 ? regs.weight : null, user_name: driverName || tour.claimed_by || "", append_for_loose: false });
           }
           toast.success("Ingen forbindelse - afslutningen er gemt på telefonen og sendes automatisk");
           onDone?.({ queued: true, tourId: tour.id, regs });

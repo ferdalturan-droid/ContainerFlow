@@ -46,6 +46,27 @@ def run():
         ok([l.get("actual_qty") for l in t2["cargo_lines"]] == [11.0, 1.8] and float(t2.get("weight") or 0) == 1800,
            "6 registreret 11 paller + 1,8 ton -> vægt 1.800 kg (kun kg/ton tæller som vægt)")
         ok(len(call("GET", f"/tours/{tid}/photos", t=ha)) == 1, "7 planlæggeren ser billedet")
+        # 2026-10-20: Vedhæftninger i arkivet - også på en tur uden container
+        arc = call("GET", "/attachments-archive", t=ha, params={"search": tid})["items"]
+        prow = next((a for a in arc if a["kind"] == "photo" and a["tour_id"] == tid), None)
+        ok(prow and prow["tour_kind"] == "goods" and prow["driver_name"] == nik and "data" not in prow,
+           "7a billedet står i Arkiv > Vedhæftninger (type Billede, varekørsel, uden selve billeddata i listen)")
+        full = call("GET", f"/tour-photos/{ph['id'] if 'id' in ph else prow['id']}", t=ha)
+        ok(full["url"].startswith("data:image/jpeg;base64,") and full["tour"]["id"] == tid and full["siblings"] == [prow["id"]],
+           "7b billedet kan åbnes fra arkivet med turens oplysninger")
+        ilk_a = login(ILK_ADMIN)
+        ok(not [a for a in call("GET", "/attachments-archive", t=ilk_a, params={"search": tid})["items"] if a["tour_id"] == tid]
+           and status_of("GET", f"/tour-photos/{prow['id']}", t=ilk_a) == 403,
+           "7c et andet logistikfirma ser hverken billedet i arkivet eller kan åbne det")
+        rc = call("POST", "/receipts/save-for-tour", {"tour_id": tid, "image_data": img, "content_type": "image/jpeg",
+                                                       "description": "Vedhæftet ved afslutning", "final_weight_kg": None,
+                                                       "user_name": nik, "skip_tour_update": True}, t=drv)
+        arc = call("GET", "/attachments-archive", t=ha, params={"search": tid})["items"]
+        kinds = sorted(a["kind"] for a in arc if a["tour_id"] == tid)
+        only_ph = call("GET", "/attachments-archive", t=ha, params={"search": tid, "kind": "photo"})["items"]
+        ok(rc.get("receipt_id") and kinds == ["photo", "receipt"] and all(a["kind"] == "photo" for a in only_ph)
+           and float(db.tours.find_one({"id": tid}, {"_id": 0, "weight": 1}).get("weight") or 0) == 1800,
+           "7d en seddel uden vægt gemmes også (rører ikke turens vægt) - begge typer står samlet, filter virker")
         row = report_row(ha, tid)
         ok(row and row["price"]["total"] == 1100 and row["trailer_count"] == 1,
            f"8 aftalt pris 1.100, hængere kørt 1 (planlagt 2) ({row and row['price']['total']})")

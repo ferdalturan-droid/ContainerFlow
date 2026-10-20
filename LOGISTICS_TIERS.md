@@ -64,6 +64,11 @@ Hvad der er lavet om, fordi tid og Økonomi ikke længere er i basic:
   - Økonomi: `/pricing/options` viser kun tilknyttede kunder. `_check_rule_customers` afviser priser for egne kunder hos en partner (og kunder uden for en koordinators afgrænsning).
   - Pladslister: `_la_plads_query` viser ikke en partner egne lokationer (heller ikke efter en nedgradering).
 - **Frontend:** `profile.capabilities` styrer Ny tur, tur-panelet og chaufførens "Tilføj et stop". `options.profile.tier` styrer Økonomi › Egne kunder.
+- **Pakkeskift slår igennem med det samme (2026-10-20):**
+  - Siden henter profilen igen hvert 30. sekund og når vinduet får fokus (`subscribePremiumRefresh` i `frontend/src/lib/premium.js`).
+  - Den henter også straks, når serveren svarer `premium_required` (axios-interceptor).
+  - Serveren husker pakken i 3 sekunder pr. app-instans (`_tier_cache`). Et skift via super admin rydder cachen i den instans, der modtog det.
+  - En funktion, firmaet ikke har, vises ikke.
 - **Super admin:**
   - `GET` og `PUT /api/superadmin/companies/{id}/logistics-tier` til skift af type.
   - Dialogen viser, hvad der skjules.

@@ -141,6 +141,23 @@ def run():
         ok(simu["total"] == 1500 + 400, "19 simulator: 10 paller + 4 stop = 1.900")
         n = tour(ha, c, X, remark="ikke haster")
         ok(db.tours.find_one({"id": n}, {"_id": 0, "priority": 1})["priority"] == "normal", "20 'ikke haster' i noten forbliver normal")
+
+        # --- 2026-10-20: start og slut i samme minut er ikke 24 timer ----------
+        V = "E2E Timepris ApS"
+        c.customers.append(V)
+        db.logistics_customers.delete_many({"name": V})
+        call("POST", "/logistics/customers", {"name": V}, t=ha)
+        bundle(ha, c, "E2E timepris", {"customer_ids": [key(V)]},
+               base={"pricing": {"model": "hourly", "hourly_rate": "600", "rounding_mode": "none"}})
+        q = tour(ha, c, V)
+        now_iso = datetime.now(DK).isoformat()
+        db.tours.update_one({"id": q}, {"$set": {"completed": True, "on_way": True, "on_way_time": "10:00", "time": "10:00",
+                                                "on_way_at": now_iso, "completed_at": now_iso, "claimed_by": nik, "claimed_by_id": nik_id}})
+        pq = price_of(ha, q)["price"]
+        ok(pq["status"] == "missing_time" and pq.get("total") is None and "Start og slut er samme minut - ret tiden" in pq["flags"],
+           f"21 start = slut: 'Mangler tid' med forklaring - ikke 24 timer ({pq.get('total')}, {pq.get('flags')})")
+        call("PUT", f"/pricing/tours/{q}/adjust", {"note": "E2E rettet sluttid", "fact_overrides": {"end_time": "10:45"}}, t=ha)
+        ok(total(ha, q) == 450, "22 ...når sluttiden rettes til 10:45: 45 min × 600 = 450")
     finally:
         c.run()
 

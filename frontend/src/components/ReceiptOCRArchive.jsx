@@ -1,5 +1,7 @@
 // ReceiptOCRArchive.jsx - Fase 17
 // Logistik-admins samlede kvitterings-arkiv (tidligere "OCR-arkiv").
+// 2026-10-20: "Vedhæftninger" - viser også chaufførens billeder på turen
+// (fx varekørsel uden container), ikke kun vejesedler.
 // Lister alle kvitteringer på tværs af en tenant med filtre
 // (dato, chauffør, plads, fraktion, kunde, fri-tekst), paginering,
 // detalje-view med billede + download + manuel vægt-override + audit-log.
@@ -9,9 +11,10 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import axios from "axios";
+import { useAuthedImage } from "../lib/authedFile";
 import { toast } from "sonner";
 import {
-  Search, X, Camera, AlertTriangle, CheckCircle2, Loader2,
+  Search, X, AlertTriangle, CheckCircle2, Loader2,
   Calendar, RefreshCw, Download, Edit3, History, ImageOff,
 } from "lucide-react";
 
@@ -44,18 +47,30 @@ function fmtTimeShort(val) {
   } catch (_) { return "-"; }
 }
 
-function typeBadge(status) {
+function typeBadge(status, hasWeight = true) {
   // Fase 17: erstatter de gamle OCR-statusser med en enkelt "Type"-badge
   // der signalerer hvordan vægten er kommet på kvitteringen. Alle nye
   // kvitteringer er nu "Manuel" siden vægten altid indtastes af chaufføren.
   const isManual = status === "manual" || status === "none";
-  const color = isManual
+  const color = isManual && hasWeight
     ? "bg-blue-100 text-blue-800 border-blue-300"
     : "bg-slate-100 text-slate-700 border-slate-300";
-  const label = isManual ? "Manuel" : "Ældre";
+  // 2026-10-20: Seddel vedhæftet uden vægt (fx varekørsel).
+  const label = !hasWeight ? "Uden vægt" : isManual ? "Manuel" : "Ældre";
   return (
     <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border ${color}`} data-testid={`receipt-type-${status || "none"}`}>
       {label}
+    </span>
+  );
+}
+
+function kindBadge(kind, id) {
+  const photo = kind === "photo";
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border ${photo
+      ? "bg-sky-100 text-sky-800 border-sky-300" : "bg-emerald-100 text-emerald-800 border-emerald-300"}`}
+      data-testid={`attachment-kind-${kind}-${id}`}>
+      {photo ? "Billede" : "Vejeseddel"}
     </span>
   );
 }
@@ -79,6 +94,7 @@ function buildImageSrc(detail) {
 
 export default function ReceiptOCRArchive({ currentUserName = "" }) {
   const [filters, setFilters] = useState({
+    kind: "",
     date_from: "",
     date_to: "",
     driver_name: "",
@@ -92,6 +108,7 @@ export default function ReceiptOCRArchive({ currentUserName = "" }) {
   const [loading, setLoading] = useState(false);
   const [detail, setDetail] = useState(null); // selected full receipt
   const [detailLoading, setDetailLoading] = useState(false);
+  const [photo, setPhoto] = useState(null); // valgt billede fra en tur
   const [customers, setCustomers] = useState([]);
 
   const fetchArchive = useCallback(async () => {
@@ -99,7 +116,7 @@ export default function ReceiptOCRArchive({ currentUserName = "" }) {
     try {
       const params = { ...filters, limit: PAGE_SIZE, offset };
       Object.keys(params).forEach(k => params[k] === "" && delete params[k]);
-      const resp = await axios.get(`${API}/receipts-archive`, { params });
+      const resp = await axios.get(`${API}/attachments-archive`, { params });
       setData(resp.data || { total: 0, items: [] });
     } catch (e) {
       toast.error("Kunne ikke hente arkiv");
@@ -123,7 +140,7 @@ export default function ReceiptOCRArchive({ currentUserName = "" }) {
   }, []);
 
   const clearFilters = () => {
-    setFilters({ date_from: "", date_to: "", driver_name: "", plads: "", fraction: "", customer_company_id: "", search: "" });
+    setFilters({ kind: "", date_from: "", date_to: "", driver_name: "", plads: "", fraction: "", customer_company_id: "", search: "" });
     setOffset(0);
   };
 
@@ -140,7 +157,7 @@ export default function ReceiptOCRArchive({ currentUserName = "" }) {
         try {
           const siblingResp = await axios.get(
             `${API}/receipts-archive`,
-            { params: { limit: 20, offset: 0 } }
+            { params: { search: receiptData.tour_id, limit: 50, offset: 0 } }
           );
           const siblings = (siblingResp.data?.items || []).filter(
             r => r.tour_id === receiptData.tour_id && r.id !== id
@@ -157,6 +174,17 @@ export default function ReceiptOCRArchive({ currentUserName = "" }) {
       setDetail(null);
     } finally {
       setDetailLoading(false);
+    }
+  };
+
+  const openPhoto = async (id) => {
+    setPhoto({ id, _loading: true });
+    try {
+      const { data: p } = await axios.get(`${API}/tour-photos/${id}`);
+      setPhoto(p);
+    } catch (_) {
+      toast.error("Kunne ikke hente billedet");
+      setPhoto(null);
     }
   };
 
@@ -179,10 +207,9 @@ export default function ReceiptOCRArchive({ currentUserName = "" }) {
   return (
     <section className="bg-white dark:bg-slate-800 rounded-xl shadow-lg p-4 sm:p-6 space-y-4" data-testid="receipt-ocr-archive">
       <div className="flex items-center justify-between flex-wrap gap-2">
-        <h2 className="font-heading font-bold text-xl flex items-center gap-2">
-          <Camera className="w-6 h-6 text-emerald-600" />
-          Kvitterings-arkiv
-        </h2>
+        <p className="text-sm text-slate-600 dark:text-slate-300">
+          Vejesedler og billeder, som chaufførerne har vedhæftet turene.
+        </p>
         <button
           onClick={fetchArchive}
           className="px-3 py-1.5 rounded-lg text-sm font-medium bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-600 inline-flex items-center gap-2"
@@ -194,6 +221,19 @@ export default function ReceiptOCRArchive({ currentUserName = "" }) {
 
       {/* Filter row */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+        <div>
+          <label className="block text-[10px] font-bold uppercase tracking-wide text-slate-500 mb-0.5">Type</label>
+          <select
+            value={filters.kind}
+            onChange={(e) => { setFilters({ ...filters, kind: e.target.value }); setOffset(0); }}
+            className="w-full px-2 py-1.5 text-sm rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 dark:text-white"
+            data-testid="attachment-archive-kind"
+          >
+            <option value="">Alle vedhæftninger</option>
+            <option value="receipt">Vejesedler</option>
+            <option value="photo">Billeder fra turen</option>
+          </select>
+        </div>
         <div>
           <label className="block text-[10px] font-bold uppercase tracking-wide text-slate-500 mb-0.5">Fra dato</label>
           <input
@@ -261,7 +301,7 @@ export default function ReceiptOCRArchive({ currentUserName = "" }) {
             ))}
           </select>
         </div>
-        <div className="col-span-2 md:col-span-2">
+        <div className="col-span-2 md:col-span-1">
           <label className="block text-[10px] font-bold uppercase tracking-wide text-slate-500 mb-0.5">Søg i tekst / beskrivelse</label>
           <div className="relative">
             <Search className="w-4 h-4 absolute left-2 top-2 text-slate-400" />
@@ -303,7 +343,7 @@ export default function ReceiptOCRArchive({ currentUserName = "" }) {
               <th className="py-2 pr-3 text-right">Vægt</th>
               <th className="py-2 pr-3">Tur start</th>
               <th className="py-2 pr-3">Tur slut</th>
-              <th className="py-2 pr-3">Type</th>
+              <th className="py-2 pr-3">Vedhæftning</th>
               <th className="py-2 pr-3"></th>
               <th className="py-2"></th>
             </tr>
@@ -311,23 +351,26 @@ export default function ReceiptOCRArchive({ currentUserName = "" }) {
           <tbody>
             {data.items.map((r) => (
               <tr
-                key={r.id}
+                key={`${r.kind}-${r.id}`}
                 className="border-b border-slate-100 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700/40 cursor-pointer"
-                onClick={() => openDetail(r.id)}
-                data-testid={`receipt-row-${r.id}`}
+                onClick={() => (r.kind === "photo" ? openPhoto(r.id) : openDetail(r.id))}
+                data-testid={r.kind === "photo" ? `attachment-photo-row-${r.id}` : `receipt-row-${r.id}`}
               >
                 <td className="py-2 pr-3 whitespace-nowrap">{r.date || fmtDate(r.created_at)}</td>
                 <td className="py-2 pr-3">{r.driver_name || "-"}</td>
                 <td className="py-2 pr-3">{r.plads || "-"}</td>
                 <td className="py-2 pr-3">{r.fraction || "-"}</td>
-                <td className="py-2 pr-3 text-right font-mono font-semibold">{fmtKg(r.final_weight_kg)}</td>
+                <td className="py-2 pr-3 text-right font-mono font-semibold">{r.kind === "photo" ? "-" : fmtKg(r.final_weight_kg)}</td>
                 <td className="py-2 pr-3 font-mono text-xs text-emerald-600 dark:text-emerald-400" data-testid={`receipt-tour-start-${r.id}`}>{fmtTimeShort(r.tour_started_at)}</td>
                 <td className="py-2 pr-3 font-mono text-xs text-rose-600 dark:text-rose-400" data-testid={`receipt-tour-end-${r.id}`}>{fmtTimeShort(r.tour_completed_at)}</td>
                 <td className="py-2 pr-3">
-                  {typeBadge(r.ocr_status || "none")}
+                  {kindBadge(r.kind, r.id)}
                 </td>
                 <td className="py-2 pr-3">
-                  {(r.description?.includes("Løs afhentning") ||
+                  {r.tour_kind === "goods" && (
+                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border bg-amber-100 text-amber-800 border-amber-300">Varer</span>
+                  )}
+                  {r.kind !== "photo" && (r.description?.includes("Løs afhentning") ||
                     r.description?.includes("container") ||
                     r.tour_type === "loes_afhentning") && (
                     <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border bg-purple-100 text-purple-800 border-purple-300" data-testid={`receipt-loose-badge-${r.id}`}>
@@ -345,7 +388,7 @@ export default function ReceiptOCRArchive({ currentUserName = "" }) {
             {!data.items.length && !loading && (
               <tr>
                 <td colSpan="10" className="py-8 text-center text-slate-500 italic" data-testid="receipt-archive-empty">
-                  Ingen kvitteringer matcher dine filtre.
+                  Ingen vedhæftninger matcher dine filtre.
                 </td>
               </tr>
             )}
@@ -387,6 +430,7 @@ export default function ReceiptOCRArchive({ currentUserName = "" }) {
           onOpenSibling={openDetail}
         />
       )}
+      {photo && <PhotoModal photo={photo} onClose={() => setPhoto(null)} onOpen={openPhoto} />}
     </section>
   );
 }
@@ -406,7 +450,12 @@ function ReceiptDetailModal({ detail, loading, onClose, onOverride, onOpenSiblin
     setEditVal(String(detail?.final_weight_kg ?? ""));
   }, [detail?.id, detail?.final_weight_kg]);
 
-  const imgSrc = buildImageSrc(detail);
+  // Billedet kræver login - hentes som blob (et <img src> sender ikke login med).
+  const rawSrc = buildImageSrc(detail);
+  const authed = useAuthedImage(rawSrc);
+  const imgSrc = authed === "error" ? "" : authed;
+  const imgFetching = !!rawSrc && authed === "";
+  useEffect(() => { if (authed === "error") setImgError(true); }, [authed]);
 
   const handleDownload = async () => {
     if (!imgSrc) {
@@ -468,7 +517,9 @@ function ReceiptDetailModal({ detail, loading, onClose, onOverride, onOpenSiblin
               {/* Billede-preview */}
               <div className="space-y-2">
                 <div className="relative bg-slate-50 dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 overflow-hidden flex items-center justify-center min-h-[280px]">
-                  {imgSrc && !imgError ? (
+                  {imgFetching ? (
+                    <Loader2 className="w-6 h-6 animate-spin text-slate-400" data-testid="receipt-detail-image-loading" />
+                  ) : imgSrc && !imgError ? (
                     <>
                       {!imgLoaded && (
                         <div className="absolute inset-0 flex items-center justify-center" data-testid="receipt-detail-image-loading">
@@ -522,7 +573,7 @@ function ReceiptDetailModal({ detail, loading, onClose, onOverride, onOpenSiblin
                   <div className="text-2xl font-bold font-mono" data-testid="receipt-detail-weight">{fmtKg(detail.final_weight_kg)}</div>
                 </div>
                 <div className="flex items-center gap-2">
-                  {typeBadge(detail.ocr_status || "none")}
+                  {typeBadge(detail.ocr_status || "none", detail.final_weight_kg != null)}
                 </div>
                 <div>
                   <div className="text-xs uppercase tracking-wide text-slate-500">Fraktion</div>
@@ -650,6 +701,64 @@ function ReceiptDetailModal({ detail, loading, onClose, onOverride, onOpenSiblin
             >
               <X className="w-6 h-6" />
             </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// 2026-10-20: Et billede chaufføren har taget på turen.
+function PhotoModal({ photo, onClose, onOpen }) {
+  const loading = !!photo._loading;
+  const t = photo.tour || {};
+  const sib = photo.siblings || [];
+  const idx = sib.indexOf(photo.id);
+  const download = () => {
+    const a = document.createElement("a");
+    a.href = photo.url;
+    a.download = `billede-${(t.date || "tur").replace(/[^0-9-]/g, "")}-${(photo.id || "").slice(0, 8)}.jpg`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  };
+  return (
+    <div className="fixed inset-0 z-[1100] bg-black/70 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4"
+      onClick={onClose} data-testid="attachment-photo-modal">
+      <div className="bg-white dark:bg-slate-900 w-full sm:max-w-3xl rounded-t-2xl sm:rounded-2xl shadow-2xl max-h-[95vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200 dark:border-slate-800 sticky top-0 bg-white dark:bg-slate-900 z-10">
+          <h3 className="font-bold text-slate-900 dark:text-white text-sm sm:text-base truncate pr-2">
+            {loading ? "Henter billede…" : `Billede - ${photo.by_name || "?"} · ${t.plads || t.delivery_name || t.address || "?"}`}
+          </h3>
+          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Luk" data-testid="attachment-photo-close">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        {loading ? (
+          <div className="p-10 flex justify-center"><Loader2 className="w-8 h-8 animate-spin text-emerald-600" /></div>
+        ) : (
+          <div className="p-4 space-y-3">
+            <div className="bg-slate-50 dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 overflow-hidden flex items-center justify-center min-h-[240px]">
+              <img src={photo.url} alt="Billede fra turen" className="max-h-[60vh] w-auto object-contain" data-testid="attachment-photo-img" />
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-sm">
+              <div><div className="text-[10px] font-bold uppercase text-slate-500">Dato</div>{t.date || fmtDate(photo.created_at)}</div>
+              <div><div className="text-[10px] font-bold uppercase text-slate-500">Taget</div>{fmtDate(photo.created_at)}</div>
+              <div><div className="text-[10px] font-bold uppercase text-slate-500">Kunde</div>{t.customer_name || "-"}</div>
+              <div><div className="text-[10px] font-bold uppercase text-slate-500">Indhold</div>{t.fraction || "-"}</div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {sib.length > 1 && (
+                <>
+                  <button disabled={idx <= 0} onClick={() => onOpen(sib[idx - 1])}
+                    className="px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-700 text-sm disabled:opacity-40">← Forrige</button>
+                  <span className="text-xs text-slate-500">Billede {idx + 1} af {sib.length} på turen</span>
+                  <button disabled={idx >= sib.length - 1} onClick={() => onOpen(sib[idx + 1])}
+                    className="px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-700 text-sm disabled:opacity-40">Næste →</button>
+                </>
+              )}
+              <button onClick={download} className="ml-auto px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-sm font-semibold inline-flex items-center gap-1.5"
+                data-testid="attachment-photo-download"><Download className="w-4 h-4" /> Download</button>
+            </div>
           </div>
         )}
       </div>

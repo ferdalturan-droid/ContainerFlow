@@ -13,7 +13,7 @@ import re
 import secrets
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Set, Tuple
 import uuid
 import json
 import base64
@@ -2574,12 +2574,12 @@ _tier_cache: Dict[str, tuple] = {}
 
 
 async def _company_tier(cid: str) -> str:
-    """"premium" | "partner" | "" (ikke et logistikfirma). Cache 15 s."""
+    """"premium" | "partner" | "" (ikke et logistikfirma). Cache 3 s."""
     return (await _company_access(cid))["tier"]
 
 
 async def _company_access(cid: str) -> dict:
-    """Tier + de enkelte moduler super admin har givet firmaet. Cache 15 s."""
+    """Tier + de enkelte moduler super admin har givet firmaet. Cache 3 s."""
     if not cid:
         return {"tier": "", "modules": []}
     hit = _tier_cache.get(cid)
@@ -2587,7 +2587,9 @@ async def _company_access(cid: str) -> dict:
         return hit[1]
     co = await _raw_db.companies.find_one({"id": cid}, {"_id": 0, "company_type": 1, "from_library": 1, "premium_modules": 1})
     acc = {"tier": _logistics_tier(co), "modules": [m for m in ((co or {}).get("premium_modules") or []) if m in PREMIUM_MODULES]}
-    _tier_cache[cid] = (_time.time() + 15, acc)
+    # 2026-10-20: 3 s (før 15). Med flere app-instanser rydder en ændring kun
+    # cachen i den instans der modtog den - så skal de andre ikke vente længe.
+    _tier_cache[cid] = (_time.time() + 3, acc)
     return acc
 
 
@@ -11229,7 +11231,7 @@ async def receipts_archive(
     items = await db.receipts.find(
         query,
         {"_id": 0, "image_data": 0, "ocr_raw_text": 0, "ocr_candidates": 0},
-    ).sort("created_at", -1).skip(max(0, offset)).limit(min(limit, 500)).to_list(min(limit, 500))
+    ).sort("created_at", -1).skip(max(0, offset)).limit(min(limit, 2000)).to_list(min(limit, 2000))
 
     # Fase 18.3: Berig hver kvittering med tur-start (on_way_time) +
     # tur-slut (completed_at). Bruger _raw_db da turene kan ligge under
@@ -11240,21 +11242,129 @@ async def receipts_archive(
         tour_docs = await _raw_db.tours.find(
             {"id": {"$in": list(set(tour_ids))}},
             {"_id": 0, "id": 1, "on_way_time": 1, "completed_at": 1,
-             "claimed_at": 1, "time": 1},
+             "claimed_at": 1, "time": 1, "tour_kind": 1},
         ).to_list(2000)
         for t in tour_docs:
             tour_times[t["id"]] = {
                 "started": t.get("on_way_time") or "",
                 "completed": t.get("completed_at") or t.get("time") or "",
                 "claimed": t.get("claimed_at") or "",
+                "kind": t.get("tour_kind") or "",
             }
     for it in items:
         tt = tour_times.get(it.get("tour_id") or "", {})
         it["tour_started_at"] = tt.get("started", "")
         it["tour_completed_at"] = tt.get("completed", "")
         it["tour_claimed_at"] = tt.get("claimed", "")
+        it["tour_kind"] = tt.get("kind", "")
 
     return {"total": total, "items": items, "offset": offset, "limit": limit}
+
+
+@api_router.get("/attachments-archive")
+async def attachments_archive(
+    kind: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    driver_name: str = "",
+    plads: str = "",
+    fraction: str = "",
+    customer_company_id: str = "",
+    search: str = "",
+    limit: int = 50,
+    offset: int = 0,
+    payload: dict = Depends(get_current_user_payload),
+):
+    """2026-10-20: Alt hvad chaufføren har hængt på en tur, ét sted.
+
+    Vejesedler (`receipts`, med vægt/OCR) og billeder (`tour_photos`, fx af
+    læsset eller afleveringen - også på ture uden container) gemmes hver for
+    sig, men vises samlet med en type. `kind` = "" (alle), "receipt" eller
+    "photo". Billeder følger turens adgang (`_tour_access_query`)."""
+    limit, offset = max(1, min(limit, 200)), max(0, offset)
+    want = offset + limit
+    if want > 2000:
+        raise HTTPException(status_code=400, detail="Indsnævr søgningen (fx med en dato)")
+    rows: List[Dict[str, Any]] = []
+    total = 0
+
+    if kind in ("", "receipt"):
+        rec = await receipts_archive(date_from=date_from, date_to=date_to, driver_name=driver_name, plads=plads,
+                                     fraction=fraction, customer_company_id=customer_company_id, search=search,
+                                     limit=want, offset=0)
+        total += rec["total"]
+        for it in rec["items"]:
+            it["kind"] = "receipt"
+        rows += rec["items"]
+
+    # Billeder er logistikkens dokumentation - kunden ser dem ikke herfra.
+    if kind in ("", "photo") and payload.get("role") in ("logistics_admin", "super_admin"):
+        def _ci(val: str):
+            return {"$regex": re.escape(val.strip()), "$options": "i"}
+        tq: List[Dict[str, Any]] = [{"photo_count": {"$gt": 0}}]
+        acc = _tour_access_query(payload)
+        if acc:
+            tq.append(acc)
+        if date_from:
+            tq.append({"date": {"$gte": date_from}})
+        if date_to:
+            tq.append({"date": {"$lte": date_to}})
+        if plads:
+            tq.append({"$or": [{"plads": _ci(plads)}, {"delivery_name": _ci(plads)}]})
+        if fraction:
+            tq.append({"fraction": _ci(fraction)})
+        if customer_company_id:
+            tq.append({"company_id": customer_company_id})
+        if driver_name:
+            tq.append({"$or": [{"claimed_by": _ci(driver_name)}, {"driver_name": _ci(driver_name)}]})
+        if search:
+            tq.append({"$or": [{k: _ci(search)} for k in ("id", "plads", "fraction", "address", "delivery_name",
+                                                           "customer_name", "claimed_by", "driver_name")]})
+        tours = await _raw_db.tours.find(
+            {"$and": tq},
+            {"_id": 0, "id": 1, "date": 1, "plads": 1, "delivery_name": 1, "address": 1, "fraction": 1,
+             "claimed_by": 1, "driver_name": 1, "customer_name": 1, "private_company": 1, "tour_kind": 1, "tour_type": 1,
+             "on_way_time": 1, "completed_at": 1, "time": 1, "claimed_at": 1, "company_id": 1},
+        ).to_list(5000)
+        by_id = {t["id"]: t for t in tours}
+        if by_id:
+            pq = {"tour_id": {"$in": list(by_id)}}
+            total += await _raw_db.tour_photos.count_documents(pq)
+            photos = await _raw_db.tour_photos.find(pq, {"_id": 0, "data": 0}).sort("created_at", -1).limit(want).to_list(want)
+            for p in photos:
+                t = by_id.get(p["tour_id"]) or {}
+                rows.append({
+                    "id": p["id"], "kind": "photo", "tour_id": p["tour_id"], "created_at": p.get("created_at") or "",
+                    "date": t.get("date") or "", "driver_name": p.get("by_name") or t.get("claimed_by") or t.get("driver_name") or "",
+                    "plads": t.get("plads") or t.get("delivery_name") or t.get("address") or "",
+                    "fraction": t.get("fraction") or "", "customer_name": t.get("customer_name") or t.get("private_company") or "",
+                    "tour_kind": t.get("tour_kind") or "container", "tour_type": t.get("tour_type") or "",
+                    "tour_started_at": t.get("on_way_time") or "",
+                    "tour_completed_at": t.get("completed_at") or t.get("time") or "",
+                    "tour_claimed_at": t.get("claimed_at") or "",
+                })
+
+    rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+    return {"total": total, "items": rows[offset:offset + limit], "offset": offset, "limit": limit}
+
+
+@api_router.get("/tour-photos/{photo_id}")
+async def tour_photo_get(photo_id: str, payload: dict = Depends(get_current_user_payload)):
+    """Ét billede med turens oplysninger (til Vedhæftninger i arkivet)."""
+    p = await _raw_db.tour_photos.find_one({"id": photo_id}, {"_id": 0})
+    if not p:
+        raise HTTPException(status_code=404, detail="Billede ikke fundet")
+    await _tour_photo_access(p["tour_id"], payload)
+    t = await _raw_db.tours.find_one({"id": p["tour_id"]}, {"_id": 0, "id": 1, "date": 1, "plads": 1, "delivery_name": 1,
+                                                          "address": 1, "fraction": 1, "customer_name": 1, "claimed_by": 1,
+                                                          "driver_name": 1, "tour_kind": 1, "photo_count": 1,
+                                                          "private_company": 1}) or {}
+    if not t.get("customer_name") and t.get("private_company"):
+        t["customer_name"] = t["private_company"]
+    siblings = await _raw_db.tour_photos.find({"tour_id": p["tour_id"]}, {"_id": 0, "id": 1}).sort("created_at", 1).to_list(30)
+    return {"id": p["id"], "tour_id": p["tour_id"], "by_name": p.get("by_name") or "", "created_at": p.get("created_at"),
+            "url": f"data:{p.get('content_type') or 'image/jpeg'};base64,{p['data']}", "tour": t,
+            "siblings": [s["id"] for s in siblings]}
 
 
 @api_router.get("/receipts-location-documents")
@@ -11571,7 +11681,7 @@ _PERM_ROUTES = [
     ({"GET", "POST", "PUT", "PATCH", "DELETE"}, re.compile(r"^/api/admin/(time-entries|missing-clock)"), "planning"),
     ({"POST"}, re.compile(r"^/api/driver/time-entries/manual-punch"), "planning"),
     ({"PUT", "PATCH"}, re.compile(r"^/api/company/(payroll-settings|punch-reason-settings|finish-settings)"), "settings"),
-    ({"GET", "POST"}, re.compile(r"^/api/(pdf-archive|receipts-archive|receipts-location-documents|driver-archive)"), "archive"),
+    ({"GET", "POST"}, re.compile(r"^/api/(pdf-archive|receipts-archive|attachments-archive|receipts-location-documents|driver-archive)"), "archive"),
     ({"PUT"}, re.compile(r"^/api/receipts/[^/]+/weight-override$"), "archive"),
     ({"POST"}, re.compile(r"^/api/messages$"), "messages"),
 ]
@@ -11593,6 +11703,8 @@ _PREMIUM_ROUTES = [
     ({"GET", "POST", "PUT", "DELETE", "PATCH"}, re.compile(r"^/api/driver/time-entries(/|$)"), "time"),
     ({"PATCH", "PUT"}, re.compile(r"^/api/company/payroll-settings$"), "time"),
     ({"GET"}, re.compile(r"^/api/admin/statistics$"), "reports"),
+    # Rettelser godkendes i Økonomi > Godkendelser - uden Økonomi ingen at sende til.
+    ({"POST"}, re.compile(r"^/api/driver/tours/[^/]+/change-request$"), "economy"),
 ]
 
 
@@ -18545,6 +18657,7 @@ class _PricingContext:
         self.time_by_tour: Dict[str, dict] = {}
         self.registry: Dict[str, str] = {}
         self.holiday_cache: Dict[tuple, tuple] = {}
+        self.same_minute: Set[str] = set()
 
     async def load(self, tours: list):
         ref_ids = list({t["customer_ref_id"] for t in tours if t.get("customer_ref_id")})
@@ -18722,7 +18835,12 @@ class _PricingContext:
             s, e = _pricing.hhmm_to_min(st), _pricing.hhmm_to_min(en)
             if s < 0 or e < 0:
                 continue
-            if e <= s:
+            # 2026-10-20: Start og slut i samme minut er en fejlregistrering,
+            # ikke 24 timer (før: e <= s -> +1440 = et helt døgns timepris).
+            if e == s:
+                self.same_minute.add(t["id"])
+                continue
+            if e < s:
                 e += 1440  # over midnat
             by_key.setdefault(key, {})[t["id"]] = (s, e)
             gross[t["id"]] = e - s
@@ -18812,6 +18930,9 @@ class _PricingContext:
                     rules = rules + extra
         if res["status"] == "missing_rule":
             res["why"] = _pricing.explain_missing(rules, attrs)
+        if res["status"] == "missing_time" and t["id"] in self.same_minute:
+            res["flags"] = ["Start og slut er samme minut - ret tiden" if f == "Mangler start- eller sluttid" else f
+                            for f in res["flags"]]
         if attrs["trailer"] and not attrs.get("trailer_confirmed"):
             res["flags"].append("Hænger: automatisk, ikke bekræftet")
         res["locked"] = False

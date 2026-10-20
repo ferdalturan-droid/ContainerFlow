@@ -138,7 +138,7 @@ class Cleanup:
     def run(self):
         ids = self.tours
         if ids:
-            for c in ("tour_messages", "tour_audit_log", "tour_photos", "tour_change_requests"):
+            for c in ("tour_messages", "tour_audit_log", "tour_photos", "tour_change_requests", "receipts"):
                 db[c].delete_many({"tour_id": {"$in": ids}})
             db.container_orders.delete_many({"$or": [{"tour_id": {"$in": ids}}, {"id": {"$in": self.orders}}]})
             db.tours.delete_many({"id": {"$in": ids}})
