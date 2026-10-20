@@ -594,3 +594,30 @@ logistikfirmaer uden friktion?
 - flow_run 1-33 (nyt);
 - flow_b2b 5-13 (gammel automatisk hænger erstattet);
 - alle andre grupper uændrede.
+
+### 13d. Runde 2 (samme dag): mere kompakt, Start i Mine ture, "Giv turen tilbage"
+
+**Kompakt og tydelige skel:**
+- Hver tur er sin egen lille boks med luft imellem. Før var det linjer i én fælles boks, så man ikke kunne se, hvor en tur sluttede.
+- Turen viser:
+  - linje 1: Bil/Hænger, haster og indhold;
+  - linje 2: tidsrum, på vej, container og km (grå);
+  - kun de adresser, der ikke allerede står ovenover, på én linje med en lille "Kør".
+- Pladsens adresse står én gang i gruppens overskrift med "Kør" (når alle turene kører fra/til pladsen). Hver tur viser så kun afleveringen.
+- Hængerkørsel er en lilla ramme med hvide bokse. Kører containerne samme vej, står hent og aflever én gang øverst i rammen.
+- Ture med flere end 2 stop viser kun næste stop på listen. Hele listen står inde i turen. Ved 2 adresser (almindelig containertur) står begge med "Kør".
+- **Fravalgt:**
+  - Adressen som link uden knap: for lille trykflade, og man kommer til at navigere ved et uheld.
+  - Kun ikoner: et kort-ikon uden tekst var netop det, der forvirrede før.
+  - Begge "Kør" på samme linje: det er ikke tydeligt, hvilken knap der hører til hvilken adresse.
+
+**Start i Mine ture åbnede ikke listen:**
+- Dine data viser, at en tur startede som solo kl. 19:14, mens to ledige ture fandtes på samme plads.
+- Sandsynligvis kørte fanen stadig den gamle version (siden opdaterer først ved genindlæsning).
+- Der var også en reel fejl: en forsinket tur (dato i går) fandt kun ture med samme dato, så dagens ture kom ikke med. Nu tæller alle ture til og med i dag.
+- **Ny regel:** med hænger åbner "Start" altid listen på en containertur, også når der ikke er andre ture. Så ser chaufføren, at muligheden findes, og at en tur kan lægges på hængeren senere.
+
+**"Giv turen tilbage"** (dansk for "unassign myself"):
+- Står som tydelig knap inde i en tur, man selv har taget og ikke har startet. Turen kommer tilbage under Ledige.
+- Ledige ture har også "Tag turen" inde i turen.
+- Ture, planlæggeren har tildelt, kan ikke gives tilbage af chaufføren; det er som før.

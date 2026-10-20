@@ -69,7 +69,10 @@ export default function DriverRunSheet({ anchor, active = [], candidates = [], s
             )}
           </div>
           {slots > 0 && groups.length === 0 && (
-            <p className="text-sm text-slate-500 px-1">Ingen andre ture på {anchor.plads || "pladsen"} lige nu.</p>
+            <div className="rounded-xl border border-dashed border-slate-300 px-3 py-3 text-sm text-slate-600" data-testid="run-sheet-empty">
+              Ingen andre ture på {anchor.plads || "pladsen"} lige nu.
+              <span className="block text-[12px] text-slate-500 mt-0.5">Bliver en container mere klar, kan du lægge den på hængeren inde i turen ("Tilføj tur på hængeren").</span>
+            </div>
           )}
           {slots > 0 && groups.map(g => (
             <section key={g.key} className="space-y-1.5">

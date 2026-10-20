@@ -249,11 +249,12 @@ Se BESLUTNINGER_2026-10-19.md for alternativer og runder.
 
 
 ## Chaufførens liste (2026-10-20)
-- Ture vises som kompakte rækker i bokse, grupperet pr. plads (ikke store kort).
+- Ture vises som små bokse med luft imellem, grupperet pr. plads (ikke store kort). Pladsens adresse og "Kør" står én gang i gruppens overskrift.
   - Linje 1: hvornår (haster, tidsrum, på vej, Bil/Hænger).
   - Linje 2: hvad (indhold, opgave, container).
   - Hent og aflever har hver sin linje med en lille "Kør".
 - Kunde, kundens note og telefon står inde i turen.
 - "Tildelt dig" er fjernet (det ligger i Mine).
-- Ledige ture har "Tag turen" (læg i Mine) og en ▶ til at tage og starte med det samme.
+- Ledige ture har "Tag turen" (læg i Mine) og en ▶ til at tage og starte med det samme. En tur man selv har taget, kan gives tilbage ("Giv turen tilbage") inde i turen.
+- Med hænger åbner "Start" altid listen over ture, der kan komme med på hængeren.
 - Hængerkørsel: se BESLUTNINGER afsnit 13 og PRICING_SPEC 3j.

@@ -3,20 +3,43 @@ import axios from "axios";
 import { API } from "../auth/api";
 import { createPortal } from "react-dom";
 import {
-  Navigation, MessageSquare, Clock, Flag, Play, CheckCircle2, ChevronRight, X, AlertTriangle, Phone, Truck,
+  Navigation, MessageSquare, Flag, Play, CheckCircle2, ChevronRight, X, Phone, Truck,
 } from "lucide-react";
 import TourChat from "./TourChat";
 import { TOUR_TYPE_LABEL, isHaster, openHours, capacityText, daysLate, routeOf, navUrl } from "../lib/tourHelpers";
 
 /**
- * Tur-række til chaufføren (2026-10-20: kompakt liste i stedet for store kort).
- * Linje 1: hvornår (haster, tidsrum, på vej) + kørsel (bil/hænger).
- * Linje 2: hvad (indhold, opgave, container).
- * Adresser: hent og/eller aflever på hver sin linje med en lille "Kør"-knap.
- * Én knap til højre: Start / Afslut / Tag turen (+ start med det samme).
- * Kunde, kundens note, telefon og beskeder står inde i turen (tryk på rækken).
+ * Tur-række til chaufføren (2026-10-20, runde 2: endnu mere kompakt).
+ * Hver tur er en lille boks med luft til den næste, så man kan se hvor en tur
+ * slutter. Linje 1: Bil/Hænger, haster og indholdet. Linje 2 (grå): tidsrum,
+ * på vej, container, størrelse, km. Derunder hent/aflever med en lille "Kør"
+ * - men kun de adresser der ikke allerede står i gruppens overskrift
+ * (pladsen) eller i hængerkørslens overskrift. Ture med flere end 2 stop
+ * viser kun næste stop; hele listen står inde i turen.
  */
-export default function DriverTourCard({ tour, routeInfo, unread = 0, mode = "mine", run = null, sameRoute = false,
+export const legsOf = (tour) => {
+  const stops = Array.isArray(tour.stops) ? tour.stops : [];
+  if (!stops.length) return routeOf(tour).filter(l => (l.address || "").trim());
+  const onWay = !!tour.on_way && !tour.completed;
+  const next = onWay ? stops.find(x => !x.done_at) : null;
+  const s = next || stops[0];
+  return s?.address ? [{ label: next ? `Stop ${stops.indexOf(next) + 1}/${stops.length}` : `${stops.length} stop`, name: s.contact_name || "", address: s.address }] : [];
+};
+
+export function LegLine({ leg, testid }) {
+  return (
+    <div className="flex items-center gap-2 min-h-[30px]">
+      <span className="w-[46px] shrink-0 text-[10px] font-bold uppercase tracking-wide text-slate-400">{leg.label}</span>
+      <span className="min-w-0 flex-1 truncate text-[13px] text-slate-700">{leg.name ? <b className="font-semibold">{leg.name} · </b> : null}{leg.address}</span>
+      <a href={navUrl(leg.address)} target="_blank" rel="noreferrer" data-testid={testid} aria-label={`Kør til ${leg.name || leg.address}`}
+        className="shrink-0 h-7 px-2 rounded-lg border border-slate-200 bg-white text-slate-600 text-[11px] font-bold inline-flex items-center gap-1 active:bg-slate-50">
+        <Navigation className="w-3.5 h-3.5" /> Kør
+      </a>
+    </div>
+  );
+}
+
+export default function DriverTourCard({ tour, routeInfo, unread = 0, mode = "mine", run = null, hideAddrs = [], hideLegs = false,
   onStart, onTake, onTakeStart, onFinish, onOpen, onChat }) {
   const haster = isHaster(tour);
   const oh = openHours(tour);
@@ -25,8 +48,6 @@ export default function DriverTourCard({ tour, routeInfo, unread = 0, mode = "mi
   const cancelled = !!tour.cancelled && !done;
   const onWay = !!tour.on_way && !done && !cancelled;
   const goods = tour.tour_kind === "goods";
-  const stops = Array.isArray(tour.stops) ? tour.stops : [];
-  const nextStop = onWay ? stops.find(x => !x.done_at) : null;
   const lines = Array.isArray(tour.cargo_lines) ? tour.cargo_lines.filter(l => (l.text || "").trim()) : [];
   const what = lines.length > 1 ? lines.map(l => l.text).join(" + ")
     : lines.length === 1 ? `${lines[0].text}${lines[0].qty ? ` · ${lines[0].qty} ${lines[0].unit || ""}` : ""}` : (tour.fraction || "—");
@@ -34,50 +55,42 @@ export default function DriverTourCard({ tour, routeInfo, unread = 0, mode = "mi
   const cap = tour.tour_type === "loes_afhentning"
     ? (tour.loose_estimated_count ? `${tour.loose_estimated_count} containere` : "")
     : capacityText(tour);
-  const facts = [typeLabel, cap, tour.container && tour.tour_type !== "loes_afhentning" ? `#${tour.container}` : "",
+  const meta = done
+    ? [tour.time ? `Færdig ${tour.time}` : "Færdig", tour.weight ? `${Number(tour.weight).toLocaleString("da-DK")} kg` : ""]
+    : cancelled ? [tour.cancelled_on_way ? "Annulleret undervejs" : "Annulleret", tour.cancel_reason || ""]
+      : [oh.from ? `${oh.from}–${oh.to}` : "", onWay && tour.on_way_time ? `På vej ${tour.on_way_time}` : "",
+        late > 0 ? `${late} ${late === 1 ? "dag" : "dage"} for sent` : ""];
+  const facts = [...meta, typeLabel, cap, tour.container && tour.tour_type !== "loes_afhentning" ? `#${tour.container}` : "",
     Number(tour.trailer_count) > 0 ? `${tour.trailer_count} hænger${Number(tour.trailer_count) === 1 ? "" : "e"}` : "",
-    routeInfo?.distance_km > 0 ? `${routeInfo.distance_km} km` : ""].filter(Boolean);
-  // Adresser: på en tur med stop vises næste stop (eller første + antal);
-  // ellers hent og aflever. En færdig tur viser kun hvor den endte.
-  const legs = stops.length
-    ? [nextStop
-      ? { label: `Stop ${stops.indexOf(nextStop) + 1}/${stops.length}`, name: nextStop.contact_name || "", address: nextStop.address }
-      : { label: `${stops.length} stop`, name: "", address: stops[0]?.address }]
-    : routeOf(tour);
-  const shownLegs = sameRoute ? [] : (done || cancelled ? legs.slice(-1) : legs.slice(0, 2)).filter(l => (l.address || "").trim());
-  const accent = cancelled ? "border-l-slate-300" : done ? "border-l-emerald-500" : onWay ? "border-l-amber-400" : haster ? "border-l-rose-500" : "border-l-transparent";
-  const chip = "inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] font-bold";
-  const btn = "min-h-[44px] px-3.5 rounded-xl text-white font-extrabold text-[14px] inline-flex items-center justify-center gap-1.5";
+    goods && !typeLabel ? "Fragt" : "", routeInfo?.distance_km > 0 && !done ? `${routeInfo.distance_km} km` : ""].filter(Boolean);
+  const legs = done || cancelled || hideLegs ? [] : legsOf(tour).filter(l => !hideAddrs.includes(l.address)).slice(0, 2);
+  const chip = "inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[10px] font-extrabold uppercase tracking-wide shrink-0";
+  const btn = "min-h-[40px] px-3 rounded-xl text-white font-extrabold text-[14px] inline-flex items-center justify-center gap-1.5 shrink-0";
+  const border = cancelled ? "border-slate-200" : done ? "border-emerald-200" : onWay ? "border-amber-300" : haster ? "border-rose-300" : "border-slate-200";
 
   return (
-    <div className={`border-l-4 ${accent} ${done || cancelled ? "bg-slate-50/60" : "bg-white"}`} data-testid={`mobile-tour-${tour.id}`}>
-      <div className="flex items-center gap-2 pl-3 pr-2.5 pt-2.5 pb-1.5">
+    <div className={`rounded-xl border ${border} ${done || cancelled ? "bg-slate-50" : "bg-white"} shadow-[0_1px_1px_rgba(15,23,42,0.04)]`} data-testid={`mobile-tour-${tour.id}`}>
+      <div className="flex items-center gap-2 px-2.5 py-2">
         <button type="button" onClick={() => onOpen(tour)} className="min-w-0 flex-1 text-left" data-testid={`tour-open-${tour.id}`}>
-          <div className="flex items-center gap-1 flex-wrap min-h-[20px]">
-            {routeInfo?.route_order && !done && <span className="w-5 h-5 rounded-full bg-slate-900 text-white text-[10px] font-bold flex items-center justify-center">{routeInfo.route_order}</span>}
-            {haster && !done && !cancelled && <span className={`${chip} bg-rose-600 text-white uppercase ${!onWay ? "animate-haster-pulse" : ""}`} data-testid={`tour-priority-${tour.id}`}><Flag className="w-3 h-3" /> Haster</span>}
-            {oh.from && !done && <span className={`${chip} bg-slate-100 text-slate-700`}><Clock className="w-3 h-3" />{oh.from}–{oh.to}</span>}
-            {onWay && tour.on_way_time && <span className={`${chip} bg-amber-100 text-amber-800`}>På vej {tour.on_way_time}</span>}
+          <div className="flex items-center gap-1 min-w-0">
+            {routeInfo?.route_order && !done && <span className="w-5 h-5 shrink-0 rounded-full bg-slate-900 text-white text-[10px] font-bold flex items-center justify-center">{routeInfo.route_order}</span>}
             {run && run.role !== "solo" && (onWay || done) && (
               <span className={`${chip} ${run.role === "truck" ? "bg-slate-900 text-white" : "bg-violet-600 text-white"}`} data-testid={`tour-run-role-${tour.id}`}>
-                <Truck className="w-3 h-3" /> {run.role === "truck" ? "Bil" : "Hænger"}
+                <Truck className="w-3 h-3" />{run.role === "truck" ? "Bil" : "Hænger"}
               </span>
             )}
-            {late > 0 && !done && !cancelled && <span className={`${chip} bg-amber-100 text-amber-800`} data-testid={`tour-delay-${tour.id}`}><AlertTriangle className="w-3 h-3" />{late} {late === 1 ? "dag" : "dage"} for sent</span>}
-            {done && <span className={`${chip} bg-emerald-50 text-emerald-700`}><CheckCircle2 className="w-3 h-3" />{tour.time ? `Færdig ${tour.time}` : "Færdig"}{tour.weight ? ` · ${Number(tour.weight).toLocaleString("da-DK")} kg` : ""}</span>}
-            {cancelled && <span className={`${chip} bg-slate-200 text-slate-700`} data-testid={`tour-cancelled-${tour.id}`}>{tour.cancelled_on_way ? "Annulleret undervejs" : "Annulleret"}</span>}
+            {haster && !done && !cancelled && <span className={`${chip} bg-rose-600 text-white ${!onWay ? "animate-haster-pulse" : ""}`} data-testid={`tour-priority-${tour.id}`}><Flag className="w-3 h-3" />Haster</span>}
             {tour.queued && <span className={`${chip} bg-slate-200 text-slate-600`} data-testid={`tour-queued-${tour.id}`}>Venter på net</span>}
-            {tour.tour_number && <span className="ml-auto pl-1 text-[10px] font-mono text-slate-400">{tour.tour_number}</span>}
+            <span className="min-w-0 truncate text-[15px] font-bold text-slate-900">{what}</span>
+            {done && <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />}
           </div>
-          <div className="mt-0.5 text-[15px] font-bold text-slate-900 leading-snug line-clamp-2 break-words">
-            {what}
-            {facts.length > 0 && <span className="text-[12px] font-semibold text-slate-500"> · {facts.join(" · ")}</span>}
-            {goods && !typeLabel && <span className="text-[12px] font-semibold text-sky-700"> · Fragt</span>}
+          <div className={`mt-0.5 text-[12px] truncate ${onWay ? "text-amber-800" : late > 0 && !done ? "text-amber-700" : "text-slate-500"}`}>
+            {facts.join(" · ")}{tour.tour_number ? <span className="text-slate-400 font-mono"> · {tour.tour_number}</span> : null}
           </div>
         </button>
         {unread > 0 && (
           <button type="button" onClick={() => onChat(tour)} aria-label={`${unread} nye beskeder`} data-testid={`tour-chat-btn-${tour.id}`}
-            className="relative min-h-[44px] min-w-[40px] rounded-xl border border-emerald-300 bg-emerald-50 text-emerald-800 inline-flex items-center justify-center">
+            className="relative min-h-[40px] min-w-[38px] rounded-xl border border-emerald-300 bg-emerald-50 text-emerald-800 inline-flex items-center justify-center shrink-0">
             <MessageSquare className="w-4 h-4" />
             <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-rose-600 text-white text-[10px] font-bold flex items-center justify-center">{unread}</span>
           </button>
@@ -90,9 +103,9 @@ export default function DriverTourCard({ tour, routeInfo, unread = 0, mode = "mi
           ) : mode === "free" ? (
             <div className="inline-flex rounded-xl overflow-hidden shrink-0">
               <button type="button" onClick={() => onTake(tour)} data-testid={`tour-take-btn-${tour.id}`}
-                className="min-h-[44px] px-3 bg-orange-500 active:bg-orange-600 text-white font-extrabold text-[14px]">Tag turen</button>
+                className="min-h-[40px] px-3 bg-orange-500 active:bg-orange-600 text-white font-extrabold text-[14px]">Tag turen</button>
               <button type="button" onClick={() => onTakeStart(tour)} data-testid={`tour-takestart-btn-${tour.id}`} aria-label="Tag turen og start den nu" title="Tag turen og start den nu"
-                className="min-h-[44px] w-11 bg-orange-600 active:bg-orange-700 text-white inline-flex items-center justify-center border-l border-orange-400">
+                className="min-h-[40px] w-10 bg-orange-600 active:bg-orange-700 text-white inline-flex items-center justify-center border-l border-orange-400">
                 <Play className="w-4 h-4 fill-current" />
               </button>
             </div>
@@ -105,23 +118,9 @@ export default function DriverTourCard({ tour, routeInfo, unread = 0, mode = "mi
         )}
         {(done || cancelled) && <ChevronRight className="w-5 h-5 text-slate-300 shrink-0" />}
       </div>
-      {sameRoute && <p className="pl-3 pb-2 -mt-0.5 text-[12px] text-slate-500" data-testid={`tour-same-route-${tour.id}`}>Samme hent og aflever som ovenfor</p>}
-      {shownLegs.length > 0 && (
-        <div className="pl-3 pr-2.5 pb-2 space-y-1" data-testid={`tour-route-${tour.id}`}>
-          {shownLegs.map((l, i) => (
-            <div key={i} className="flex items-center gap-2">
-              <button type="button" onClick={() => onOpen(tour)} className="min-w-0 flex-1 text-left flex items-baseline gap-2">
-                <span className="w-[50px] shrink-0 text-[10px] font-bold uppercase tracking-wide text-slate-400">{l.label}</span>
-                <span className={`line-clamp-2 break-words text-[13px] leading-snug ${i === 0 && !done ? "font-semibold text-slate-800" : "text-slate-600"}`}>{l.name ? `${l.name} · ` : ""}{l.address}</span>
-              </button>
-              {!done && !cancelled && (
-                <a href={navUrl(l.address)} target="_blank" rel="noreferrer" data-testid={`tour-nav-${tour.id}-${i}`} aria-label={`Kør til ${l.name || l.address}`}
-                  className="shrink-0 h-8 px-2 rounded-lg border border-slate-200 bg-white text-slate-600 text-[11px] font-bold inline-flex items-center gap-1 active:bg-slate-50">
-                  <Navigation className="w-3.5 h-3.5" /> Kør
-                </a>
-              )}
-            </div>
-          ))}
+      {legs.length > 0 && (
+        <div className="px-2.5 pb-1.5 -mt-1" data-testid={`tour-route-${tour.id}`}>
+          {legs.map((l, i) => <LegLine key={i} leg={l} testid={`tour-nav-${tour.id}-${i}`} />)}
         </div>
       )}
     </div>

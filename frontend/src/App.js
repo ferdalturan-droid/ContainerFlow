@@ -13098,10 +13098,17 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
               Tildelt af {tour.assigned_by_name || "administrator"} - kontakt din logistikadmin for at frigøre helt.
             </div>
           )}
+          {run?.canTake && (
+            <button onClick={run.onTake} data-testid="mobile-tour-panel-take"
+              className="col-span-2 px-3 py-2.5 rounded-lg font-bold text-sm bg-orange-100 text-orange-800 border border-orange-300 flex items-center justify-center gap-2">
+              Tag turen <span className="text-[11px] font-normal">(læg den i Mine ture)</span>
+            </button>
+          )}
           {run?.canGiveBack && (
             <button onClick={run.onGiveBack} data-testid="mobile-tour-panel-give-back"
-              className="col-span-2 px-3 py-2.5 rounded-lg font-semibold text-sm bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200 flex items-center justify-center gap-2">
-              <RotateCcw className="w-4 h-4" /> Læg tilbage i Ledige
+              className="col-span-2 px-3 py-2.5 rounded-lg font-semibold text-sm bg-slate-100 text-slate-700 border border-slate-300 dark:bg-slate-800 dark:text-slate-200 flex flex-wrap items-center justify-center gap-x-2">
+              <RotateCcw className="w-4 h-4" /> Giv turen tilbage
+              <span className="text-[11px] font-normal text-slate-500">(den kommer tilbage under Ledige)</span>
             </button>
           )}
           {isClaimedByOther && (
@@ -14679,14 +14686,18 @@ function App() {
   const myActiveTours = () => (tours || []).filter(t => t.on_way && !t.completed && !t.not_completed && !t.is_pause
     && myDriverId && t.claimed_by_id === myDriverId);
   const runCandidates = (anchor, exclude = []) => {
-    const day = (anchor.date || "").slice(0, 10);
+    // Ture der skal køres nu: i dag og forsinkede (eller turens egen dag, hvis
+    // den ligger fremme). Før blev forsinkede ankerture kun matchet med samme
+    // dato, så dagens ture ikke kom med.
     const today = getLocalDateStr();
+    const anchorDay = (anchor.date || "").slice(0, 10);
+    const day = anchorDay > today ? anchorDay : today;
     const mineT = (t) => t.claimed_by_id === myDriverId || (t.driver_id || "") === myDriverId;
     return (tours || []).filter(t => t.id !== anchor.id && !exclude.includes(t.id) && isRunTour(t)
       && (t.plads || "") === (anchor.plads || "") && !t.completed && !t.on_way && !t.cancelled && !t.not_completed
       && !t._is_other_driver && !(t.claimed_by_id && t.claimed_by_id !== myDriverId)
       && (mineT(t) || (!t.claimed_by && !(t.driver_id || "").trim()))
-      && ((t.date || "").slice(0, 10) === day || (t.date || "").slice(0, 10) < today))
+      && (t.date || "").slice(0, 10) <= day)
       .map(t => ({ ...t, _mine: mineT(t) }));
   };
   const sendStart = async (ids) => {
@@ -14726,7 +14737,8 @@ function App() {
       setRunSheet({ anchor: tour, active: members, candidates: cands, slots, addMode: true });
       return;
     }
-    if (!running.length && !cands.length) { sendStart([tour.id]); return; }
+    // 2026-10-20 (runde 2): Med hænger åbner Start altid listen - også når der
+    // ikke er andre ture lige nu - så chaufføren ser at muligheden findes.
     setRunSheet({ anchor: tour, active: running.sort((a, b) => String(a.on_way_at || "").localeCompare(String(b.on_way_at || ""))), candidates: cands, slots, addMode: false });
   };
   // "Tag turen": ledig -> Mine ture (ikke startet).
@@ -14755,10 +14767,10 @@ function App() {
   };
   // En tur chaufføren selv har taget (ikke tildelt af planlæggeren) kan lægges tilbage.
   const giveBack = async (tour) => {
-    if (!window.confirm("Læg turen tilbage i Ledige, så andre kan tage den?")) return;
+    if (!window.confirm("Giv turen tilbage? Den kommer tilbage under Ledige, så andre kan tage den.")) return;
     try {
       await axios.put(`${API}/tours/${tour.id}`, { claimed_by: "", claimed_by_id: "" });
-      toast.success("Turen er lagt tilbage i Ledige");
+      toast.success("Turen er givet tilbage - den ligger under Ledige");
     } catch (e) { toast.error(formatApiError(e)); }
     fetchTours();
   };
@@ -17198,6 +17210,9 @@ function App() {
               canGiveBack: !selectedTourForPanel.on_way && !selectedTourForPanel.completed && selectedTourForPanel.claimed_by_id === myDriverId
                 && !(selectedTourForPanel.driver_id || "").trim(),
               onGiveBack: () => { const t = selectedTourForPanel; setSelectedTourForPanel(null); giveBack(t); },
+              canTake: !selectedTourForPanel.on_way && !selectedTourForPanel.completed && !selectedTourForPanel.cancelled
+                && !selectedTourForPanel.claimed_by && !(selectedTourForPanel.driver_id || "").trim(),
+              onTake: () => { const t = selectedTourForPanel; setSelectedTourForPanel(null); takeTour(t); },
             }}
             onChat={() => { const t = selectedTourForPanel; setSelectedTourForPanel(null); setChatTour(t); }}
             onRefresh={fetchTours}
