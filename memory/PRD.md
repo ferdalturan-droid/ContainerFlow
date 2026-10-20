@@ -4374,3 +4374,7 @@ Bestillingshistorik fremgår nu som en kompakt liste i stedet for store kort, s�
 - **Driver card:** shows route rows, each with its own "Kør" button.
 - **UpdateBanner:** tells the user when a new version is available.
 - **E2E tests:** run only via `./scripts/e2e.sh` (own DB `containerflow_e2e`, app on port 8081). `_e2e.py` refuses any other database.
+- **Bestil for kunden, container picker (2026-10-20):**
+  - Lists the location's containers for the ordering firm via `_location_containers(..., can_see_incomplete=True)`.
+  - "Overskriv" sends `custom_container_id`; a locked container ID is respected.
+  - Fixed schedules support `monthly_nth` (1-4 = nth weekday of the month, 5 = last).

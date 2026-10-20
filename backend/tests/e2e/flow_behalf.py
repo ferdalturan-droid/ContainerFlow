@@ -156,6 +156,32 @@ def run():
         ok(o5["status"] == "cancelled" and o5["cancelled_by_logistics"] and o5["cancel_reason"].startswith("Jens"),
            "31 annulleret af logistikfirmaet med begrundelse, som kunden ser")
 
+        # --- Containerlisten: pladsens containere for netop dette firma ----------------
+        city = db.companies.find_one({"name": "City Container"}, {"_id": 0, "id": 1})["id"]
+        cmat = "E2E Containermateriale"
+        db.plads.update_one({"location_code": "1121"}, {"$addToSet": {f"partner_materials.{ilk}": cmat, f"partner_materials.{city}": cmat}})
+        db.container_counts.insert_many([{"location_code": "1121", "material": cmat, "partner_id": ilk, "count": 2},
+                                         {"location_code": "1121", "material": cmat, "partner_id": city, "count": 1}])
+        db.container_overrides.insert_one({"location_code": "1121", "material": cmat, "container_label": "Container 1", "partner_id": "",
+                                           "custom_container_id": "E2E-12345", "locked_container_id": True})
+        try:
+            op = call("GET", "/logistics/order-options", t=la, params={"location_code": "1121", "plads_name": pl["name"]})
+            cl = next((m["containers"] for m in op["materials"] if m["material"] == cmat), [])
+            ok([c["label"] for c in cl] == ["Container 1", "Container 2"] and cl[0]["container_id"] == "E2E-12345"
+               and cl[0]["locked_container_id"] and cl[1]["container_id"] == "",
+               "33 containerlisten = pladsens containere for ILK (2, også den uden nummer) - ikke City Containers")
+            ov = behalf(material=cmat, container_number="Container 2", custom_container_id="E2E-7777", custom_address="Energivej 10, 3000 Helsingør")
+            ok(tour(ov["tour_id"])["container"] == "E2E-7777" and order(ov["order_id"])["container_id_override"] == "E2E-7777",
+               "34 'Overskriv' på en container uden låst nummer: chaufføren ser det indtastede nummer")
+            lk = behalf(material=cmat, container_number="Container 1", custom_container_id="E2E-8888", custom_address="Energivej 10, 3000 Helsingør")
+            ok(tour(lk["tour_id"])["container"] == "E2E-12345", "35 kundens låste containernummer kan ikke overskrives på den container")
+            mn = behalf(material=cmat, container_number="E2E-9999", custom_container_id="E2E-9999", custom_address="Energivej 10, 3000 Helsingør")
+            ok(tour(mn["tour_id"])["container"] == "E2E-9999", "36 et manuelt nummer uden for listen bestilles som en anden container")
+        finally:
+            db.container_counts.delete_many({"location_code": "1121", "material": cmat})
+            db.container_overrides.delete_many({"location_code": "1121", "material": cmat})
+            db.plads.update_one({"location_code": "1121"}, {"$pull": {f"partner_materials.{ilk}": cmat, f"partner_materials.{city}": cmat}})
+
         # --- Excel på kundens plads bliver bestillinger -----------------------------
         from openpyxl import Workbook
         wb = Workbook()

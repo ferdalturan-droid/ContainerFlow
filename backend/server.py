@@ -8735,6 +8735,15 @@ async def get_location_containers(code: str, material: str = "",
     legacy data uden partner_id-felt.
     """
     can_see_incomplete = await _can_see_incomplete_containers(code, authorization)
+    return await _location_containers(code, material, partner_id, can_see_incomplete)
+
+
+async def _location_containers(code: str, material: str = "", partner_id: str = "",
+                               can_see_incomplete: bool = False) -> dict:
+    """Pladsens containere for et materiale og en logistikpartner (copy-on-
+    write mellem partnerens egne og de fælles containere). Bruges af
+    bestillingssiden og (2026-10-19) af "Bestil for kunden", der også ser
+    containere uden nummer."""
     location = await _lookup_site_by_code(code)
     if not location:
         raise HTTPException(status_code=404, detail="Location not found")
@@ -17766,13 +17775,16 @@ async def logistics_order_options(location_code: str, plads_name: str = "",
     pl, owner = await _la_customer_site(payload, location_code, plads_name)
     la = payload.get("company_id") or ""
     code = pl.get("location_code") or location_code
-    mats = await get_location_containers(code, material="", partner_id=la, authorization=None)
+    # 2026-10-19: Pladsens containere for netop dette logistikfirma (en plads
+    # kan have flere firmaer, hver med sine containere) - også dem uden nummer.
+    mats = await _location_containers(code, material="", partner_id=la, can_see_incomplete=True)
     materials = []
     for m in mats.get("materials") or []:
-        det = await get_location_containers(code, material=m["material"], partner_id=la, authorization=None)
+        det = await _location_containers(code, material=m["material"], partner_id=la, can_see_incomplete=True)
         materials.append({"material": m["material"], "containers": [
             {"label": c.get("label"), "container_id": c.get("container_id") or "", "capacity_label": c.get("capacity_label") or "",
-             "locked_address": bool(c.get("locked_address")), "address": c.get("address") or ""}
+             "locked_address": bool(c.get("locked_address")), "locked_container_id": bool(c.get("locked_container_id")),
+             "address": c.get("address") or ""}
             for c in det.get("containers") or []]})
     workshops = await _raw_db.workshops.find({"company_id": owner["id"]}, {"_id": 0}).sort("name", 1).to_list(500)
     site = await _lookup_site_by_code(code) or {}
@@ -17964,6 +17976,9 @@ class FixedScheduleIn(BaseModel):
     partner_id: str = ""
     weekdays: List[int] = Field(default_factory=list)  # 0 = mandag
     interval_weeks: int = 1
+    # 2026-10-19: Månedligt i stedet for ugentligt: 1-4 = første..fjerde
+    # ugedag i måneden, 5 = sidste. 0 = ugentligt (interval_weeks).
+    monthly_nth: int = 0
     start_date: str = ""
     end_date: str = ""
     priority: str = "normal"
@@ -17976,22 +17991,34 @@ def _fixed_dates(s: dict, start: date, end: date) -> List[str]:
     if not wd or not s.get("start_date"):
         return []
     interval = max(1, min(int(s.get("interval_weeks") or 1), 8))
+    nth = int(s.get("monthly_nth") or 0)
     sd = date.fromisoformat(s["start_date"][:10])
     ed = date.fromisoformat(s["end_date"][:10]) if s.get("end_date") else None
     anchor = sd - timedelta(days=sd.weekday())
     out, d = [], max(start, sd)
     while d <= end and (ed is None or d <= ed):
-        if d.weekday() in wd and ((d - anchor).days // 7) % interval == 0:
-            out.append(d.isoformat())
+        if d.weekday() in wd:
+            if nth:
+                last = (d + timedelta(days=7)).month != d.month
+                if (nth == 5 and last) or (nth < 5 and (d.day - 1) // 7 + 1 == nth):
+                    out.append(d.isoformat())
+            elif ((d - anchor).days // 7) % interval == 0:
+                out.append(d.isoformat())
         d += timedelta(days=1)
     return out
 
 
 def _fixed_text(s: dict) -> str:
-    days = ", ".join(_FIXED_WEEKDAYS[i] for i in sorted(int(x) for x in (s.get("weekdays") or [])))
-    every = {1: "hver uge", 2: "hver 2. uge", 3: "hver 3. uge", 4: "hver 4. uge"}.get(int(s.get("interval_weeks") or 1), "")
+    wds = sorted(int(x) for x in (s.get("weekdays") or []))
     dk = lambda x: f"{x[8:10]}.{x[5:7]}.{x[0:4]}" if x and len(x) >= 10 else (x or "")  # noqa: E731
     per = (f" · fra {dk(s['start_date'])}" + (f" til {dk(s['end_date'])}" if s.get("end_date") else "")) if s.get("start_date") else ""
+    nth = int(s.get("monthly_nth") or 0)
+    if nth:
+        full = ["mandag", "tirsdag", "onsdag", "torsdag", "fredag", "lørdag", "søndag"]
+        word = {1: "Første", 2: "Anden", 3: "Tredje", 4: "Fjerde", 5: "Sidste"}.get(nth, "")
+        return f"{word} {' og '.join(full[i] for i in wds)} i måneden{per}"
+    days = ", ".join(_FIXED_WEEKDAYS[i] for i in wds)
+    every = {1: "hver uge", 2: "hver 2. uge", 3: "hver 3. uge", 4: "hver 4. uge"}.get(int(s.get("interval_weeks") or 1), "")
     return f"{days} · {every}{per}"
 
 
@@ -18110,6 +18137,7 @@ async def _fixed_validate(body: FixedScheduleIn, plads: dict) -> dict:
     if not partner or partner not in partners:
         raise HTTPException(status_code=400, detail="Vælg hvilken logistikpartner der skal køre tømningerne")
     return {"tour_type": tt, "weekdays": wd, "interval_weeks": max(1, min(int(body.interval_weeks or 1), 4)),
+            "monthly_nth": max(0, min(int(body.monthly_nth or 0), 5)),
             "start_date": start, "end_date": end, "partner_id": partner,
             "priority": body.priority if body.priority in ("haster", "normal", "senere") else "normal",
             "comment": (body.comment or "").strip()[:300]}

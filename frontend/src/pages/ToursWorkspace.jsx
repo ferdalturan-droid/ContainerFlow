@@ -747,7 +747,7 @@ function CustomerOrderForm({ open, onClose, mode = "create", initial = null, pla
     plads: initial?.plads || (custPladser.length === 1 ? custPladser[0].name : ""),
     date: initial?.date || todayStr(), requested_by: "", tour_type: initial?.tour_type || "normal",
     priority: initial?.priority || "normal", material: initial?.material || "", container: initial?.container || "",
-    other: false, loose_count: initial?.loose_count || "", address: initial?.address || "", open_from: initial?.open_from || "",
+    overwrite: false, manual_no: "", loose_count: initial?.loose_count || "", address: initial?.address || "", open_from: initial?.open_from || "",
     open_to: initial?.open_to || "", workshop_id: "", workshop_name: initial?.workshop_name || "", workshop_address: initial?.workshop_address || "",
     workshop_phone: initial?.workshop_phone || "", comment: initial?.comment || "", driver_id: "", trailer_count: initial?.trailer_count || 0,
   }), [initial, custPladser]);
@@ -770,6 +770,26 @@ function CustomerOrderForm({ open, onClose, mode = "create", initial = null, pla
 
   const matList = opts?.materials || [];
   const containers = (matList.find(m => m.material === f.material)?.containers) || [];
+  // 2026-10-19: Container = én af pladsens containere for netop jeres firma.
+  // "Overskriv" giver et manuelt containernummer. Har kunden låst nummeret på
+  // den valgte container, bestilles det indtastede som en anden container.
+  const slot = containers.find(c => c.label === f.container) || null;
+  const manualMode = !edit && (f.overwrite || (opts && containers.length === 0));
+  const containerOut = () => {
+    if (edit) return { container_number: f.container, custom_container_id: "" };
+    const no = (f.manual_no || "").trim();
+    if (!manualMode && slot) return { container_number: slot.label, custom_container_id: "" };
+    if (slot && !slot.locked_container_id && no) return { container_number: slot.label, custom_container_id: no };
+    return { container_number: no, custom_container_id: no };
+  };
+  const slotText = (c) => `${c.container_id ? `Nr. ${c.container_id}` : "Intet nr."} · ${c.label}${c.capacity_label ? ` · ${c.capacity_label}` : ""}`;
+  // "Bestil igen": turen kender containerens nummer (fx 12345), ikke pladsens
+  // navn for den ("Container 1") - find den i listen, ellers som overskrevet nr.
+  useEffect(() => {
+    if (!opts || edit || !f.container || !f.material || containers.some(c => c.label === f.container)) return;
+    const byId = containers.find(c => c.container_id && c.container_id === f.container);
+    setF(prev => (byId ? { ...prev, container: byId.label } : { ...prev, overwrite: containers.length > 0, manual_no: prev.container, container: "" }));
+  }, [opts, f.material]); // eslint-disable-line react-hooks/exhaustive-deps
   const needsAddr = f.tour_type === "normal" || f.tour_type === "loes_afhentning";
   const workshopType = f.tour_type === "vaerksted" || f.tour_type === "afhent_vaerksted";
   const loes = f.tour_type === "loes_afhentning";
@@ -780,7 +800,7 @@ function CustomerOrderForm({ open, onClose, mode = "create", initial = null, pla
     if (!open || !plads || !f.material || !f.date) return;
     let off = false;
     axios.get(`${API}/logistics/order-defaults`, { params: { location_code: plads.location_code || plads.code || "", plads_name: plads.name,
-      material: f.material, date: f.date, container: loes ? "" : f.container } })
+      material: f.material, date: f.date, container: loes ? "" : (slot ? slot.label : "") } })
       .then(r => {
         if (off) return;
         setDfl(r.data);
@@ -791,7 +811,7 @@ function CustomerOrderForm({ open, onClose, mode = "create", initial = null, pla
         }));
       }).catch(() => { if (!off) setDfl(null); });
     return () => { off = true; };
-  }, [open, plads?.name, f.material, f.container, f.date, loes]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [open, plads?.name, f.material, slot?.label, f.date, loes]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const clash = edit ? [] : (dfl?.open_orders || []).filter(o => o.tour_type === f.tour_type);
   const pickWorkshop = (id) => {
@@ -803,7 +823,7 @@ function CustomerOrderForm({ open, onClose, mode = "create", initial = null, pla
     if (!plads) { toast.error(`Vælg ${siteWord.toLowerCase()}`); return; }
     if (!edit && !f.requested_by.trim()) { toast.error('Skriv hvem hos kunden der bad om det (fx "Jens, telefon")'); return; }
     if (!f.material) { toast.error("Vælg materiale"); return; }
-    if (!loes && !f.container.trim()) { toast.error("Vælg containeren"); return; }
+    if (!loes && !containerOut().container_number) { toast.error(manualMode ? "Skriv containernummeret" : "Vælg containeren"); return; }
     if (loes && !(parseInt(f.loose_count, 10) > 0)) { toast.error("Skriv antal containere"); return; }
     if (needsAddr && !f.address.trim()) { toast.error("Skriv leveringsadressen"); return; }
     if (workshopType && (!f.workshop_name.trim() || !f.workshop_address.trim())) { toast.error("Vælg værkstedet (navn og adresse)"); return; }
@@ -825,7 +845,7 @@ function CustomerOrderForm({ open, onClose, mode = "create", initial = null, pla
       } else {
         await axios.post(`${API}/logistics/customer-orders`, {
           ...route, location_code: plads.location_code || plads.code || "", plads_name: plads.name, material: f.material,
-          container_number: loes ? "" : f.container.trim(), requested_by: f.requested_by.trim(),
+          ...(loes ? { container_number: "" } : containerOut()), requested_by: f.requested_by.trim(),
           driver_id: f.driver_id, trailer_count: Number(f.trailer_count || 0),
         });
         toast.success(`Bestilt for ${opts?.customer_name || plads.customer_name || "kunden"} - de ser den under Mine bestillinger`);
@@ -906,7 +926,7 @@ function CustomerOrderForm({ open, onClose, mode = "create", initial = null, pla
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className={labelCls}>Materiale</label>
-              <select className={inputCls} value={f.material} disabled={edit} onChange={(e) => setF(prev => ({ ...prev, material: e.target.value, container: "", other: false }))} data-testid="of-material">
+              <select className={inputCls} value={f.material} disabled={edit} onChange={(e) => setF(prev => ({ ...prev, material: e.target.value, container: "", overwrite: false, manual_no: "" }))} data-testid="of-material">
                 <option value="">{opts ? (matList.length ? "Vælg…" : "Ingen materialer for jer på pladsen") : "Henter…"}</option>
                 {matList.map(m => <option key={m.material} value={m.material}>{m.material}</option>)}
                 {edit && f.material && !matList.some(m => m.material === f.material) && <option value={f.material}>{f.material}</option>}
@@ -918,16 +938,37 @@ function CustomerOrderForm({ open, onClose, mode = "create", initial = null, pla
                 <input type="number" min="1" inputMode="numeric" className={inputCls} value={f.loose_count} onChange={(e) => set("loose_count", e.target.value)} />
               </div>
             ) : (
-              <div>
+              <div className="sm:col-span-2">
                 <label className={labelCls}>Container</label>
-                {containers.length > 0 && !f.other && !edit ? (
-                  <select className={inputCls} value={f.container} onChange={(e) => (e.target.value === "__other" ? setF(prev => ({ ...prev, other: true, container: "" })) : set("container", e.target.value))} data-testid="of-container">
-                    <option value="">Vælg…</option>
-                    {containers.map(c => <option key={c.label} value={c.label}>{c.label}{c.container_id ? ` · ${c.container_id}` : ""}{c.capacity_label ? ` · ${c.capacity_label}` : ""}</option>)}
-                    <option value="__other">Anden container…</option>
-                  </select>
+                {edit ? (
+                  <input className={inputCls} value={f.container} disabled />
                 ) : (
-                  <input className={inputCls} value={f.container} disabled={edit} onChange={(e) => set("container", e.target.value)} placeholder="Fx Container 2 eller containerens nr." data-testid="of-container-text" />
+                  <div className="space-y-1.5">
+                    {containers.length > 0 && (
+                      <div className="flex gap-2">
+                        <select className={`${inputCls} flex-1 min-w-0`} value={f.container} disabled={!f.material}
+                          onChange={(e) => setF(prev => ({ ...prev, container: e.target.value, manual_no: "" }))} data-testid="of-container">
+                          <option value="">{f.material ? "Vælg…" : "Vælg materiale først"}</option>
+                          {containers.map(c => <option key={c.label} value={c.label}>{slotText(c)}</option>)}
+                        </select>
+                        <button type="button" disabled={!f.material} data-testid="of-container-overwrite"
+                          onClick={() => setF(prev => ({ ...prev, overwrite: !prev.overwrite, manual_no: prev.overwrite ? "" : (slot?.container_id || "") }))}
+                          className={`shrink-0 px-3 rounded-lg border text-sm font-semibold ${f.overwrite ? "bg-emerald-600 border-emerald-600 text-white" : "border-slate-200 dark:border-slate-600 text-slate-700 dark:text-slate-200"} disabled:opacity-50`}>
+                          {f.overwrite ? "Brug listen" : "Overskriv"}</button>
+                      </div>
+                    )}
+                    {manualMode && f.material && (
+                      <input className={inputCls} value={f.manual_no} onChange={(e) => set("manual_no", e.target.value)} autoFocus={containers.length > 0}
+                        placeholder="Containernummer, fx 2223" data-testid="of-container-number" />
+                    )}
+                    <p className="text-[11px] text-slate-500">
+                      {!f.material ? "Pladsens containere for jeres firma vises, når materialet er valgt."
+                        : containers.length === 0 ? `Pladsen har ingen ${f.material.toLowerCase()}-containere oprettet for jer - skriv containernummeret.`
+                        : f.overwrite && slot?.locked_container_id ? `${slot.label} har et låst nummer hos kunden - det du skriver, bestilles som en anden container.`
+                        : f.overwrite ? (slot ? `Bestilles som ${slot.label} med det nummer du skriver.` : "Skriv containernummeret - fx en container der ikke står på listen.")
+                        : "Pladsens containere for jeres firma (en plads kan have flere logistikfirmaer)."}
+                    </p>
+                  </div>
                 )}
               </div>
             )}

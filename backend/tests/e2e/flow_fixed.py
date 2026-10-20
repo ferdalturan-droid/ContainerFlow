@@ -100,6 +100,16 @@ def run():
         lst = call("GET", "/org/fixed-schedules", t=la, params={"location_code": "1121"})
         ok(any(x["id"] == sid and x["next_dates"] and x["text"] for x in lst), "14 listen viser hvornår og de næste datoer")
 
+        # Månedligt: første mandag i måneden
+        far = (today + timedelta(days=40)).isoformat()   # start langt fremme - ingen bestillinger nu
+        m = call("POST", "/org/fixed-schedules", {"location_code": "1121", "material": mat, "container_number": "E2E Fast 2",
+                                                  "weekdays": [0], "monthly_nth": 1, "start_date": far, "partner_id": ilk}, t=la)
+        nd = [date.fromisoformat(x) for x in m["next_dates"]]
+        ok(nd and all(d.weekday() == 0 and d.day <= 7 for d in nd) and len({d.month for d in nd}) == len(nd)
+           and m["text"].startswith("Første mandag i måneden"), f"16 månedligt: første mandag i måneden ({', '.join(x.isoformat() for x in nd[:3])})")
+        call("DELETE", f"/org/fixed-schedules/{m['id']}", t=la)
+        db.fixed_schedules.delete_many({"id": m["id"]})
+
         stp = call("DELETE", f"/org/fixed-schedules/{sid}", t=la)
         ok(stp["cancelled"] >= 1 and not [o for o in orders_of(sid) if o["status"] == "pending"]
            and not any(x["id"] == sid for x in call("GET", "/org/fixed-schedules", t=la, params={"location_code": "1121"})),

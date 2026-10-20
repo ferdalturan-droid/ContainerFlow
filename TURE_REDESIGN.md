@@ -238,3 +238,7 @@ Se BESLUTNINGER_2026-10-19.md for alternativer og runder.
 - **Chaufførkortet** viser ruten i køreorden, med en "Kør"-knap pr. sted, i stedet for et kort-ikon uden tekst.
 - **Banner ved ny version**, når appen har stået åben under en opdatering.
 - **E2E-tests kører kun via `./scripts/e2e.sh`** (egen database og app på port 8081). Før ændrede de midlertidigt priserne i den lokale database.
+- **Bestil for kunden › Container** viser pladsens containere for netop det bestillende firma: "Nr. 5555 · Container 1 · 30 m³", også dem uden nummer.
+  - "Overskriv" giver et manuelt containernummer.
+  - Kundens låste nummer respekteres; det indtastede bestilles så som en anden container.
+- **Faste tømninger kan også være månedlige:** første, anden, tredje, fjerde eller sidste ugedag i måneden.

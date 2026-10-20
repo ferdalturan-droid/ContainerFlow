@@ -315,3 +315,56 @@ side, der står åben, beholder den gamle kode, til den genindlæses. Derfor:
 - Turen "test" havde samme adresse som afhentning og aflevering. Den vises nu
   som ét sted ("Hent og aflever"), og Ny tur advarer, når de to adresser er
   ens.
+
+---
+
+## 8. Containerlisten i "Bestil for kunden" + "Overskriv" (2026-10-20)
+
+**Krav:** Listen skal være lokationens containere, og de rigtige, da en lokation
+kan have flere logistikfirmaer. Det skal være muligt at overskrive
+containernummeret.
+
+**Alternativer:**
+- A. Kun containere med nummer, som på bestillingssiden.
+- **B. Alle lokationens containere for det bestillende firma, også dem uden
+  nummer (valgt).**
+- C. Alle firmaers containere.
+
+**Runde 1 – kilde:** Samme kilde som bestillingssiden (containerantal pr.
+logistikfirma plus fælles containeropsætning). Det bestillende firma ser kun
+sine egne. Fx har Test Partner pap-containeren på Folehaven, så ILK ser den
+ikke.
+
+**Runde 2 – visning:** "Nr. 5555 · Container 1 · Lukket container 30 m³".
+Nummeret står først, fordi det er det, planlæggeren kender fra pladsen.
+Containere uden nummer står som "Intet nr.".
+
+**Runde 3 – Overskriv:**
+- Skriver planlæggeren et andet nummer på en container, bestilles den med det
+  nummer.
+- Har kunden låst nummeret, gælder låsen. Det indtastede bestilles så som en
+  anden container, og formularen siger det.
+- Har firmaet ingen containere for materialet, skrives nummeret direkte.
+
+**Runde 4 – samspil:**
+- "Bestil igen" kender kun nummeret (fx 12345). Det slås op i listen, og findes
+  det ikke, udfyldes det som et overskrevet nummer.
+- Tjekket for dobbeltbestilling og leveringsadressen bruger pladsens navn for
+  containeren.
+
+**Runde 5 – test:** e2e 33–36:
+- listen pr. firma, også containere uden nummer;
+- "Overskriv" på en container uden lås;
+- låst nummer bevares;
+- manuelt nummer uden for listen.
+
+## 9. Månedlige faste tømninger (2026-10-20)
+
+"Hver 4. uge" glider i forhold til måneden. Små fraktioner tømmes ofte
+månedligt. Derfor findes nu valget "Månedligt" med første, anden, tredje,
+fjerde eller sidste valgte ugedag i måneden (fx "Første mandag i måneden").
+
+Varslet på 7 dage er beholdt fast. Det er én ting mindre at forklare
+lokationsadmin, og logistikfirmaet har altid en uge at planlægge i.
+
+e2e: flow_fixed 16.

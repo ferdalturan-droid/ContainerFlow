@@ -14,6 +14,7 @@ import { API, formatApiError } from "../auth/api";
  */
 const WD = ["Man", "Tir", "Ons", "Tor", "Fre", "Lør", "Søn"];
 const EVERY = [[1, "Hver uge"], [2, "Hver 2. uge"], [3, "Hver 3. uge"], [4, "Hver 4. uge"]];
+const NTH = [[1, "Første"], [2, "Anden"], [3, "Tredje"], [4, "Fjerde"], [5, "Sidste"]];
 const TYPES = [["normal", "Afhent container"], ["flyt", "Byt container"]];
 const PRIO = [["normal", "Normal"], ["haster", "Haster"], ["senere", "Lav"]];
 const input = "w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/40 disabled:opacity-60";
@@ -36,8 +37,16 @@ function nextDates(f, n = 6) {
   for (let d = new Date(Math.max(from, start)), i = 0; i < 400 && out.length < n; i++, d.setDate(d.getDate() + 1)) {
     if (end && d > end) break;
     const wd = (d.getDay() + 6) % 7;
-    const weeks = Math.floor(Math.round((d - anchor) / 86400000) / 7);
-    if (f.weekdays.includes(wd) && weeks % Number(f.interval_weeks || 1) === 0) out.push(ymd(d));
+    if (!f.weekdays.includes(wd)) continue;
+    const nth = Number(f.monthly_nth || 0);
+    if (nth) {
+      const next = new Date(d); next.setDate(d.getDate() + 7);
+      const last = next.getMonth() !== d.getMonth();
+      if ((nth === 5 && last) || (nth < 5 && Math.floor((d.getDate() - 1) / 7) + 1 === nth)) out.push(ymd(d));
+    } else {
+      const weeks = Math.floor(Math.round((d - anchor) / 86400000) / 7);
+      if (weeks % Number(f.interval_weeks || 1) === 0) out.push(ymd(d));
+    }
   }
   return out;
 }
@@ -47,6 +56,7 @@ function ScheduleForm({ code, initial, onClose, onSaved }) {
   const [f, setF] = useState(() => ({
     partner_id: initial?.partner_id || "", material: initial?.material || "", container_number: initial?.container_number || "",
     tour_type: initial?.tour_type || "normal", weekdays: initial?.weekdays || [0], interval_weeks: initial?.interval_weeks || 1,
+    monthly_nth: initial?.monthly_nth || 0,
     start_date: initial?.start_date || todayYmd(), end_date: initial?.end_date || "", priority: initial?.priority || "normal",
     comment: initial?.comment || "", other: false,
   }));
@@ -142,9 +152,22 @@ function ScheduleForm({ code, initial, onClose, onSaved }) {
               return <button key={l} type="button" className={`${chip(on)} w-12`} onClick={() => set("weekdays", on ? f.weekdays.filter(x => x !== i) : [...f.weekdays, i].sort())}>{l}</button>;
             })}
           </div>
-          <div className="flex flex-wrap gap-1.5">
-            {EVERY.map(([n, l]) => <button key={n} type="button" className={chip(Number(f.interval_weeks) === n)} onClick={() => set("interval_weeks", n)}>{l}</button>)}
+          <div className="inline-flex p-0.5 rounded-lg bg-slate-100 dark:bg-slate-900" data-testid="fixed-mode">
+            {[[false, "Ugentligt"], [true, "Månedligt"]].map(([m, l]) => (
+              <button key={l} type="button" onClick={() => set("monthly_nth", m ? (Number(f.monthly_nth) || 1) : 0)}
+                className={`px-3 py-1 rounded-md text-xs font-bold ${!!Number(f.monthly_nth) === m ? "bg-white dark:bg-slate-700 shadow-sm text-slate-900 dark:text-white" : "text-slate-500"}`}>{l}</button>
+            ))}
           </div>
+          {Number(f.monthly_nth) ? (
+            <div className="flex flex-wrap gap-1.5" data-testid="fixed-nth">
+              {NTH.map(([n, l]) => <button key={n} type="button" className={chip(Number(f.monthly_nth) === n)} onClick={() => set("monthly_nth", n)}>{l}</button>)}
+              <span className="text-xs text-slate-500 self-center">valgte ugedag i måneden</span>
+            </div>
+          ) : (
+            <div className="flex flex-wrap gap-1.5">
+              {EVERY.map(([n, l]) => <button key={n} type="button" className={chip(Number(f.interval_weeks) === n)} onClick={() => set("interval_weeks", n)}>{l}</button>)}
+            </div>
+          )}
         </div>
         <div className="grid grid-cols-2 gap-3">
           <div><span className={label}>Fra</span><input type="date" className={input} value={f.start_date} onChange={(e) => set("start_date", e.target.value)} data-testid="fixed-start" /></div>
