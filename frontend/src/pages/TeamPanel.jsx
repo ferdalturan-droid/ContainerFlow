@@ -95,7 +95,7 @@ function ScopePicker({ options, value, onChange, disabled }) {
   );
 }
 
-function MemberRow({ m, catalog, me, onSaved, scopeOptions }) {
+function MemberRow({ m, catalog, me, onSaved, scopeOptions, roles = true }) {
   const [open, setOpen] = useState(false);
   const [perms, setPerms] = useState(m.permissions);
   const [scope, setScope] = useState(m.customer_scope || []);
@@ -138,14 +138,14 @@ function MemberRow({ m, catalog, me, onSaved, scopeOptions }) {
           <span className="flex items-center gap-2 flex-wrap">
             <span className="font-semibold text-slate-900 dark:text-white truncate">{m.name}{isMe ? " (dig)" : ""}</span>
             <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${m.is_coordinator ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300" : "bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-200"}`}>
-              {m.is_coordinator ? "Koordinator" : "Administrator"}
+              {m.is_coordinator ? (roles ? "Koordinator" : "Kollega") : "Administrator"}
             </span>
             {m.invitation_status === "pending" && <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700">Afventer</span>}
             {!m.active && <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-rose-50 text-rose-700">Deaktiveret</span>}
           </span>
           <span className="block text-xs text-slate-500 truncate">{m.email}{m.phone ? ` · ${m.phone}` : ""}</span>
         </span>
-        <span className="text-xs text-slate-400 hidden sm:inline">{m.is_coordinator ? `${count} af ${catalog.length} rettigheder${(m.customer_scope || []).length ? ` · ${m.customer_scope.length} kunde${m.customer_scope.length === 1 ? "" : "r"}` : ""}` : "Alle rettigheder"}</span>
+        <span className="text-xs text-slate-400 hidden sm:inline">{m.is_coordinator && !roles ? "Fuld adgang" : m.is_coordinator ? `${count} af ${catalog.length} rettigheder${(m.customer_scope || []).length ? ` · ${m.customer_scope.length} kunde${m.customer_scope.length === 1 ? "" : "r"}` : ""}` : "Alle rettigheder"}</span>
         <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
       {open && (
@@ -154,7 +154,9 @@ function MemberRow({ m, catalog, me, onSaved, scopeOptions }) {
             <label className={labelCls}>Telefon (chauffører kan ringe)</label>
             <input className={inputCls} value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+45 …" inputMode="tel" />
           </div>
-          {m.is_coordinator ? (
+          {m.is_coordinator && !roles ? (
+            <p className="text-sm text-slate-500 flex items-center gap-2"><Shield className="w-4 h-4" /> Fuld adgang. Roller og rettigheder pr. person er en del af ContainerFlow Premium.</p>
+          ) : m.is_coordinator ? (
             <>
               <PermGrid catalog={catalog} value={perms} onChange={setPerms} allowed={me.permissions} disabled={!editable} />
               <ScopePicker options={scopeOptions} value={scope} onChange={setScope} disabled={!editable} />
@@ -217,20 +219,23 @@ export default function TeamPanel() {
     </div>
   );
 
+  // 2026-10-20: Roller og rettigheder pr. person er premium. Uden dem får en
+  // inviteret kollega fuld adgang (serveren gør det samme).
+  const roles = data.roles !== false;
   return (
     <section className="space-y-4" data-testid="team-panel">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h2 className="text-xl font-bold flex items-center gap-2"><Users className="w-5 h-5 text-emerald-600" /> Team &amp; rettigheder</h2>
-          <p className="text-sm text-slate-500 dark:text-slate-400">Invitér koordinatorer og vælg præcis hvad de må se og ændre.</p>
+          <h2 className="text-xl font-bold flex items-center gap-2"><Users className="w-5 h-5 text-emerald-600" /> {roles ? <>Team &amp; rettigheder</> : "Team"}</h2>
+          <p className="text-sm text-slate-500 dark:text-slate-400">{roles ? "Invitér koordinatorer og vælg præcis hvad de må se og ændre." : "Invitér kolleger - de får fuld adgang ligesom dig. Roller og rettigheder pr. person er en del af ContainerFlow Premium."}</p>
         </div>
-        {!inviting && <button className={btnPrimary} onClick={() => setInviting(true)} data-testid="team-invite-btn"><UserPlus className="w-4 h-4" /> Invitér koordinator</button>}
+        {!inviting && <button className={btnPrimary} onClick={() => setInviting(true)} data-testid="team-invite-btn"><UserPlus className="w-4 h-4" /> {roles ? "Invitér koordinator" : "Invitér kollega"}</button>}
       </div>
 
       {inviting && (
         <div className={`${card} p-4 sm:p-5 space-y-4`} data-testid="team-invite-form">
           <div className="flex items-center justify-between">
-            <h3 className="font-bold">Ny koordinator</h3>
+            <h3 className="font-bold">{roles ? "Ny koordinator" : "Ny kollega"}</h3>
             <button onClick={() => setInviting(false)} className="p-1.5 text-slate-400" aria-label="Luk"><X className="w-5 h-5" /></button>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -238,21 +243,21 @@ export default function TeamPanel() {
             <div><label className={labelCls}>E-mail</label><input type="email" className={inputCls} value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></div>
             <div><label className={labelCls}>Telefon</label><input className={inputCls} inputMode="tel" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} placeholder="Valgfri" /></div>
           </div>
-          <PermGrid catalog={data.catalog} value={form.permissions} onChange={(p) => setForm({ ...form, permissions: p })} allowed={data.me.permissions} />
-          <ScopePicker options={data.scope_options} value={form.customer_scope} onChange={(v) => setForm({ ...form, customer_scope: v })} />
+          {roles && <PermGrid catalog={data.catalog} value={form.permissions} onChange={(p) => setForm({ ...form, permissions: p })} allowed={data.me.permissions} />}
+          {roles && <ScopePicker options={data.scope_options} value={form.customer_scope} onChange={(v) => setForm({ ...form, customer_scope: v })} />}
           <div className="flex justify-end gap-2">
             <button className={btnGhost} onClick={() => setInviting(false)}>Annuller</button>
             <button className={btnPrimary} disabled={busy || !form.name.trim() || !form.email.trim()} onClick={invite} data-testid="team-invite-send">
               {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />} Send invitation
             </button>
           </div>
-          <p className="text-xs text-slate-500">Koordinatoren får en mail med et link til at vælge adgangskode (gyldigt i 72 timer).</p>
+          <p className="text-xs text-slate-500">{roles ? "Koordinatoren" : "Kollegaen"} får en mail med et link til at vælge adgangskode (gyldigt i 72 timer).</p>
         </div>
       )}
 
       <div className={`${card} overflow-hidden`}>
         <ul className="divide-y divide-slate-100 dark:divide-slate-700">
-          {data.members.map(m => <MemberRow key={m.id} m={m} catalog={data.catalog} me={data.me} onSaved={load} scopeOptions={data.scope_options} />)}
+          {data.members.map(m => <MemberRow key={m.id} m={m} catalog={data.catalog} me={data.me} onSaved={load} scopeOptions={data.scope_options} roles={roles} />)}
         </ul>
       </div>
 

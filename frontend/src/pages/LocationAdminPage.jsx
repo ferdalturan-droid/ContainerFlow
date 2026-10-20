@@ -4214,6 +4214,12 @@ export function ArchiveTab({ locations = [] }) {
         "Chauffør": t.driver_name || "",
         "Adresse": t.address || "",
         "Status": t.completed ? "Fuldført" : (t.not_completed ? "Ikke gennemført" : "Igangværende"),
+        // 2026-10-20: Fakturagrundlag uden priser (basic har ikke Økonomi).
+        "Tur-nr.": t.tour_number || "",
+        "Haster": (t.priority === "urgent" || t.priority === "haster") ? "Ja" : "",
+        "Hængere": t.trailer_count_actual != null ? Number(t.trailer_count_actual) : (t.used_trailer ? 1 : ""),
+        "Ventetid (min)": t.waiting_reported_min || "",
+        "Afvigelse": t.not_completed_code || t.finish_issue || (t.cancelled ? "Annulleret" : ""),
       };
     });
     const subRows = [];

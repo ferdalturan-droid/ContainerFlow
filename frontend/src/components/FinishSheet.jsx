@@ -219,6 +219,7 @@ export default function FinishSheet({ tour, onClose, onDone, driverName, myId, c
           const { data } = await axios.post(`${API}/tours/${tour.id}/finish`, { ...body, op_id: opId.current }, { timeout: 30000 });
           if (data.waiting === "approved") toast.message("Ventetiden er godkendt");
           else if (data.waiting === "pending") toast.message("Ventetid sendt til godkendelse");
+          else if (data.waiting === "noted") toast.message("Ventetiden er registreret på turen");
           else if (data.waiting_error) toast.error(data.waiting_error);
           toast.success("Turen er afsluttet");
           if (receipt && regs.weight > 0) {

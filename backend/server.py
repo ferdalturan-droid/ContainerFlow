@@ -476,6 +476,8 @@ class Tour(BaseModel):
     cancelled_by_role: str = ""
     cancelled_on_way: bool = False
     cancel_reason: str = ""
+    # 2026-10-20: Ventetid chaufføren oplyste ved afslutning (minutter).
+    waiting_reported_min: int = 0
     # 2026-10-19: Oprettet automatisk af en fast tømning.
     fixed_schedule_id: str = ""
     fixed_label: str = ""
@@ -2067,9 +2069,14 @@ async def _push_new_haster(tours: List[dict]):
                 drivers = await _raw_db.users.find({"role": "driver", "company_id": firm, "active": {"$ne": False}},
                                                    {"_id": 0, "id": 1, "name": 1}).to_list(500)
                 ids = [d["id"] for d in drivers]
-                working = set(await _raw_db.driver_time_entries.distinct(
-                    "driver_id", {"driver_id": {"$in": ids}, "date": today,
-                                  "$or": [{"deleted": {"$exists": False}}, {"deleted": False}]}))
+                # 2026-10-20: Uden tidsregistrering (basic) stempler ingen ind -
+                # så får alle firmaets aktive chauffører besked.
+                if await _company_has(firm, "time"):
+                    working = set(await _raw_db.driver_time_entries.distinct(
+                        "driver_id", {"driver_id": {"$in": ids}, "date": today,
+                                      "$or": [{"deleted": {"$exists": False}}, {"deleted": False}]}))
+                else:
+                    working = set(ids)
                 for d in drivers:
                     if d["id"] in working:
                         await _push_driver(firm, d["id"], d.get("name", ""), "HASTER-tur",
@@ -2262,6 +2269,9 @@ async def team_list(payload: dict = Depends(get_current_user_payload)):
     scope_options += [{"id": c["id"], "name": c["name"]} for c in (prof.get("connected_customers") or [])]
     return {
         "members": [_team_public(u) for u in users],
+        # 2026-10-20: Uden koordinatorroller (basic) får en inviteret kollega
+        # fuld adgang - rettigheder og kunde-begrænsning er premium.
+        "roles": await _company_has(me["company_id"], "team_roles"),
         "scope_options": scope_options,
         "catalog": [{"key": k, "label": l} for k, l in COORDINATOR_PERMS],
         "me": {"id": me["id"], "is_coordinator": bool(me.get("is_coordinator")), "permissions": _effective_perms(me)},
@@ -2281,10 +2291,12 @@ async def team_invite(body: TeamMemberIn, payload: dict = Depends(get_current_us
         raise HTTPException(status_code=400, detail="Skriv et navn")
     if await _raw_db.users.find_one({"email": email}):
         raise HTTPException(status_code=409, detail="Der findes allerede en bruger med den e-mail")
+    roles = await _company_has(me["company_id"], "team_roles")
     doc = {
         "id": str(uuid.uuid4()), "email": email, "name": name, "phone": (body.phone or "").strip(),
-        "role": "logistics_admin", "is_coordinator": True, "permissions": _grantable(me, body.permissions),
-        "customer_scope": _grantable_scope(me, body.customer_scope),
+        "role": "logistics_admin", "is_coordinator": True,
+        "permissions": _grantable(me, body.permissions if roles else {k: True for k, _l in COORDINATOR_PERMS}),
+        "customer_scope": _grantable_scope(me, body.customer_scope) if roles else [],
         "company_id": me["company_id"], "active": True, "invitation_status": "pending", "password_hash": "",
         "managed_company_ids": [], "assigned_plads_ids": [], "visible_plads_ids": [],
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -2311,9 +2323,10 @@ async def team_update(user_id: str, body: TeamMemberIn, payload: dict = Depends(
     if u.get("is_coordinator"):
         if user_id == me["id"]:
             raise HTTPException(status_code=403, detail="Du kan ikke ændre dine egne rettigheder")
-        upd["permissions"] = _grantable(me, body.permissions)
-        if body.customer_scope is not None:
-            upd["customer_scope"] = _grantable_scope(me, body.customer_scope)
+        if await _company_has(me["company_id"], "team_roles"):
+            upd["permissions"] = _grantable(me, body.permissions)
+            if body.customer_scope is not None:
+                upd["customer_scope"] = _grantable_scope(me, body.customer_scope)
         if body.active is not None:
             upd["active"] = bool(body.active)
     elif user_id != me["id"] and me.get("is_coordinator"):
@@ -2531,11 +2544,16 @@ def _logistics_tier(company: Optional[dict]) -> str:
     return "partner" if company.get("from_library") else "premium"
 
 
-# 2026-10-18: Det et premium-firma har UD OVER kernen. Kernen (begge typer) er
-# alt der gavner genbrugsplads-kunden: bestillinger, planlægning, chauffører,
-# rapportering, arkiv, tidsregistrering og Økonomi for kundernes ture. Premium
-# er vognmandens egen forretning uden for genbrugspladserne. Serveren håndhæver
-# det (se _PREMIUM_ROUTES og _normalize_tour_doc); frontend bruger samme liste.
+# Det et premium-firma har UD OVER kernen.
+# 2026-10-20 (ny opdeling, se BESLUTNINGER_2026-10-19.md afsnit 11): Kernen
+# (basic, gratis - genbrugspladsen inviterer sine logistikfirmaer) er det der
+# skal til for at køre kundens ture godt: bestillinger, Bestil for kunden,
+# planlægning, chauffører og chaufførappen, beskeder, arkiv/historik.
+# Premium er logistikfirmaets egen drift: egne kunder/lokationer/ture, Fragt,
+# stop, Gentag, krav ved afslutning, hængere med indhold - og nu også Økonomi,
+# Tid & ressourcer (stempling, timer, løn), Rapportering og koordinatorroller.
+# Super admin kan give et enkelt firma enkelte moduler (companies.premium_modules),
+# fx i en overgang. Serveren håndhæver det (_PREMIUM_ROUTES m.fl.).
 PREMIUM_CAPABILITIES = {
     "own_locations": "Egne lokationer",
     "own_tours": "Egne ture",
@@ -2545,21 +2563,41 @@ PREMIUM_CAPABILITIES = {
     "stops": "Ture med flere stop",
     "series": "Gentagne ture",
     "capture": "Krav ved afslutning",
+    "economy": "Økonomi (prisaftaler og fakturagrundlag)",
+    "time": "Tid & ressourcer (stempling, timer og løn)",
+    "reports": "Rapportering",
+    "team_roles": "Koordinatorroller med rettigheder",
 }
+# Moduler super admin kan give et basic-firma enkeltvis.
+PREMIUM_MODULES = ["economy", "time", "reports", "team_roles"]
 _tier_cache: Dict[str, tuple] = {}
 
 
 async def _company_tier(cid: str) -> str:
     """"premium" | "partner" | "" (ikke et logistikfirma). Cache 15 s."""
+    return (await _company_access(cid))["tier"]
+
+
+async def _company_access(cid: str) -> dict:
+    """Tier + de enkelte moduler super admin har givet firmaet. Cache 15 s."""
     if not cid:
-        return ""
+        return {"tier": "", "modules": []}
     hit = _tier_cache.get(cid)
     if hit and hit[0] > _time.time():
         return hit[1]
-    co = await _raw_db.companies.find_one({"id": cid}, {"_id": 0, "company_type": 1, "from_library": 1})
-    tier = _logistics_tier(co)
-    _tier_cache[cid] = (_time.time() + 15, tier)
-    return tier
+    co = await _raw_db.companies.find_one({"id": cid}, {"_id": 0, "company_type": 1, "from_library": 1, "premium_modules": 1})
+    acc = {"tier": _logistics_tier(co), "modules": [m for m in ((co or {}).get("premium_modules") or []) if m in PREMIUM_MODULES]}
+    _tier_cache[cid] = (_time.time() + 15, acc)
+    return acc
+
+
+async def _company_has(cid: str, cap: str) -> bool:
+    """Har logistikfirmaet premium-evnen? Ikke-logistikfirmaer (super admin,
+    kunder) rammes aldrig af premium-spærringen."""
+    acc = await _company_access(cid)
+    if acc["tier"] != "partner":
+        return True
+    return cap in acc["modules"]
 
 
 def _la_plads_query(la: str, partner: bool) -> dict:
@@ -2573,7 +2611,7 @@ def _la_plads_query(la: str, partner: bool) -> dict:
 async def _logistics_profile(cid: str) -> dict:
     comp = await _raw_db.companies.find_one(
         {"id": cid}, {"_id": 0, "id": 1, "name": 1, "company_type": 1, "from_library": 1,
-                      "serves_company_ids": 1})
+                      "serves_company_ids": 1, "premium_modules": 1})
     tier = _logistics_tier(comp)
     if not tier:
         return {"is_logistics": False}
@@ -2590,7 +2628,8 @@ async def _logistics_profile(cid: str) -> dict:
         "is_premium": tier == "premium",
         "connected_customers": customers,
         "has_connections": bool(customers),
-        "capabilities": {k: tier == "premium" for k in PREMIUM_CAPABILITIES},
+        "capabilities": {k: tier == "premium" or k in (comp.get("premium_modules") or []) for k in PREMIUM_CAPABILITIES},
+        "premium_modules": [m for m in (comp.get("premium_modules") or []) if m in PREMIUM_MODULES],
     }
 
 
@@ -11546,6 +11585,14 @@ _PREMIUM_ROUTES = [
     ({"PUT", "DELETE"}, re.compile(r"^/api/tours/series/[^/]+$"), "series"),
     ({"POST"}, re.compile(r"^/api/tours/[^/]+/stops$"), "stops"),
     ({"PUT", "DELETE"}, re.compile(r"^/api/plads/[^/]+$"), "own_locations"),
+    # 2026-10-20: Logistikfirmaets egen drift er premium (basic kan få det
+    # enkeltvis af super admin). Ture, chaufførapp, hænger-svar ved afslutning
+    # (/driver/tours/{id}/trailer) og afslutnings-indstillinger forbliver kerne.
+    ({"GET", "POST", "PUT", "DELETE", "PATCH"}, re.compile(r"^/api/pricing(/|$)"), "economy"),
+    ({"GET", "POST", "PUT", "DELETE", "PATCH"}, re.compile(r"^/api/admin/(time-entries|time-entries-list|missing-clock)(/|$)"), "time"),
+    ({"GET", "POST", "PUT", "DELETE", "PATCH"}, re.compile(r"^/api/driver/time-entries(/|$)"), "time"),
+    ({"PATCH", "PUT"}, re.compile(r"^/api/company/payroll-settings$"), "time"),
+    ({"GET"}, re.compile(r"^/api/admin/statistics$"), "reports"),
 ]
 
 
@@ -11695,7 +11742,7 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
         if role in ("logistics_admin", "driver") and uid and path.startswith("/api/") and not is_public:
             cap = next((c for methods, rx, c in _PREMIUM_ROUTES
                         if request.method in methods and rx.match(path)), None)
-            if cap and await _company_tier(user_company_id or "") == "partner":
+            if cap and not await _company_has(user_company_id or "", cap):
                 from starlette.responses import JSONResponse
                 if request.method == "GET":
                     return JSONResponse(status_code=200, content=[])
@@ -12449,7 +12496,33 @@ async def sa_get_logistics_tier(company_id: str):
         "own_locations": await _raw_db.plads.count_documents({"company_id": company_id}),
         "own_customers": await _raw_db.logistics_customers.count_documents({"company_id": company_id}),
         "own_tours": await _raw_db.tours.count_documents({"company_id": company_id, "deleted": {"$ne": True}}),
+        # 2026-10-20: Moduler basic-firmaet har fået enkeltvis + hvad det bruger.
+        "premium_modules": [m for m in (co.get("premium_modules") or []) if m in PREMIUM_MODULES],
+        "modules": [{"key": m, "label": PREMIUM_CAPABILITIES[m]} for m in PREMIUM_MODULES],
+        "usage": {
+            "economy": await _raw_db.price_rules.count_documents({"company_id": company_id}),
+            "time": await _raw_db.driver_time_entries.count_documents({"driver_id": {"$in": [
+                u["id"] async for u in _raw_db.users.find({"company_id": company_id, "role": "driver"}, {"_id": 0, "id": 1})]}}),
+            "team_roles": await _raw_db.users.count_documents({"company_id": company_id, "is_coordinator": True}),
+        },
     }
+
+
+@sa_router.put("/companies/{company_id}/premium-modules")
+async def sa_set_premium_modules(company_id: str, body: dict, payload: dict = Depends(get_current_user_payload)):
+    """2026-10-20: Giv et basic-firma enkelte premium-moduler (fx Økonomi i en
+    overgang, eller en prøveperiode). Et premium-firma har dem altid."""
+    co = await _raw_db.companies.find_one({"id": company_id}, {"_id": 0, "company_type": 1, "from_library": 1, "name": 1,
+                                                               "premium_modules": 1})
+    if not _logistics_tier(co):
+        raise HTTPException(status_code=404, detail="Logistikfirma ikke fundet")
+    mods = [m for m in dict.fromkeys(body.get("modules") or []) if m in PREMIUM_MODULES]
+    await _raw_db.companies.update_one({"id": company_id}, {"$set": {"premium_modules": mods}})
+    _tier_cache.pop(company_id, None)
+    invalidate_company_cache(company_id)
+    await _audit("premium_modules_changed", payload, {"company_id": company_id, "name": co.get("name"),
+                                                      "from": co.get("premium_modules") or [], "to": mods})
+    return {"premium_modules": mods}
 
 
 @sa_router.put("/companies/{company_id}/logistics-tier")
@@ -17183,6 +17256,13 @@ async def org_tour_archive(
             "completed": bool(t.get("completed")),
             "not_completed": bool(t.get("not_completed")),
             "not_completed_comment": t.get("not_completed_comment", ""),
+            # 2026-10-20: Det et basic-firma fakturerer ud fra (Historik-eksport).
+            "not_completed_code": t.get("not_completed_code", ""),
+            "trailer_count_actual": t.get("trailer_count_actual"),
+            "used_trailer": t.get("used_trailer"),
+            "waiting_reported_min": int(t.get("waiting_reported_min") or 0),
+            "finish_issue": (t.get("finish_issue") or {}).get("code", ""),
+            "cancelled": bool(t.get("cancelled")),
             "tour_type": t.get("tour_type") or "normal",
             "loose_estimated_count": int(t.get("loose_estimated_count") or 0),
             "container_weights": list(t.get("container_weights") or []),
@@ -19865,6 +19945,18 @@ async def tour_finish(tour_id: str, body: dict, payload: dict = Depends(get_curr
     st_fix = str(body.get("start_time") or "").strip()
     if st_fix and _pricing.hhmm_to_min(st_fix) >= 0 and st_fix != (t.get("on_way_time") or ""):
         cr["start_time"] = st_fix
+    if "waiting_min" in cr:
+        # 2026-10-20: Ventetiden står altid på turen (Historik-eksporten er
+        # basic-firmaets fakturagrundlag) - godkendelse/pris hører til Økonomi.
+        try:
+            wmin = max(0, min(int(cr["waiting_min"]), 24 * 60))
+            await _raw_db.tours.update_one({"id": tour_id}, {"$set": {"waiting_reported_min": wmin}})
+        except (TypeError, ValueError):
+            pass
+    if cr and not await _company_has(payload.get("company_id") or "", "economy"):
+        if "waiting_min" in cr:
+            steps["waiting"] = {"status": "noted"}
+        cr = {}
     if cr:
         why = []
         if "start_time" in cr:
@@ -20224,6 +20316,7 @@ async def startup_db_client():
         await _migrate_workshop_routes()
         await _migrate_manual_customer_tours_to_orders()
         await _migrate_tour_routes()
+        await _migrate_premium_modules_grandfather()
         await _migrate_driver_matches_claimer()
         async_lib.create_task(fixed_schedule_task())
     except Exception as e:
@@ -20366,6 +20459,40 @@ async def _migrate_manual_customer_tours_to_orders():
             logger.info(f"Bestil for kunden: {n} åbne ture på kunders pladser fik en bestilling")
     except Exception as e:
         logger.warning(f"Migrering af ture uden bestilling: {e}")
+
+
+async def _migrate_premium_modules_grandfather():
+    """2026-10-20: Engangsrettelse ved den nye opdeling (Økonomi, Tid &
+    ressourcer og koordinatorroller er nu premium). Et basic-firma (partner),
+    der allerede bruger et af modulerne, beholder det som et enkelt modul, så
+    intet forsvinder ved opdateringen. Super admin kan fjerne det igen."""
+    try:
+        # Kører én gang i alt (ikke for firmaer oprettet senere, og ikke igen
+        # hvis super admin har fjernet et modul).
+        if await _raw_db.system_flags.find_one({"key": "premium_modules_grandfather_v1"}):
+            return
+        n = 0
+        async for co in _raw_db.companies.find({"company_type": COMPANY_TYPE_LOGISTICS, "from_library": True},
+                                               {"_id": 0, "id": 1, "name": 1, "premium_modules": 1}):
+            mods = list(co.get("premium_modules") or [])
+            if await _raw_db.price_rules.count_documents({"company_id": co["id"]}) and "economy" not in mods:
+                mods.append("economy")
+            drivers = [u["id"] async for u in _raw_db.users.find({"company_id": co["id"], "role": "driver"}, {"_id": 0, "id": 1})]
+            if drivers and await _raw_db.driver_time_entries.count_documents({"driver_id": {"$in": drivers}}) and "time" not in mods:
+                mods.append("time")
+            if await _raw_db.users.count_documents({"company_id": co["id"], "is_coordinator": True}) and "team_roles" not in mods:
+                mods.append("team_roles")
+            await _raw_db.companies.update_one({"id": co["id"]}, {"$set": {
+                "premium_modules": mods, "premium_modules_grandfathered_at": datetime.now(timezone.utc).isoformat()}})
+            if mods != list(co.get("premium_modules") or []):
+                n += 1
+                logger.info(f"Premium-moduler: {co.get('name')} beholder {', '.join(mods)} (bruges allerede)")
+        await _raw_db.system_flags.insert_one({"key": "premium_modules_grandfather_v1", "at": datetime.now(timezone.utc).isoformat(),
+                                               "companies": n})
+        if n:
+            logger.info(f"Premium-moduler: {n} basic-firmaer beholder moduler de allerede bruger")
+    except Exception as e:
+        logger.warning(f"Premium-modul-migrering: {e}")
 
 
 async def _migrate_tour_owner_from_plads():

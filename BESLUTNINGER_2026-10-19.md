@@ -400,3 +400,59 @@ e2e: flow_fixed 16.
     containeropsætning.
   - Nu vises det manuelle nummer på bestillingssiden og hos lokationsadmin.
   - e2e: behalf 37, fixed 14a.
+
+---
+
+## 11. Basic vs. Premium for logistikfirmaer (2026-10-20)
+
+**Spørgsmålet:** Skal "Beskeder" fjernes for basic for at gøre forskellen til
+Premium større? Og skal basic være enklere, så kunderne kan onboarde deres
+logistikfirmaer uden friktion?
+
+**Konklusion:**
+- **Nej til at fjerne beskeder.** De gør kundens ture bedre (sporbarhed ved
+  klager, færre forgæves ture), og ingen opgraderer for at kunne skrive til sine
+  egne chauffører.
+- **Ja til større forskel**, trukket efter hvem der har gavn af funktionen.
+  Logistikfirmaets egen drift (Økonomi, Tid & ressourcer, Rapportering,
+  koordinatorroller) blev Premium. Det gør basic enklere og giver Premium en
+  klar historie.
+
+**Alternativer:**
+- A. Som før.
+- B. Fjern beskeder m.m. fra basic.
+- **C. Opdel efter hvem der har gavn (valgt).**
+- D. Alle får Premium i en prøveperiode og falder så tilbage.
+- E. Kun enklere skærme, uden at flytte funktioner.
+
+**Runde 1 – mangler:**
+- Basic skal stadig kunne fakturere. Historik-eksporten har fået tur-nr.,
+  haster, hængere, ventetid og afvigelse.
+- Ventetid oplyst ved afslutning står nu på turen.
+
+**Runde 2 – ting der hang på tidsregistrering:**
+- Haster-push gik kun til chauffører, der havde stemplet ind. Uden stempling går
+  den nu til alle aktive chauffører.
+- "Afslut dag" stemplede automatisk ud; uden tidsregistrering springes det
+  over.
+- Chaufførappen åbnede på "Tid"-fanen; uden tidsregistrering åbner den på Ture.
+
+**Runde 3 – Team:**
+- Basic kunne kun invitere koordinatorer med rettigheder. Nu inviterer basic
+  "kolleger" med fuld adgang.
+- Roller pr. person er Premium.
+- Disponent-telefonen er stadig basic.
+
+**Runde 4 – eksisterende partnere:**
+- Ingen mister noget ved opdateringen. Et basic-firma, der allerede bruger
+  Økonomi, tid eller koordinatorer, beholder det som enkelt modul
+  (engangsrettelse).
+- Super admin kan give og fjerne moduler ("Moduler" i partnerlisten), og data
+  slettes aldrig.
+
+**Runde 5 – onboarding:**
+- Basic-menuen er Ture · Chauffører · Arkiv.
+- En "Kom godt i gang"-tjekliste i Ture: invitér chauffører, se kundernes
+  pladser, kør bestillingerne.
+
+**Test:** flow_tiers 11–13d.

@@ -6780,6 +6780,15 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
     axios.get(`${API}/logistics/profile`).then(r => setLogisticsProfile(r.data)).catch(() => setLogisticsProfile({ capabilities: {}, failed: true }));
   }, [authUser?.role, authUser?.company_id]);
   const isPremiumLogistics = !!logisticsProfile?.is_premium;
+  // 2026-10-20: Logistikfirmaets egen drift er premium (BESLUTNINGER afsnit 11):
+  // Økonomi, Tid & ressourcer, Rapportering, koordinatorroller. Super admin kan
+  // give et basic-firma enkelte moduler. Indtil profilen er hentet vises de ikke.
+  const mod = useMemo(() => {
+    const has = (k) => authUser?.role !== "logistics_admin"
+      || (!!logisticsProfile && (!!logisticsProfile.failed || !!(logisticsProfile.capabilities || {})[k]));
+    return { economy: has("economy"), time: has("time"), reports: has("reports"), team_roles: has("team_roles"),
+             loaded: authUser?.role !== "logistics_admin" || !!logisticsProfile };
+  }, [authUser?.role, logisticsProfile]);
   // Premium-firmaer arbejder med "lokationer"; partnere med genbrugspladser.
   const siteWord = isPremiumLogistics ? "lokation" : "genbrugsplads";
 
@@ -6835,6 +6844,10 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
       plads: "locations", archives: "archive", settings: "settings", team: "team" }[activeTab];
     if (need && !can[need]) setActiveTab("tours");
   }, [activeTab, can]);
+  useEffect(() => {
+    if (!mod.loaded) return;
+    if ((activeTab === "priser" && !mod.economy) || (activeTab === "statistics" && !mod.reports)) setActiveTab("tours");
+  }, [activeTab, mod]);
   const [archivesSubTab, setArchivesSubTab] = useState("pdf"); // pdf | receipts | tours - within "Arkiv" tab
   const [receiptsArchiveView, setReceiptsArchiveView] = useState("table"); // table | drivers - Fase 17 merged archive view mode
   
@@ -6890,6 +6903,9 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
   // 2026-10-18 (P1): "Planlæg ture" (split-view tildeling) er fjernet - ture
   // tildeles på Ture-siden. Planlægning viser kun Tid & ressourcer.
   const [planningView, setPlanningView] = useState("time");
+  useEffect(() => {  // uden tidsregistrering: kun "Planlæg ressourcer"
+    if (mod.loaded && !mod.time && planningView === "time") setPlanningView("resources");
+  }, [mod, planningView]);
   const [adminReportId, setAdminReportId] = useState("");
   const [adminTourFilterDriver, setAdminTourFilterDriver] = useState("");
   // Fase 7 (2026-06-17): Customer separation filter - when LA serves multiple
@@ -7802,20 +7818,20 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
           active={activeTab}
           onChange={setActiveTab}
           title={activeCompany ? activeCompany.name : "Logistik-administration"}
-          moreNote={logisticsProfile?.tier === "partner" ? "Vil I også køre egne ture og kunder i ContainerFlow - med egne lokationer, Fragt og flere stop? Spørg om ContainerFlow Premium." : ""}
+          moreNote={logisticsProfile?.tier === "partner" ? "ContainerFlow Premium: kør hele firmaet her - priser og fakturagrundlag, timer og løn, statistik, roller, egne kunder, Fragt og flere stop. Spørg os." : ""}
           tabs={[
             { id: "tours",      label: "Ture",          icon: Truck,      testid: "admin-tab-tours" },
-            can.planning     && { id: "schedule",   label: "Tid & ressourcer", icon: Calendar },
+            can.planning && (mod.time || resourcePlanningEnabled) && { id: "schedule", label: mod.time ? "Tid & ressourcer" : "Ressourcer", icon: Calendar },
             can.drivers      && { id: "drivers",    label: "Chauffører",    icon: Users },
-            can.reports      && { id: "statistics", label: "Rapportering",  icon: BarChart3,  testid: "admin-statistics-tab" },
-            can.economy_view && { id: "priser",     label: "Økonomi",       icon: DollarSign },
+            can.reports && mod.reports && { id: "statistics", label: "Rapportering",  icon: BarChart3,  testid: "admin-statistics-tab" },
+            can.economy_view && mod.economy && { id: "priser", label: "Økonomi",       icon: DollarSign },
             can.archive      && { id: "archives",   label: "Arkiv",         icon: Archive,    testid: "admin-archives-tab" },
           ].filter(Boolean)}
           moreTabs={[
             can.locations && (isPremiumLogistics
               ? { id: "plads",  label: "Lokationer",    icon: MapPin }
               : { id: "plads",  label: "Genbrugspladser", icon: Building2 }),
-            can.team     && { id: "team",       label: "Team & rettigheder", icon: Shield, testid: "admin-tab-team" },
+            can.team     && { id: "team",       label: mod.team_roles ? "Team & rettigheder" : "Team", icon: Shield, testid: "admin-tab-team" },
             can.settings && { id: "settings",   label: "Indstillinger", icon: Settings,   testid: "admin-settings-tab" },
           ].filter(Boolean)}
         />
@@ -9066,6 +9082,7 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
         {activeTab === "tours" && (
           <ToursWorkspace
             onGoDrivers={() => setActiveTab("drivers")}
+            onGoPlads={() => setActiveTab("plads")}
             drivers={activeDrivers}
             pladsList={pladsList}
             perms={can}
@@ -9086,19 +9103,19 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
           {/* View Toggle */}
           <div className="bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700 p-3 flex flex-wrap items-center gap-3">
             <h2 className="font-heading font-bold text-lg flex items-center gap-2 mr-2">
-              <Calendar className="w-5 h-5 text-red-600" /> Tid &amp; ressourcer
+              <Calendar className="w-5 h-5 text-red-600" /> {mod.time ? <>Tid &amp; ressourcer</> : "Ressourcer"}
             </h2>
             <div className="flex bg-slate-100 dark:bg-slate-700 rounded-lg p-1" role="tablist">
               {/* Fase 15.3 (2026-06-19): Ny "Tidsregistrering"-tab - vis alle
                   chaufførers Ind/Ud + Manuel-stempler for dagen som en
                   SuccessFactors-lignende timeline pr. chauffør. */}
-              <button
+              {mod.time && <button
                 onClick={() => setPlanningView("time")}
                 className={`px-3 py-1.5 rounded-md text-sm font-bold transition-colors ${planningView === "time" ? "bg-emerald-500 text-white shadow-sm" : "text-slate-600 dark:text-slate-300"}`}
                 data-testid="planning-tab-time"
               >
                 Tidsregistrering
-              </button>
+              </button>}
               {/* Fase 15.16 (2026-02-XX): "Planlæg ressourcer" - viser kun
                   Estimat-bestillinger (tour_type="estimat") så planlæggeren
                   har et samlet overblik over forventet ressourcebehov,
@@ -9135,7 +9152,7 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
           </div>
 
           {/* ============ TIDSREGISTRERING (Fase 15.3 + 15.28) ============ */}
-          {planningView === "time" && (
+          {planningView === "time" && mod.time && (
             <PlanningTimeOverview reportDate={adminReportDate} drivers={drivers} />
           )}
 
@@ -9721,7 +9738,7 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
         )}
 
         {activeTab === "settings" && can.settings && (
-          <AdminSettingsPanel onSettingsChanged={(s) => setPayrollSettings(s)} />
+          <AdminSettingsPanel onSettingsChanged={(s) => setPayrollSettings(s)} hasTime={mod.time} />
         )}
 
         {activeTab === "team" && can.team && <TeamPanel />}
@@ -11152,7 +11169,7 @@ const EditTourModal = ({ tour, onClose, onSaved, onDeleted }) => {
 // Fase 15.14 (2026-02-XX): Konfigurerbar lønperiode-startdag pr.
 // logistik-firma. Eksisterende default = 20.
 // Fase 15.15 (2026-02-XX): Udvidet med 3 cyklus-typer: monthly, biweekly, weekly.
-const AdminSettingsPanel = ({ onSettingsChanged }) => {
+const AdminSettingsPanel = ({ onSettingsChanged, hasTime = true }) => {
   const [loading, setLoading]       = useState(true);
   const [saving, setSaving]         = useState(false);
   const [companyName, setCompanyName] = useState("");
@@ -11262,6 +11279,8 @@ const AdminSettingsPanel = ({ onSettingsChanged }) => {
 
   return (
     <div className="max-w-3xl mx-auto space-y-6" data-testid="admin-settings-panel">
+      {/* 2026-10-20: Lønperiode og stempel-krav hører til Tid & ressourcer (premium). */}
+      {hasTime && (<>
       <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700">
         <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-700 flex items-center gap-2">
           <Settings className="w-5 h-5 text-red-600" />
@@ -11445,6 +11464,7 @@ const AdminSettingsPanel = ({ onSettingsChanged }) => {
           )}
         </div>
       </div>
+      </>)}
       {/* 2026-10-18: Flyttet hertil fra Økonomi › Indstillinger - det er drift,
           som chaufføren bruger uanset priser (også for logistikpartnere). */}
       <FinishSettingsCard />
@@ -11833,7 +11853,7 @@ const TourBillingBox = ({ tour }) => {
   );
 };
 
-const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onToggleComplete, currentDriverName, onChat, onRefresh, onOpenFinish, unifiedFinish = false, deviationCodes = [], canAddStop = false }) => {
+const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onToggleComplete, currentDriverName, onChat, onRefresh, onOpenFinish, unifiedFinish = false, deviationCodes = [], canAddStop = false, showBilling = true }) => {
   const [weightInput, setWeightInput] = useState("");
   const [trailerAsk, setTrailerAsk] = useState(null);
   const [trailerChoice, setTrailerChoice] = useState(null); // P5: valgt i vægtarket (null = forslaget)
@@ -12845,7 +12865,8 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
           </div>
         )}
 
-        {!isClaimedByOther && (tour.on_way || tour.completed) && <TourBillingBox tour={tour} />}
+        {/* 2026-10-20: Afregning hører til Økonomi (premium) */}
+        {showBilling && !isClaimedByOther && (tour.on_way || tour.completed) && <TourBillingBox tour={tour} />}
 
         {/* Actions */}
         <div className="grid grid-cols-2 gap-2 p-4 border-t border-slate-200 dark:border-slate-700">
@@ -13335,8 +13356,11 @@ function App() {
   const [driverCaps, setDriverCaps] = useState({});
   useEffect(() => {
     if (authUser?.role !== "driver") return;
-    axios.get(`${API}/logistics/profile`).then(r => setDriverCaps(r.data?.capabilities || {})).catch(() => {});
+    axios.get(`${API}/logistics/profile`).then(r => setDriverCaps({ ...(r.data?.capabilities || {}), _loaded: true })).catch(() => {});
   }, [authUser?.role, authUser?.company_id]);
+  // 2026-10-20: Tidsregistrering (stempling) er premium. Uden den åbner
+  // chaufførappen direkte på Ture, og "Tid"-fanen vises ikke.
+  const driverHasTime = !driverCaps._loaded || !!driverCaps.time;
   const [activeCustomer, setActiveCustomer] = useState(null); // { id, name, customer_id, city }
   const [customerSwitchOpen, setCustomerSwitchOpen] = useState(false);
 
@@ -13528,6 +13552,9 @@ function App() {
   // Fase 18.13 (2026-02-28): Mobile bottom-nav 3-tab struktur (Tid/Ture/Profil).
   // Kun mobil - md:hidden wrapper styrer dette. Desktop er urørt.
   const [activeTab, setActiveTab] = useState('tid');
+  useEffect(() => {
+    if (!driverHasTime && activeTab === 'tid') setActiveTab('ture');
+  }, [driverHasTime, activeTab]);
   // Fase 18.15 (2026-02-28): Inline-picker på Profil-tab. Værdier:
   // 'vehicle' | 'plads' | null - ingen redirect til Ture-tab.
   const [profilPicker, setProfilPicker] = useState(null);
@@ -15013,6 +15040,8 @@ function App() {
       if (stillOnWay.length) { setOnWayWarn(stillOnWay); return; }
     }
 
+    // 2026-10-20: Uden tidsregistrering (basic) er der intet at stemple ud.
+    if (!driverHasTime) { proceedToEndOfShift(); return; }
     // Fase 18.2: Tjek today's driver_time_entries FØR shift-flow startes.
     const todayWork = (timeEntries || []).filter(e =>
       !e.deleted && (e.slice_type || "work") === "work" && e.date === reportDate
@@ -15946,6 +15975,7 @@ function App() {
           getRouteInfo={getRouteInfo}
           onOptimize={handleOptimizeFor}
           optimizing={isOptimizing}
+          showWorked={driverHasTime}
           workedMin={(timeEntries || []).filter(e => e && !e.deleted && e.date === reportDate && (e.slice_type || "work") !== "pause")
             .reduce((sum, e) => sum + (e.duration_minutes || 0), 0)}
         />
@@ -16298,10 +16328,10 @@ function App() {
               data-testid="mobile-bottom-nav"
             >
               {[
-                { id: 'tid', label: 'TID', Icon: Clock },
+                driverHasTime && { id: 'tid', label: 'TID', Icon: Clock },
                 { id: 'ture', label: 'TURE', Icon: Truck },
                 { id: 'profil', label: 'PROFIL', Icon: Users },
-              ].map(({ id, label, Icon }) => {
+              ].filter(Boolean).map(({ id, label, Icon }) => {
                 const isActive = activeTab === id;
                 const isDark = activeTab === 'tid';
                 const activeColor = isDark ? '#f97316' : '#111111';
@@ -17024,6 +17054,7 @@ function App() {
             unifiedFinish={!!finishSettings.unified_finish}
             deviationCodes={finishSettings.codes || []}
             canAddStop={!!driverCaps.stops}
+            showBilling={!driverCaps._loaded || !!driverCaps.economy}
           />
         )}
 

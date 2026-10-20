@@ -376,11 +376,13 @@ HANSEN_RULES = [
          surcharge={"unit": "percent", "value": 30}),
     rule("surcharge", "Ventetid", category="waiting", surcharge={"unit": "per_hour", "value": 625}),
 ]
-for admin_slug, rules in (("ilk.admin", ILK_RULES), ("city.admin", CITY_RULES), ("hansen.admin", HANSEN_RULES)):
+# 2026-10-20: Økonomi er Premium. City Container er basic og får derfor ingen
+# prisregler (super admin kan give modulet enkeltvis; så kan CITY_RULES bruges).
+for admin_slug, rules in (("ilk.admin", ILK_RULES), ("hansen.admin", HANSEN_RULES)):
     tok = login(email(admin_slug))
     for r in rules:
         call("POST", "/pricing/rules", r, tok)
-print(f"Prisregler: {len(ILK_RULES)} for ILK, {len(CITY_RULES)} for City Container, {len(HANSEN_RULES)} for Hansen Transport")
+print(f"Prisregler: {len(ILK_RULES)} for ILK, {len(HANSEN_RULES)} for Hansen Transport (City Container er basic - ingen Økonomi)")
 
 # Summary for the person testing
 lines = ["# Lokale test-logins (kun din lokale ContainerFlow)",

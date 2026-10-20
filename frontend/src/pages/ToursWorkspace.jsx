@@ -1298,6 +1298,7 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
           {fact("Bestilt af", byUs ? `${tour.on_behalf_company_name}${tour.on_behalf_user_name ? ` (${tour.on_behalf_user_name})` : ""} for kunden` : tour.created_by_name)}
           {fact("Hvem bad om det", tour.requested_by)}
           {fact("Vægt", tour.weight ? `${tour.weight} kg` : "")}
+          {fact("Ventetid", tour.waiting_reported_min ? `${tour.waiting_reported_min} min (oplyst af chaufføren)` : "")}
         </div>
         <Registration tour={tour} />
         {(priceStatus?.status === "missing" || deviationsOf(tour, { hourly: priceStatus?.hourly }).length > 0) && (
@@ -1756,7 +1757,48 @@ function PlanBoard({ tours, drivers, canAssign, selected, setSelected, onAssign,
 
 // ─────────────────────────── Arbejdsfladen ───────────────────────────
 
-export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord = "Lokation", perms = {}, profile = null, onGoDrivers }) {
+/** 2026-10-20: "Kom godt i gang" - vises indtil firmaet har chauffører og
+ *  kunders pladser (eller den skjules). Kort og konkret: det er det eneste et
+ *  nyt logistikfirma skal gøre, før kundens bestillinger kan køres. */
+function GettingStarted({ drivers, pladsList, profile, canOrder, onGoDrivers, onGoPlads, onOrder }) {
+  const key = `cf_getting_started_hidden_${profile?.company_id || ""}`;
+  const [hidden, setHidden] = useState(() => { try { return localStorage.getItem(key) === "1"; } catch (_) { return false; } });
+  const hasDrivers = drivers.length > 0;
+  const hasPladser = pladsList.some(p => !p.own_location);
+  if (hidden || profile?.tier !== "partner" || (hasDrivers && hasPladser)) return null;
+  const hide = () => { try { localStorage.setItem(key, "1"); } catch (_) { /* ignore */ } setHidden(true); };
+  const step = (done, n, title, text, action) => (
+    <li className="flex items-start gap-3">
+      <span className={`w-7 h-7 shrink-0 rounded-full flex items-center justify-center text-xs font-bold ${done ? "bg-emerald-600 text-white" : "bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-200"}`}>{done ? <Check className="w-4 h-4" /> : n}</span>
+      <div className="min-w-0 flex-1">
+        <div className={`text-sm font-semibold ${done ? "text-slate-400 line-through" : "text-slate-900 dark:text-white"}`}>{title}</div>
+        <div className="text-xs text-slate-500 dark:text-slate-400">{text}</div>
+      </div>
+      {!done && action}
+    </li>
+  );
+  return (
+    <section className={`${card} p-4 sm:p-5`} data-testid="getting-started">
+      <div className="flex items-start justify-between gap-3 mb-3">
+        <div>
+          <h3 className="font-bold text-slate-900 dark:text-white">Kom godt i gang</h3>
+          <p className="text-xs text-slate-500 dark:text-slate-400">Tre ting, så kan I køre jeres kunders bestillinger i ContainerFlow.</p>
+        </div>
+        <button onClick={hide} className="text-xs font-semibold text-slate-500 underline" data-testid="getting-started-hide">Skjul</button>
+      </div>
+      <ol className="space-y-3">
+        {step(hasDrivers, 1, "Invitér jeres chauffører", "De får en mail og logger ind i chaufførappen på telefonen.",
+          onGoDrivers && <button className={btnGhost} onClick={onGoDrivers}><Users className="w-4 h-4" /> Chauffører</button>)}
+        {step(hasPladser, 2, "Se jeres kunders genbrugspladser", "Pladserne kommer, når en kunde har tilknyttet jer som logistikpartner.",
+          onGoPlads && <button className={btnGhost} onClick={onGoPlads}><Building2 className="w-4 h-4" /> Genbrugspladser</button>)}
+        {step(false, 3, "Kør bestillingerne", "Kundernes bestillinger dukker op her. Giv dem til en chauffør under Planlæg. Ringer kunden, bruger I \"Bestil for kunde\".",
+          canOrder && hasPladser && <button className={btnGhost} onClick={onOrder}><Plus className="w-4 h-4" /> Bestil for kunde</button>)}
+      </ol>
+    </section>
+  );
+}
+
+export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord = "Lokation", perms = {}, profile = null, onGoDrivers, onGoPlads }) {
   // 2026-10-17: Koordinator-rettigheder - mangler en nøgle, er den tilladt.
   const can = useCallback((k) => perms[k] !== false, [perms]);
   const canSelect = can("tours_assign") || can("tours_edit") || can("tours_delete");
@@ -1876,10 +1918,10 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
   // Prisstatus kræver økonomi-adgang - koordinatorer uden den ser ingen chip.
   const priceIdsKey = (tours || []).map(t => `${t.id}:${t.completed ? 1 : 0}:${t.not_completed ? 1 : 0}`).join(",");
   useEffect(() => {
-    if (!can("economy_view") || !tours || !tours.length) { setPriceStatus({}); return; }
+    if (!can("economy_view") || !caps.economy || !tours || !tours.length) { setPriceStatus({}); return; }
     const ids = tours.map(t => t.id).slice(0, 500).join(",");
     axios.get(`${API}/pricing/status`, { params: { ids } }).then(r => setPriceStatus(r.data || {})).catch(() => setPriceStatus({}));
-  }, [priceIdsKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [priceIdsKey, caps.economy]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const source = useMemo(() => (showOverdue ? overdue : (tours || [])), [showOverdue, overdue, tours]);
   const ownName = "Egne ture";
@@ -2160,6 +2202,12 @@ export default function ToursWorkspace({ drivers = [], pladsList = [], siteWord 
               <span className={dayOverview.noDriver ? "text-amber-700 dark:text-amber-300" : ""}>· <b className="tabular-nums">{dayOverview.noDriver}</b> uden chauffør</span>
             </div>
           )}
+
+          {/* 2026-10-20: Kom godt i gang - et logistikfirma, som en kunde lige har
+              inviteret, skal kunne gå i gang uden at lede efter noget. */}
+          <GettingStarted drivers={drivers} pladsList={pladsList} profile={profile} canOrder={can("tours_edit")}
+            onGoDrivers={perms.drivers !== false ? onGoDrivers : null} onGoPlads={perms.locations !== false ? onGoPlads : null}
+            onOrder={() => setOrderForm({ mode: "create", initial: { plads: "", date } })} />
 
           {/* Opmærksomhed */}
           {(hasterOpen.length > 0 || overdue.length > 0 || blocked.length > 0 || unreadTotal > 0 || missingPrice.length > 0 || withDeviation.length > 0) && (

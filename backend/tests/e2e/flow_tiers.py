@@ -3,6 +3,7 @@ Kernen (begge): alt der gavner genbrugsplads-kunden - bestillinger, planlægning
 chauffører, tidsregistrering og Økonomi for kundernes ture. Premium: egne
 lokationer, egne ture og kunder, Fragt, hængere med indhold, stop, Gentag og
 krav ved afslutning. Serveren håndhæver det - ikke kun skærmbilledet."""
+import os
 import subprocess
 import sys
 
@@ -81,20 +82,52 @@ def run():
         ok(call("GET", "/logistics/customers", t=ca) == [], "9 partner: egne kunder svarer tom liste")
         r = _session.post(f"{BASE}/logistics/customers", json={"name": "E2E Ejen kunde"}, headers={"Authorization": f"Bearer {ca}"}, timeout=20)
         ok(r.status_code == 403 and r.json().get("premium_required") == "own_customers", "10 ...og kan ikke oprettes (Kræver Premium)")
-        opts = call("GET", "/pricing/options", t=ca)
+        # --- 2026-10-20: Logistikfirmaets egen drift er Premium -------------------------
         connected = {x["id"] for x in prof["connected_customers"]}
+        ok(call("GET", "/pricing/options", t=ca) == [], "11 basic: Økonomi er Premium (prisaftaler svarer tom)")
+        r = _session.post(f"{BASE}/pricing/bundles", json={"name": "E2E HF partnerpris", "conditions": {"customer_ids": [hf]},
+                                                         "base": {"pricing": {"model": "fixed", "amount": "555"}}, "surcharges": []},
+                          headers={"Authorization": f"Bearer {ca}"}, timeout=20)
+        ok(r.status_code == 403 and r.json().get("premium_required") == "economy", "12 ...og kan ikke oprettes (Kræver Premium)")
+        cd = login(CITY_DRIVER)
+        r = _session.post(f"{BASE}/driver/time-entries/punch", json={"date": today(), "time": "07:00", "type": "ind"},
+                          headers={"Authorization": f"Bearer {cd}"}, timeout=20)
+        ok(r.status_code == 403 and r.json().get("premium_required") == "time", "12a basic: stempling (Tid & ressourcer) er Premium")
+        ok(call("GET", "/admin/statistics", t=ca) == [], "12b basic: Rapportering er Premium")
+        inv = call("POST", "/logistics/team", {"name": "E2E Kollega", "email": "e2e-kollega@example.com", "permissions": {"tours_edit": True},
+                                               "customer_scope": [hf]}, t=ca)
+        kol = db.users.find_one({"email": "e2e-kollega@example.com"}, {"_id": 0, "permissions": 1, "customer_scope": 1})
+        ok(inv and kol and all(kol["permissions"].values()) and kol["customer_scope"] == [] and call("GET", "/logistics/team", t=ca)["roles"] is False,
+           "12c basic: en inviteret kollega får fuld adgang - roller pr. person er Premium")
+
+        # Ventetid: står på turen (fakturagrundlag) - ingen godkendelse uden Økonomi
+        call("POST", "/driver/active-customer", {"customer_id": hf}, t=cd)
+        cd_id = db.users.find_one({"email": CITY_DRIVER}, {"_id": 0, "id": 1})["id"]
+        call("PUT", f"/tours/{tid}", {"on_way": True, "on_way_time": "08:00", "claimed_by": "E2E Partner Chauffør", "claimed_by_id": cd_id}, t=cd)
+        fin = call("POST", f"/tours/{tid}/finish", {"op_id": new_id(), "weight": 900, "waiting_min": 15}, t=cd)
+        tt = db.tours.find_one({"id": tid}, {"_id": 0, "waiting_reported_min": 1, "completed": 1})
+        ok(fin.get("waiting") == "noted" and tt["completed"] and tt["waiting_reported_min"] == 15
+           and not db.tour_change_requests.find_one({"tour_id": tid}),
+           "12d basic: chaufførens ventetid står på turen (til fakturagrundlaget) - ingen godkendelse uden Økonomi")
+
+        # Super admin giver Økonomi enkeltvis (overgang / prøve)
+        sa = login(os.environ["SUPER_ADMIN_EMAIL"])
+        call("PUT", f"/superadmin/companies/{city}/premium-modules", {"modules": ["economy"]}, t=sa)
+        prof2 = call("GET", "/logistics/profile", t=ca)
+        ok(prof2["capabilities"]["economy"] and not prof2["capabilities"]["time"] and prof2["premium_modules"] == ["economy"],
+           "13 super admin kan give et basic-firma Økonomi enkeltvis")
+        opts = call("GET", "/pricing/options", t=ca)
         ok(opts["customers"] and {x["id"] for x in opts["customers"]} <= connected and not any(x.get("own") for x in opts["customers"]),
-           "11 partner har Økonomi for sine tilknyttede genbrugsplads-kunder - ingen egne kunder")
+           "13a ...så har det Økonomi for sine genbrugsplads-kunder - ingen egne kunder")
         st = status_of("POST", "/pricing/bundles", {"name": "E2E egen", "conditions": {"customer_ids": ["firma:e2e"]},
                                                      "base": {"pricing": {"model": "fixed", "amount": "100"}}, "surcharges": []}, t=ca)
-        ok(st == 403, "12 partner kan ikke lave priser for egne kunder")
+        ok(st == 403, "13b ...men kan ikke lave priser for egne kunder")
         b = call("POST", "/pricing/bundles", {"name": "E2E HF partnerpris", "conditions": {"customer_ids": [hf]},
                                              "base": {"pricing": {"model": "fixed", "amount": "555"}}, "surcharges": [], "effective": "all"}, t=ca)
         c.bundles.append(b["bundle_id"])
-        ok(price_of(ca, tid)["price"].get("total") == 555, "13 ...men kan lave en prisaftale for sin genbrugsplads-kunde, og den gælder turen")
-
+        ok(price_of(ca, tid)["price"].get("total") == 555, "13c ...og prisaftalen for genbrugsplads-kunden gælder turen")
         ok("stop" not in opts["categories"] and "per_unit" not in opts["models"] and "levering" not in opts["task_types"]
-           and "normal" in opts["task_types"], "13a partner: ingen prisvalg der aldrig kan ramme en partnertur (stop, pr. enhed, gods)")
+           and "normal" in opts["task_types"], "13d basic: ingen prisvalg der aldrig kan ramme en partnertur (stop, pr. enhed, gods)")
 
         # --- Pladser og indstillinger -------------------------------------------------------
         ok(not any(p.get("company_id") == city for p in call("GET", "/plads", t=ca)), "14 partner ser ingen egne lokationer")
@@ -124,7 +157,7 @@ def run():
     finally:
         db.price_rules.delete_many({"company_id": city})
         db.price_settings.delete_many({"company_id": city})
-        db.users.delete_many({"email": {"$in": [CITY_ADMIN, CITY_DRIVER]}})
+        db.users.delete_many({"email": {"$in": [CITY_ADMIN, CITY_DRIVER, "e2e-kollega@example.com"]}})
         db.companies.delete_one({"id": city})
         c.run()
 

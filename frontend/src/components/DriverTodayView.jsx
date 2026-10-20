@@ -60,7 +60,7 @@ function Sheet({ title, onClose, children }) {
 export default function DriverTodayView({
   tours = [], myId = "", myName = "", reportDate, setReportDate, onPrevDay, onNextDay,
   customers = [], activeCustomer, onSwitchCustomer, unread = {}, messagesUnread = 0, onMessages,
-  onStart, onFinish, onOpen, onChat, getRouteInfo = () => null, onOptimize, optimizing = false, workedMin = 0, loading = false,
+  onStart, onFinish, onOpen, onChat, getRouteInfo = () => null, onOptimize, optimizing = false, workedMin = 0, loading = false, showWorked = true,
 }) {
   const [tab, setTab] = useState("mine");
   const [q, setQ] = useState("");
@@ -185,8 +185,8 @@ export default function DriverTodayView({
             <span className="font-extrabold text-slate-900">{done.length}/{totalMine} kørt</span>
             <span className="text-slate-300">·</span>
             <span className="font-semibold text-emerald-700">{fmtKg(kg)}</span>
-            <span className="text-slate-300">·</span>
-            <span className="font-semibold text-slate-600">{worked} t</span>
+            {showWorked && <span className="text-slate-300">·</span>}
+            {showWorked && <span className="font-semibold text-slate-600">{worked} t</span>}
             {loading && <Loader2 className="w-4 h-4 animate-spin text-slate-400 ml-auto" />}
           </div>
           <div className="mt-2 h-1.5 rounded-full bg-slate-100 overflow-hidden"><div className="h-full bg-emerald-500 transition-all" style={{ width: `${pct}%` }} /></div>
