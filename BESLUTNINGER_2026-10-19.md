@@ -519,3 +519,78 @@ logistikfirmaer uden friktion?
 - `PRISBEREGNING.md` er en komplet forklaring med 151 eksempler. Eksemplerne er regnet af prismotoren og kontrolleret af `scripts/prisberegning_eksempler.py`.
 - **Fejl fundet:** start og slut i samme minut blev regnet som 24 timer på timepris (over midnat-reglen). Nu giver det "Mangler tid" med beskeden "Start og slut er samme minut - ret tiden".
 - **Test:** flow_pricing 21-22.
+
+## 13. Chaufførsiden: kompakt liste, "Tag turen" og hængerkørsel (2026-10-20)
+
+**Brugerens ønske:**
+- Mindre ture (ikke store kort).
+- "Tag og start" bliver "Tag turen" (læg i Mine), og man kan stadig starte med det samme.
+- Hænger vs. solo besluttes, når turen startes.
+- En solotur kan laves om til en hængerkørsel.
+- Knapperne "Uden/Med hænger" fjernes.
+- Priser kan sættes, så containeren på hængeren koster mindre.
+
+### 13a. Liste og knapper
+
+- **Kompakte rækker i grupperede bokse** (ikke kort):
+  - linje 1: haster, tidsrum, på vej, Bil/Hænger;
+  - linje 2: indhold · opgave · størrelse · container · km;
+  - hent og aflever på hver sin linje med en lille "Kør".
+- **Fjernet fra listen:** kundens note (gul), kunde, telefon og "Tildelt dig". Kunde og note står nu inde i turen; telefonen var der i forvejen.
+- **Grupperet pr. plads** i Mine og Ledige. En hængerkørsel står som én blok, og samme hent/aflever skrives kun én gang.
+- **"Tag turen"** lægger en ledig tur i Mine. En smal ▶-knap ved siden af tager og starter med det samme, med samme solo/hænger-flow.
+  - Fravalgt: et toast "Start nu?" efter "Tag turen" forsvinder for hurtigt på telefonen.
+  - Fravalgt: et langt tryk kan ingen finde.
+  - Fravalgt: kun i turens vindue koster et ekstra tryk.
+- **"Læg tilbage i Ledige"** findes inde i en tur, man selv har taget (ikke tildelt af planlæggeren).
+
+### 13b. Hængerkørsel
+
+- **Uden hænger** (valgt ved login) starter "Start" turen med det samme.
+- **Med hænger** viser "Start" ture fra samme plads samme dag og forsinkede ture.
+  - Samme materiale står først, egne før ledige, haster før andre.
+  - Valget er frivilligt og begrænset af hængerens plads.
+  - Er der ingen at vælge imellem, starter turen bare.
+- **Serverens regel:** alle chaufførens containerture, der er på vej samtidig, er én kørsel. Den først startede er "på bilen".
+  - Det samme gælder fra ældre app-versioner og ved "Tilføj tur på hængeren" fra en tur, der kører.
+  - Starter man en tur, mens en anden kører, siger appen det ("Du kører allerede … Er den færdig, så afslut den først"). Ellers bliver en glemt "Afslut" til en billig hængerpris.
+- **Tag af hængeren:** turen går tilbage til Mine. Er der én tur tilbage, bliver den solo.
+- **Ekstra trin efter 10 gennemgange af 9A:**
+  - fortryd, nulstilling, sletning og annullering;
+  - afsluttede ture beholder rollen;
+  - fakturerede ture røres aldrig;
+  - kapaciteten tjekkes også for ture, man allerede har taget. Før blev den kun tjekket, når turen blev taget og startet i ét.
+- **Data:** turen har felterne `run_id`, `run_role` (solo/truck/trailer), `run_seq` og `run_size`.
+- **Fravalgt:** at udlede kørslen af tidsoverlap alene.
+  - Det ville ændre prisen på gamle ture.
+  - En glemt "Afslut" ville give hængerpris.
+  - Planlæggeren kunne ikke se, hvilke ture der kørte sammen.
+- **Varekørsel og løs afhentning** indgår ikke. Deres hængere hører til selve turen og oplyses ved afslutning som før. Det giver ikke mening at koble to varejobs på én hænger; flere afleveringer er stop på én tur.
+- **Planlæggeren** lægger ikke hængerkørsler på forhånd. Chaufføren afgør det ud fra forholdene på pladsen. Planlæggeren ser kørslen på turen ("Hængerkørsel · på hængeren") og i Rapport.
+
+### 13c. Hænger og pris
+
+**"Med hænger" på en containertur = del af en hængerkørsel.** Det var ikke klart for brugeren, hvad der var mest logisk. Valget er dette:
+- En solotur med en tom hænger koster det samme som uden hænger. Kunden har ikke fået noget ekstra, og ellers ville prisen afhænge af, hvad chaufføren tilfældigvis valgte ved login.
+- Før blev en solotur automatisk "med hænger" (og fik hængertillæg) bare fordi der var valgt hænger ved login.
+- Ældre ture og varekørsel prissættes uændret.
+
+**Prisforbedringer:**
+1. Ny betingelse "Kørsel" (solo / på bilen / på hængeren, 2 point) i motoren.
+2. Prisaftalen har afsnittet "Hængerkørsel": container på hængeren og på bilen, som grundprisen, fast beløb eller % af grundprisen. Gemmes som regler som forgæves-prisen. Fravalgt: et negativt "rabat"-tillæg (motoren og fakturaen skal ikke have minusbeløb) og en procent-faktor i motoren (for meget ny logik).
+3. "Med hænger" udledes af kørslen, så falske hængertillæg ikke opstår.
+4. Bekræftelsen "Hænger: automatisk, ikke bekræftet" og spørgsmålet ved afslutning er væk for containerture.
+5. Admin kan rette kørslen pr. tur i Økonomi (med begrundelse og historik).
+6. "Prøv prisen" kan vælge kørsel.
+7. Rapport og CSV viser kørsel og hvilke ture der kørte sammen.
+8. Advarsel på turen, når to grundpriser passer lige godt ("den senest rettede bruges").
+9. Kr/t-tillæg viser "45 min" (ikke "45.0 min").
+10. Chaufførens rettelse kan ikke længere sætte hænger på en containertur (kørslen afgør, admin retter). Varekørsel er uændret.
+11. Hjælpetekster og PRISBEREGNING.md er opdateret: 163 kontrollerede eksempler, med nye faldgruber (mere specifik aftale uden hængerpris; timepris + hængerpris).
+
+**Fravalgt:** flere "Andet"-gebyrer pr. tur. Det ville ændre prisen på eksisterende ture uden versionering.
+
+**Test:**
+- flow_run 1-33 (nyt);
+- flow_b2b 5-13 (gammel automatisk hænger erstattet);
+- alle andre grupper uændrede.

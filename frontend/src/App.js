@@ -31,7 +31,8 @@ import { DriverChatSheet, CallPlannerButton } from "@/components/DriverTourCard"
 import DriverTodayView from "@/components/DriverTodayView";
 import FinishSheet, { effectiveCapture } from "@/components/FinishSheet";
 import DriverStopList from "@/components/DriverStopList";
-import { initTourOpQueue, enqueueOp, isNetworkError, subscribeOps } from "@/lib/tourOpQueue";
+import { initTourOpQueue, enqueueOp, isNetworkError, subscribeOps, newOpId } from "@/lib/tourOpQueue";
+import DriverRunSheet from "@/components/DriverRunSheet";
 import { routeOf, navUrl } from "@/lib/tourHelpers";
 import { installPremiumInterceptor, subscribePremiumRefresh } from "@/lib/premium";
 import { AuthedImg, downloadAuthed, fetchBlobUrl, openAuthed } from "@/lib/authedFile";
@@ -11766,18 +11767,14 @@ const TourBillingBox = ({ tour }) => {
   if (!info) return null;
 
   const trailer = info.used_trailer === true;
-  const setTrailer = async (v) => {
-    try {
-      await axios.put(`${API}/driver/tours/${tour.id}/trailer`, { used_trailer: v });
-      setInfo(i => ({ ...i, used_trailer: v }));
-    } catch (e) { toast.error(formatApiError(e)); }
-  };
+  // 2026-10-20: På en containertur afgør hængerkørslen hængeren - ikke en rettelse.
+  const runTour = !!info.run_role;
   const submit = async () => {
     if (!form.comment.trim()) { toast.error("Skriv hvad der skal rettes og hvorfor"); return; }
     setBusy(true);
     try {
       await axios.post(`${API}/driver/tours/${tour.id}/change-request`, {
-        start_time: form.start_time, end_time: form.end_time, trailer_count: Number(form.trailer_count),
+        start_time: form.start_time, end_time: form.end_time, ...(runTour ? {} : { trailer_count: Number(form.trailer_count) }),
         waiting_min: form.waiting_min === "" ? undefined : Number(form.waiting_min), comment: form.comment,
       });
       toast.success("Sendt til godkendelse hos din logistik admin");
@@ -11798,17 +11795,8 @@ const TourBillingBox = ({ tour }) => {
           <Clock className="w-3.5 h-3.5 shrink-0" /> <span><b>Afregning:</b> {modelText}</span>
         </div>
       )}
-      {tour.on_way && !tour.completed && !(Object.keys(tour.capture || {}).length && tour.tour_type !== "loes_afhentning") && (
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-xs font-semibold text-slate-600 dark:text-slate-300">Bruger du hænger på denne tur?<span className="block font-normal text-[11px] text-slate-500">Bruges til afregningen (hængertillæg).</span></span>
-          <div className="inline-flex p-0.5 rounded-lg bg-slate-200 dark:bg-slate-900" data-testid="tour-trailer-toggle">
-            {[[false, "Uden"], [true, "Med hænger"]].map(([v, l]) => (
-              <button key={l} type="button" onClick={() => setTrailer(v)}
-                className={`px-3 py-1.5 rounded-md text-xs font-bold ${trailer === v ? "bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-sm" : "text-slate-500"}`}>{l}</button>
-            ))}
-          </div>
-        </div>
-      )}
+      {/* 2026-10-20: "Uden / Med hænger" er fjernet. På containerture afgør
+          hængerkørslen det; på varekørsel oplyses hængere ved afslutning. */}
       {tour.completed && (
         <>
           {last && (
@@ -11819,7 +11807,7 @@ const TourBillingBox = ({ tour }) => {
           {!form && !info.invoiced && (
             <button type="button" onClick={() => setForm({ start_time: tour.on_way_time || "", end_time: tour.time || "", trailer_count: String(info.trailer_count ?? (trailer ? 1 : 0)), waiting_min: "", comment: "" })}
               className="w-full px-3 py-2 rounded-lg text-sm font-semibold bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 flex items-center justify-center gap-2" data-testid="tour-change-request-btn">
-              <Edit2 className="w-4 h-4" /> Ret tid, hænger eller ventetid (godkendes)
+              <Edit2 className="w-4 h-4" /> {runTour ? "Ret tid eller ventetid (godkendes)" : "Ret tid, hænger eller ventetid (godkendes)"}
             </button>
           )}
           {form && (
@@ -11831,10 +11819,10 @@ const TourBillingBox = ({ tour }) => {
                   <input type="time" value={form.end_time} onChange={e => setForm({ ...form, end_time: e.target.value })} className="mt-1 w-full px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 text-sm" /></label>
                 <label className="text-[11px] font-bold uppercase text-slate-500">Ventetid (min)
                   <input type="number" min="0" inputMode="numeric" value={form.waiting_min} onChange={e => setForm({ ...form, waiting_min: e.target.value })} placeholder="0" className="mt-1 w-full px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 text-sm" /></label>
-                <label className="text-[11px] font-bold uppercase text-slate-500">Hængere
+                {!runTour && <label className="text-[11px] font-bold uppercase text-slate-500">Hængere
                   <select value={form.trailer_count} onChange={e => setForm({ ...form, trailer_count: e.target.value })} className="mt-1 w-full px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 text-sm" data-testid="change-request-trailers">
                     {[0, 1, 2, 3, 4].map(n => <option key={n} value={String(n)}>{n === 0 ? "Uden hænger" : `${n} hænger${n === 1 ? "" : "e"}`}</option>)}
-                  </select></label>
+                  </select></label>}
               </div>
               <textarea rows={2} value={form.comment} onChange={e => setForm({ ...form, comment: e.target.value })} placeholder="Hvad skal rettes og hvorfor?" className="w-full px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 text-sm" />
               <div className="flex gap-2">
@@ -11849,7 +11837,7 @@ const TourBillingBox = ({ tour }) => {
   );
 };
 
-const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onToggleComplete, currentDriverName, onChat, onRefresh, onOpenFinish, unifiedFinish = false, deviationCodes = [], canAddStop = false, showBilling = true }) => {
+const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onToggleComplete, currentDriverName, onChat, onRefresh, onOpenFinish, unifiedFinish = false, deviationCodes = [], canAddStop = false, showBilling = true, run = null }) => {
   const [weightInput, setWeightInput] = useState("");
   const [trailerAsk, setTrailerAsk] = useState(null);
   const [trailerChoice, setTrailerChoice] = useState(null); // P5: valgt i vægtarket (null = forslaget)
@@ -12526,6 +12514,38 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
               <div className="text-xs text-slate-500 mt-0.5">Kør ikke turen. Har du allerede kørt den, så skriv til planlæggeren.</div>
             </div>
           )}
+          {/* 2026-10-20: Hængerkørsel - hvilke containere kører sammen, og
+              tilføj/tag en tur af hængeren. */}
+          {run && !isClaimedByOther && tour.on_way && !tour.completed && (run.members.length > 1 || run.canAdd) && (
+            <div className="rounded-xl border border-violet-200 bg-violet-50/60 p-3 space-y-2" data-testid="mobile-tour-panel-run">
+              <div className="text-xs font-bold uppercase tracking-wide text-violet-800 flex items-center gap-1.5">
+                <Truck className="w-3.5 h-3.5" /> {run.members.length > 1 ? `Hængerkørsel · ${run.members.length} containere` : "Kører solo"}
+              </div>
+              {run.members.length > 1 && (
+                <div className="space-y-1">
+                  {[...run.members].sort((a, b) => (a.run_role === "truck" ? -1 : b.run_role === "truck" ? 1 : (a.run_seq || 0) - (b.run_seq || 0))).map(m => (
+                    <div key={m.id} className="flex items-center gap-2 text-[13px]">
+                      <span className={`px-1.5 py-0.5 rounded-md text-[10px] font-bold ${m.run_role === "truck" ? "bg-slate-900 text-white" : "bg-violet-600 text-white"}`}>{m.run_role === "truck" ? "Bil" : "Hænger"}</span>
+                      <span className={`truncate ${m.id === tour.id ? "font-bold text-slate-900" : "text-slate-700"}`}>{m.fraction || "Tur"}{m.container ? ` · #${m.container}` : ""}{m.completed ? " · færdig" : ""}</span>
+                      {m.id === tour.id && <span className="text-[11px] text-slate-500 shrink-0">denne tur</span>}
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="flex flex-wrap gap-2">
+                {run.canAdd && (
+                  <button type="button" onClick={run.onAdd} data-testid="mobile-tour-panel-run-add"
+                    className="flex-1 min-h-[44px] px-3 rounded-lg bg-violet-600 text-white text-sm font-bold">+ Tilføj tur på hængeren</button>
+                )}
+                {run.members.length > 1 && (
+                  <button type="button" onClick={run.onLeave} data-testid="mobile-tour-panel-run-leave"
+                    className="flex-1 min-h-[44px] px-3 rounded-lg border border-violet-300 bg-white text-violet-800 text-sm font-bold">
+                    {tour.run_role === "trailer" ? "Tag af hængeren" : "Tag ud af kørslen"}
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
           {tourStops.length === 0 && routeLegs.length > 0 && (
             <div className="space-y-2.5" data-testid="mobile-tour-panel-route">
               {routeLegs.map((l, i) => {
@@ -12559,6 +12579,19 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
               <div className="text-slate-800 dark:text-slate-200">
                 {tour.open_from || "-"} – {tour.open_to || "-"}
               </div>
+            </div>
+          )}
+          {/* 2026-10-20: Kunde og note står her (ikke længere på listen). */}
+          {(tour.customer_name || tour.private_company) && (
+            <div data-testid="mobile-tour-panel-customer">
+              <div className="text-xs uppercase tracking-wide text-slate-500 mb-0.5">Kunde</div>
+              <div className="text-slate-800 dark:text-slate-200">{tour.customer_name || tour.private_company}</div>
+            </div>
+          )}
+          {tour.remark && (
+            <div data-testid="mobile-tour-panel-note">
+              <div className="text-xs uppercase tracking-wide text-slate-500 mb-0.5">Note</div>
+              <div className="text-amber-900 bg-amber-50 rounded-lg px-2.5 py-2 whitespace-pre-wrap">{tour.remark}</div>
             </div>
           )}
           {tour.weight != null && tour.weight !== "" && (tour.tour_type || "normal") === "normal" && (
@@ -13064,6 +13097,12 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
               <Users className="w-3 h-3 inline mr-1" />
               Tildelt af {tour.assigned_by_name || "administrator"} - kontakt din logistikadmin for at frigøre helt.
             </div>
+          )}
+          {run?.canGiveBack && (
+            <button onClick={run.onGiveBack} data-testid="mobile-tour-panel-give-back"
+              className="col-span-2 px-3 py-2.5 rounded-lg font-semibold text-sm bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200 flex items-center justify-center gap-2">
+              <RotateCcw className="w-4 h-4" /> Læg tilbage i Ledige
+            </button>
           )}
           {isClaimedByOther && (
             <div className="col-span-2 px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 text-center text-sm text-slate-600 dark:text-slate-300" data-testid="mobile-tour-panel-locked-notice">
@@ -14627,6 +14666,103 @@ function App() {
     }
   };
 
+  // 2026-10-20: Hængerkørsel. Containerture (ikke løs afhentning eller
+  // varekørsel) kan køres flere sammen med hænger: én på bilen, resten på
+  // hængeren. Uden hænger startes turen bare. Serveren håndhæver kapaciteten
+  // og samler kørslen; her vælges hvilke ture der kommer med.
+  const [runSheet, setRunSheet] = useState(null);
+  const myDriverId = selectedDriver?.id || authUser?.id || "";
+  const isRunTour = (t) => !!t && (t.tour_kind || "container") !== "goods"
+    && !["loes_afhentning", "estimat"].includes(t.tour_type || "normal") && !t.is_pause;
+  const trailerNow = (trailersList || []).find(t => t.id === activeTrailerId);
+  const maxOnWay = trailerNow ? (trailerNow.container_capacity ?? 1) + 1 : 1;
+  const myActiveTours = () => (tours || []).filter(t => t.on_way && !t.completed && !t.not_completed && !t.is_pause
+    && myDriverId && t.claimed_by_id === myDriverId);
+  const runCandidates = (anchor, exclude = []) => {
+    const day = (anchor.date || "").slice(0, 10);
+    const today = getLocalDateStr();
+    const mineT = (t) => t.claimed_by_id === myDriverId || (t.driver_id || "") === myDriverId;
+    return (tours || []).filter(t => t.id !== anchor.id && !exclude.includes(t.id) && isRunTour(t)
+      && (t.plads || "") === (anchor.plads || "") && !t.completed && !t.on_way && !t.cancelled && !t.not_completed
+      && !t._is_other_driver && !(t.claimed_by_id && t.claimed_by_id !== myDriverId)
+      && (mineT(t) || (!t.claimed_by && !(t.driver_id || "").trim()))
+      && ((t.date || "").slice(0, 10) === day || (t.date || "").slice(0, 10) < today))
+      .map(t => ({ ...t, _mine: mineT(t) }));
+  };
+  const sendStart = async (ids) => {
+    const op_id = newOpId();
+    try {
+      const { data } = await axios.post(`${API}/driver/tours/start`, { tour_ids: ids, op_id }, { timeout: 30000 });
+      const run = (data.tours || []).some(x => x.run_role && x.run_role !== "solo");
+      if (data.failed?.length) toast.error(`${data.failed.length === 1 ? "En tur" : `${data.failed.length} ture`} kom ikke med: ${data.failed[0].error}`);
+      toast.success(run ? "Hængerkørsel - god tur!" : `${driverName || "Chauffør"} er på vej!`);
+    } catch (e) {
+      if (!isNetworkError(e)) { toast.error(formatApiError(e)); fetchTours(); return; }
+      enqueueOp({ kind: "start", tour_ids: ids, op_id });
+      const now = getCurrentTime();
+      setTours(prev => prev.map(t => (ids.includes(t.id) ? { ...t, on_way: true, on_way_time: t.on_way_time || now, claimed_by: driverName, claimed_by_id: myDriverId, queued: true } : t)));
+      toast.message("Ingen forbindelse - starten sendes når der er net");
+      return;
+    }
+    fetchTours();
+  };
+  const startFlow = (tour) => {
+    if (!tour || tour.completed) return;
+    if (tour.claimed_by_id && tour.claimed_by_id !== myDriverId) { toast.error(`Denne tur er taget af ${tour.claimed_by}`); return; }
+    const act = myActiveTours();
+    const already = act.some(a => a.id === tour.id);
+    if (!already && act.length >= maxOnWay) {
+      toast.error(trailerNow ? `Hængeren er fuld (${maxOnWay} ture). Afslut en tur først.`
+        : "Du har allerede en tur i gang. Vælg en hænger under Profil for at køre flere containere sammen.", { duration: 5000 });
+      return;
+    }
+    if (!isRunTour(tour) || !trailerNow) { if (!already) sendStart([tour.id]); return; }
+    const running = act.filter(a => isRunTour(a) && a.id !== tour.id);
+    const slots = Math.max(0, maxOnWay - act.length - (already ? 0 : 1));
+    const cands = slots > 0 ? runCandidates(tour, act.map(a => a.id)) : [];
+    if (already) {
+      if (!cands.length) { toast.message(slots ? `Ingen andre ture på ${tour.plads || "pladsen"} at lægge på hængeren` : "Hængeren er fuld"); return; }
+      const members = act.filter(isRunTour).sort((a, b) => String(a.on_way_at || "").localeCompare(String(b.on_way_at || "")));
+      setRunSheet({ anchor: tour, active: members, candidates: cands, slots, addMode: true });
+      return;
+    }
+    if (!running.length && !cands.length) { sendStart([tour.id]); return; }
+    setRunSheet({ anchor: tour, active: running.sort((a, b) => String(a.on_way_at || "").localeCompare(String(b.on_way_at || ""))), candidates: cands, slots, addMode: false });
+  };
+  // "Tag turen": ledig -> Mine ture (ikke startet).
+  const takeTour = async (tour) => {
+    try {
+      await axios.post(`${API}/driver/tours/${tour.id}/take`, {}, { timeout: 30000 });
+      toast.success("Lagt i dine ture");
+    } catch (e) {
+      if (!isNetworkError(e)) { toast.error(formatApiError(e)); fetchTours(); return; }
+      enqueueOp({ kind: "take", tour_id: tour.id, op_id: newOpId() });
+      setTours(prev => prev.map(t => (t.id === tour.id ? { ...t, claimed_by: driverName, claimed_by_id: myDriverId, queued: true } : t)));
+      toast.message("Ingen forbindelse - sendes når der er net");
+      return;
+    }
+    fetchTours();
+  };
+  // Tag en tur af hængeren: tilbage i dine ture (ikke startet). Serveren
+  // gør resten af kørslen færdig (den sidste bliver solo).
+  const leaveRun = async (tour) => {
+    if (!window.confirm("Tag turen af hængeren? Den lægges tilbage i dine ture (ikke startet).")) return;
+    try {
+      await handleUpdateTour(tour.id, { on_way: false, on_way_time: "", claimed_by: driverName, claimed_by_id: myDriverId });
+      toast.success("Turen er taget af hængeren");
+    } catch (_) { /* fejl vises af handleUpdateTour */ }
+    fetchTours();
+  };
+  // En tur chaufføren selv har taget (ikke tildelt af planlæggeren) kan lægges tilbage.
+  const giveBack = async (tour) => {
+    if (!window.confirm("Læg turen tilbage i Ledige, så andre kan tage den?")) return;
+    try {
+      await axios.put(`${API}/tours/${tour.id}`, { claimed_by: "", claimed_by_id: "" });
+      toast.success("Turen er lagt tilbage i Ledige");
+    } catch (e) { toast.error(formatApiError(e)); }
+    fetchTours();
+  };
+
   const handleToggleOnWay = async (tourId) => {
     const tour = tours.find(t => t.id === tourId);
     if (!tour) return;
@@ -15961,7 +16097,9 @@ function App() {
           unread={driverTourUnread}
           messagesUnread={(driverMessages || []).filter(m => m.from_admin && !m.read).length}
           onMessages={() => setShowChat(true)}
-          onStart={(t) => handleToggleOnWay(t.id)}
+          onStart={startFlow}
+          onTake={takeTour}
+          onTakeStart={startFlow}
           onFinish={(t) => {
             // Ture med "Ved afslutning"-valg (nye manuelle ture) bruger det samlede
             // afslutnings-ark. Ældre ture/bestillinger: vægt i tur-panelet.
@@ -17048,9 +17186,19 @@ function App() {
             onClose={() => setSelectedTourForPanel(null)}
             onUpdate={handleUpdateTour}
             onDelete={handleDeleteTour}
-            onToggleOnWay={handleToggleOnWay}
+            onToggleOnWay={(id) => startFlow(tours.find(t => t.id === id) || selectedTourForPanel)}
             onToggleComplete={handleToggleComplete}
             currentDriverName={driverName}
+            run={{
+              members: selectedTourForPanel.run_id ? tours.filter(t => t.run_id === selectedTourForPanel.run_id) : [],
+              canAdd: !!trailerNow && isRunTour(selectedTourForPanel) && selectedTourForPanel.on_way && !selectedTourForPanel.completed
+                && selectedTourForPanel.claimed_by_id === myDriverId && myActiveTours().length < maxOnWay,
+              onAdd: () => { const t = selectedTourForPanel; setSelectedTourForPanel(null); startFlow(t); },
+              onLeave: () => { const t = selectedTourForPanel; setSelectedTourForPanel(null); leaveRun(t); },
+              canGiveBack: !selectedTourForPanel.on_way && !selectedTourForPanel.completed && selectedTourForPanel.claimed_by_id === myDriverId
+                && !(selectedTourForPanel.driver_id || "").trim(),
+              onGiveBack: () => { const t = selectedTourForPanel; setSelectedTourForPanel(null); giveBack(t); },
+            }}
             onChat={() => { const t = selectedTourForPanel; setSelectedTourForPanel(null); setChatTour(t); }}
             onRefresh={fetchTours}
             onOpenFinish={(t) => setFinishTour(t)}
@@ -17062,6 +17210,10 @@ function App() {
         )}
 
         <DriverChatSheet tour={chatTour} onClose={() => setChatTour(null)} onChanged={fetchDriverTourUnread} />
+        {runSheet && (
+          <DriverRunSheet {...runSheet} trailerName={trailerNow?.number || ""} onClose={() => setRunSheet(null)}
+            onConfirm={async (ids) => { const a = runSheet.anchor; setRunSheet(null); await sendStart([a.id, ...ids]); }} />
+        )}
         {finishTour && (
           <FinishSheet tour={finishTour} onClose={() => setFinishTour(null)}
             capture={effectiveCapture(finishTour, finishSettings.unified_finish)} codes={finishSettings.codes} hasTrailer={!!activeTrailerId}

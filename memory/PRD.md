@@ -19,6 +19,13 @@ Data must be strictly isolated per company.
   and `/api/health` bypass tenant filtering so the QR-code customer flow continues to work.
 
 ## What's been implemented (2026-02-15)
+## What's new in 2026-10-20, runde 2 (Chaufførsiden og hængerkørsel)
+- **Kompakte tur-rækker** grupperet pr. plads (`DriverTourCard`, `DriverTodayView`). Kunde og note er flyttet ind i turen.
+- **"Tag turen"** lægger en tur i Mine. En lille ▶ ved siden af tager og starter den med det samme.
+- **Hængerkørsel:** pop-up'en ved start (`DriverRunSheet`), "Tilføj tur på hængeren" og "Tag af hængeren". Serveren samler alle containerture, der er på vej samtidig, i én kørsel (`run_id`/`run_role`).
+- **Pris:** betingelsen "Kørsel" og afsnittet "Hængerkørsel" i prisaftalen. "Med hænger" på containerture = hængerkørsel. Se `BESLUTNINGER_2026-10-19.md` afsnit 13 og `PRICING_SPEC.md` 3j.
+- **Test:** `flow_run.py`.
+
 ## What's new in 2026-10-20 (Vedhæftninger, pakkeskift, prisforklaring)
 - **Arkiv › Vedhæftninger** samler vejesedler og chaufførens billeder fra turene.
   - Endpoints: `/attachments-archive` og `/tour-photos/{id}`.

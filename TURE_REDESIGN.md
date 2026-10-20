@@ -246,3 +246,14 @@ Se BESLUTNINGER_2026-10-19.md for alternativer og runder.
   - Én liste over kommende datoer med status ("Bestilt" / "Bestilles <dato>" / "Sprunget over" / "Lukket").
   - Bestillingerne indhentes også, når appen bruges (højst hvert 10. min), ikke kun hvert time - en serverless-container kan sove om natten.
 - **Mine bestillinger** viser et manuelt containernummer (fra "Bestil for kunden" › Overskriv) i stedet for "Container-nr. ikke angivet".
+
+
+## Chaufførens liste (2026-10-20)
+- Ture vises som kompakte rækker i bokse, grupperet pr. plads (ikke store kort).
+  - Linje 1: hvornår (haster, tidsrum, på vej, Bil/Hænger).
+  - Linje 2: hvad (indhold, opgave, container).
+  - Hent og aflever har hver sin linje med en lille "Kør".
+- Kunde, kundens note og telefon står inde i turen.
+- "Tildelt dig" er fjernet (det ligger i Mine).
+- Ledige ture har "Tag turen" (læg i Mine) og en ▶ til at tage og starte med det samme.
+- Hængerkørsel: se BESLUTNINGER afsnit 13 og PRICING_SPEC 3j.

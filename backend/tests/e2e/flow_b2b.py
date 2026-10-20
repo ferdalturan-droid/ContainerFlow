@@ -29,19 +29,18 @@ def run():
         ok(any(x["id"] == tid for x in call("GET", "/tours", t=la, params={"limit": 500})), "4 ILK ser turen")
 
         call("PUT", f"/tours/{tid}", {"driver_id": lars_id, "driver_name": lars}, t=la)
-        # Chaufføren har valgt en hænger i profilen -> forslag ved start
+        # Chaufføren har valgt en hænger i profilen, men kører turen alene.
+        # 2026-10-20: "Med hænger" på en containertur = hængerkørsel, ikke login-hængeren.
         db.users.update_one({"id": lars_id}, {"$set": {"active_trailer_id": "e2e-trailer"}})
         call("PUT", f"/tours/{tid}", {"on_way": True, "on_way_time": "08:00", "claimed_by": lars, "claimed_by_id": lars_id}, t=drv)
         tour = db.tours.find_one({"id": tid}, {"_id": 0})
-        ok(tour.get("used_trailer") is True and tour.get("trailer_source") == "auto" and tour.get("trailer_confirmed") is False,
-           "5 start: hænger foreslået fra profilen, markeret 'automatisk, ikke bekræftet'")
+        ok(tour.get("run_role") == "solo" and tour.get("used_trailer") is False and tour.get("trailer_confirmed") is True,
+           "5 start alene med hænger valgt ved login: solo, ikke 'med hænger'")
         p = price_of(la, tid)["price"]
-        ok("Hænger: automatisk, ikke bekræftet" in (p.get("flags") or []), "6 økonomi viser 'Hænger: automatisk, ikke bekræftet'")
-        # Chaufføren svarer ved afslutning ("Kørte du med hænger?")
-        call("PUT", f"/driver/tours/{tid}/trailer", {"used_trailer": True}, t=drv)
+        ok("Hænger: automatisk, ikke bekræftet" not in (p.get("flags") or []), "6 ingen 'automatisk, ikke bekræftet' på containerture")
+        r = call("PUT", f"/driver/tours/{tid}/trailer", {"used_trailer": True}, t=drv)
         p = price_of(la, tid)
-        ok(p["trailer_confirmed"] is True and "Hænger: automatisk, ikke bekræftet" not in (p["price"].get("flags") or []),
-           "7 chaufføren bekræfter hænger -> ikke længere markeret")
+        ok(r.get("ignored") and p["trailer_confirmed"] is True and p["trailer"] is False, "7 'Med hænger' ændrer ikke en containertur (kørslen afgør)")
 
         ok(status_of("POST", f"/tours/{tid}/stops", {"kind": "delivery", "street": "Ekstra 1", "postal": "3000", "city": "Helsingør"}, t=drv) == 400,
            "7a chaufføren kan ikke tilføje stop på en kundebestilling (B2B uændret)")
@@ -50,18 +49,22 @@ def run():
         ok(order and order.get("status") == "completed" and float(order.get("weight_kg") or 0) == 1850,
            "8 bestillingen spejles: status=completed, 1850 kg")
         row = report_row(la, tid)
-        ok(row is not None and row["trailer"] and row["trailer_confirmed"], f"9 rapport-række: hænger bekræftet ({row and row['price'].get('total')})")
+        ok(row is not None and not row["trailer"] and row["trailer_confirmed"] and row["run_role"] == "solo",
+           f"9 rapport-række: solo, ingen hænger ({row and row['price'].get('total')})")
 
-        # Rettelse bagefter: antal hængere (ikke ja/nej) -> godkendelse -> pris
-        req = call("POST", f"/driver/tours/{tid}/change-request", {"trailer_count": 0, "comment": "E2E kørte uden"}, t=drv)
-        ok(req["changes"] == {"trailer_count": 0}, "10 rettelse sender antal hængere")
+        # Rettelser bagefter: hænger rettes ikke af chaufføren på en containertur
+        ok(status_of("POST", f"/driver/tours/{tid}/change-request", {"trailer_count": 1, "comment": "E2E havde hænger"}, t=drv) == 400,
+           "10 chaufføren kan ikke rette hænger på en containertur (kørslen afgør, admin retter)")
+        req = call("POST", f"/driver/tours/{tid}/change-request", {"start_time": "07:55", "comment": "E2E startede før"}, t=drv)
         req2 = call("POST", f"/driver/tours/{tid}/change-request", {"waiting_min": 20, "comment": "E2E ventede"}, t=drv)
         ok(req2["status"] in ("pending", "approved"), "11 to rettelser af forskellige ting på samme tur er tilladt")
-        dup = status_of("POST", f"/driver/tours/{tid}/change-request", {"trailer_count": 2, "comment": "E2E igen"}, t=drv)
-        ok(dup == 409, "12 rettelse af det samme (hænger) mens den første venter -> 409")
+        dup = status_of("POST", f"/driver/tours/{tid}/change-request", {"start_time": "07:50", "comment": "E2E igen"}, t=drv)
+        ok(dup == 409, "12 rettelse af det samme (starttid) mens den første venter -> 409")
         call("POST", f"/pricing/requests/{req['id']}/decide", {"approve": True}, t=la)
+        call("PUT", f"/pricing/tours/{tid}/adjust", {"note": "E2E kørte på hængeren", "fact_overrides": {"run_role": "trailer", "start_time": "07:55"}}, t=la)
         row = report_row(la, tid)
-        ok(row and row["trailer"] is False and row["trailer_count"] == 0, "13 godkendt 'uden hænger' slår igennem i prisen (før: ignoreret)")
+        ok(row and row["trailer"] is True and row["run_role"] == "trailer" and row["start_time"] == "07:55",
+           "13 admin retter kørslen til 'på hængeren' -> med hænger i prisen")
 
         # Faktureret = frosset registrering
         if row["price"].get("total") is not None:

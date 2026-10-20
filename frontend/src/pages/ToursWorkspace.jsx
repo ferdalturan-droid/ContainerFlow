@@ -1300,6 +1300,11 @@ function TourPanel({ tour, onClose, drivers, load, onAssign, onChanged, onUnread
           {fact("Vægt", tour.weight ? `${tour.weight} kg` : "")}
           {fact("Ventetid", tour.waiting_reported_min ? `${tour.waiting_reported_min} min (oplyst af chaufføren)` : "")}
         </div>
+        {tour.run_role && tour.run_role !== "solo" && (
+          <div className="mt-3 rounded-xl bg-violet-50 dark:bg-violet-950/30 border border-violet-200 dark:border-violet-900 px-3 py-2 text-sm text-violet-900 dark:text-violet-200" data-testid="panel-run">
+            <b>Hængerkørsel</b> · {tour.run_role === "trailer" ? "på hængeren" : "på bilen"}{tour.run_size ? ` · ${tour.run_size} containere kørt sammen` : ""}
+          </div>
+        )}
         <Registration tour={tour} />
         {(priceStatus?.status === "missing" || deviationsOf(tour, { hourly: priceStatus?.hourly }).length > 0) && (
           <div className="mt-3 flex flex-col gap-1.5" data-testid="panel-attention">

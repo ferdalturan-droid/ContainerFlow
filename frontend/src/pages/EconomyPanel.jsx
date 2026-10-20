@@ -64,13 +64,15 @@ const HELP = {
     weekend: "Weekend: lægges på ture der køres lørdag eller søndag.",
     holiday: "Helligdag: lægges på ture på helligdage - ud fra dansk kalender eller kundens egen kalender (se fanen Helligdage).",
     haster: "Haster: lægges på ture med prioritet Haster.",
-    trailer: "Hænger: lægges på ture hvor chaufføren har kørt med hænger (chaufføren vælger Med/Uden hænger på turen).",
+    trailer: "Hænger: lægges på ture der er kørt med hænger. Containerture: når turen kørte i en hængerkørsel (flere containere på én gang - både den på bilen og dem på hængeren). Varekørsel: når turen havde hængere (planlagt, eller oplyst af chaufføren ved afslutning). Vil du give containeren på hængeren en anden pris, så brug \"Hængerkørsel\" i prisaftalen.",
     evening: "Aften/nat: lægges på ture der starter i et bestemt tidsrum, fx 18:00-06:00. Tidsrummet sættes under \"Flere betingelser\".",
     waiting: "Ventetid: betaling for tid chaufføren venter på adressen, fx når containeren er blokeret eller kunden ikke er klar. Afregnes pr. påbegyndt kvarter ud fra de ventetidsminutter der er registreret på turen. Chaufføren beder om ventetid efter turen (godkendes under Godkendelser), eller du skriver den på turen i Rapport. Ture uden ventetid får intet tillæg. Typisk som kr pr. time.",
     stop: "Ekstra stop: et beløb pr. stop ud over dem der er med i grundprisen (standard 2 = én afhentning + én aflevering). Stop der ikke kunne gennemføres tæller med - chaufføren kørte derhen.",
     other: "Andet: alt det der ikke passer i de andre typer, fx miljøtillæg eller bro/færge. Brug betingelserne til at styre hvilke ture det gælder.",
   },
 };
+// 2026-10-20: Hængerkørsel - containerture kørt flere sammen (bil + hænger).
+const RUN_LABEL = { solo: "Solo", truck: "På bilen (hængerkørsel)", trailer: "På hængeren" };
 const ruleHelp = (r) => r.kind === "base"
   ? (HELP.model[(r.pricing || {}).model || "fixed"] || HELP.base)
   : (HELP.category[r.category] || HELP.surcharge);
@@ -351,11 +353,13 @@ function ReportView({ options, onChanged, goRules, goApprovals, onCreatePrice, r
     if (!list.length) { toast.error("Ingen ture at eksportere"); return; }
     const num = (n) => n == null ? "" : String(n).replace(".", ",");
     const head = ["Kunde", "Dato", "Tur nr.", "Lokation", "Materiale", "Opgavetype", "Leveringsadresse", "Chauffør",
-      "Start", "Slut", "Hænger", "Ventetid (min)", "Prismodel", "Faktureret tid (min)", "Linjer", "Pris ekskl. moms", "Status"];
+      "Start", "Slut", "Hænger", "Kørsel", "Ventetid (min)", "Prismodel", "Faktureret tid (min)", "Linjer", "Pris ekskl. moms", "Status"];
     const sorted = [...list].sort((a, b) => (a.customer_name || "").localeCompare(b.customer_name || "") || a.service_date.localeCompare(b.service_date));
     const lines = sorted.map(r => [
       r.customer_name, r.service_date, r.tour_number, r.location_name, r.material, taskLabel(r.task_type), r.delivery_label,
-      r.driver_name, r.start_time, r.end_time, r.trailer ? "Ja" : "Nej", r.waiting_min || 0,
+      r.driver_name, r.start_time, r.end_time, r.trailer ? "Ja" : "Nej",
+      r.run_role ? `${RUN_LABEL[r.run_role] || r.run_role}${(r.run_partners || []).length ? ` (med ${r.run_partners.map(x => x.tour_number || "tur").join(", ")})` : ""}` : "",
+      r.waiting_min || 0,
       options.models[r.price.model] || "", r.price.time?.billable_min ?? "",
       (r.price.lines || []).map(l => `${l.label}: ${num(l.amount)}`).join(" | "),
       num(r.price.total), r.outcome === "not_completed" ? "Forgæves" : r.price.locked ? "Faktureret" : (STATUS_META[r.price.status]?.text || "OK"),
@@ -513,7 +517,7 @@ function ReportView({ options, onChanged, goRules, goApprovals, onCreatePrice, r
                       <td className="p-3"><div className="font-semibold">{r.customer_name}</div><div className="text-xs text-slate-500">{r.location_name}</div></td>
                       <td className="p-3">
                         <div>{(r.materials && r.materials.length > 1) ? r.materials.join(" + ") : r.material}</div>
-                        <div className="text-xs text-slate-500">{taskLabel(r.task_type)}{r.priority === "haster" ? " · Haster" : ""}{r.trailer ? ` · ${r.trailer_count > 1 ? `${r.trailer_count} hængere` : "Hænger"}` : ""}
+                        <div className="text-xs text-slate-500">{taskLabel(r.task_type)}{r.priority === "haster" ? " · Haster" : ""}{r.run_role && r.run_role !== "solo" ? ` · ${r.run_role === "trailer" ? "På hængeren" : "På bilen"}${(r.run_partners || []).length ? ` (med ${r.run_partners.map(x => x.tour_number || "tur").join(", ")})` : ""}` : r.trailer ? ` · ${r.trailer_count > 1 ? `${r.trailer_count} hængere` : "Hænger"}` : ""}
                           {r.trailer && r.trailer_confirmed === false && !r.price.locked && <span className="ml-1 px-1 rounded bg-amber-100 text-amber-800 text-[10px] font-bold" title="Foreslået fra chaufførens profil ved start - chaufføren har ikke svaret">automatisk, ikke bekræftet</span>}</div>
                       </td>
                       <td className="p-3 whitespace-nowrap">{r.driver_name}</td>
@@ -584,6 +588,7 @@ function TourPriceDrawer({ tourId, options, onClose, onChanged }) {
     setEdit({
       start_time: fo.start_time || "", end_time: fo.end_time || "",
       trailer_count: fo.trailer_count !== undefined ? String(fo.trailer_count) : fo.used_trailer === undefined ? "" : (fo.used_trailer ? String(d.trailer_count || 1) : "0"),
+      run_role: fo.run_role || "",
       waiting_min: fo.waiting_min ?? "", deduct_pause: fo.deduct_pause === undefined ? "" : String(fo.deduct_pause),
       mode: po.mode === "fixed" ? "fixed" : "rules", amount: po.amount ?? "",
       add_waiting: !!po.add_waiting, label: po.label || "",
@@ -595,7 +600,8 @@ function TourPriceDrawer({ tourId, options, onClose, onChanged }) {
     const fact = {};
     if (edit.start_time) fact.start_time = edit.start_time;
     if (edit.end_time) fact.end_time = edit.end_time;
-    if (edit.trailer_count !== "") fact.trailer_count = Number(edit.trailer_count);
+    if (d.original?.run_eligible) { if (edit.run_role) fact.run_role = edit.run_role; }
+    else if (edit.trailer_count !== "") fact.trailer_count = Number(edit.trailer_count);
     if (edit.deduct_pause !== "") fact.deduct_pause = edit.deduct_pause === "true";
     if (edit.waiting_min !== "") fact.waiting_min = Number(edit.waiting_min);
     setSaving(true);
@@ -666,7 +672,9 @@ function TourPriceDrawer({ tourId, options, onClose, onChanged }) {
               <Row k="Dagtype" v={`${options.day_types[d.day_type]} · ${d.holiday_source}`} />
               <Row k="Opgavetype" v={options.task_types[d.task_type] || d.task_type} />
               <Row k="Prioritet" v={options.priorities[d.priority] || d.priority} />
-              <Row k="Hænger" v={d.trailer ? "Med hænger" : "Uden hænger"} />
+              {d.run_role ? (
+                <Row k="Kørsel" v={<span data-testid="price-run-role">{RUN_LABEL[d.run_role] || d.run_role}{(d.run_partners || []).length ? ` · med ${d.run_partners.map(x => x.tour_number || "tur").join(", ")}` : ""}</span>} />
+              ) : <Row k="Hænger" v={d.trailer ? "Med hænger" : "Uden hænger"} />}
               <Row k="Ventetid" v={d.waiting_min ? `${d.waiting_min} min` : "-"} />
               <Row k="Leveringsadresse" v={d.delivery_label || "-"} />
               {d.container_label && <Row k="Containerstørrelse" v={d.container_label} />}
@@ -682,11 +690,19 @@ function TourPriceDrawer({ tourId, options, onClose, onChanged }) {
                 <div className="grid grid-cols-2 gap-2">
                   <div><span className={label}>Start</span><input type="time" className={input} value={edit.start_time} placeholder={d.original.start_time} onChange={e => setEdit({ ...edit, start_time: e.target.value })} /></div>
                   <div><span className={label}>Slut</span><input type="time" className={input} value={edit.end_time} onChange={e => setEdit({ ...edit, end_time: e.target.value })} /></div>
-                  <div><span className={label}>Hængere</span>
-                    <select className={input} value={edit.trailer_count} onChange={e => setEdit({ ...edit, trailer_count: e.target.value })} data-testid="adjust-trailers">
-                      <option value="">Som registreret ({d.original?.trailer_count ?? (d.trailer ? 1 : 0)})</option>
-                      {[0, 1, 2, 3, 4].map(n => <option key={n} value={String(n)}>{n === 0 ? "Uden hænger" : `${n} hænger${n === 1 ? "" : "e"}`}</option>)}
-                    </select></div>
+                  {d.original?.run_eligible ? (
+                    <div><span className={label}>Kørsel</span>
+                      <select className={input} value={edit.run_role} onChange={e => setEdit({ ...edit, run_role: e.target.value })} data-testid="adjust-run-role">
+                        <option value="">Som kørt ({RUN_LABEL[d.original?.run_role] || "ikke registreret"})</option>
+                        {Object.entries(RUN_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                      </select></div>
+                  ) : (
+                    <div><span className={label}>Hængere</span>
+                      <select className={input} value={edit.trailer_count} onChange={e => setEdit({ ...edit, trailer_count: e.target.value })} data-testid="adjust-trailers">
+                        <option value="">Som registreret ({d.original?.trailer_count ?? (d.trailer ? 1 : 0)})</option>
+                        {[0, 1, 2, 3, 4].map(n => <option key={n} value={String(n)}>{n === 0 ? "Uden hænger" : `${n} hænger${n === 1 ? "" : "e"}`}</option>)}
+                      </select></div>
+                  )}
                   <div><span className={label}>Ventetid (min)</span><input type="number" min="0" className={input} value={edit.waiting_min} onChange={e => setEdit({ ...edit, waiting_min: e.target.value })} /></div>
                   <div className="col-span-2"><span className={label}>Pause under turen</span>
                     <select className={input} value={edit.deduct_pause} onChange={e => setEdit({ ...edit, deduct_pause: e.target.value })}>
@@ -755,7 +771,7 @@ const Row = ({ k, v }) => (
 /* ======================================================================
    Prisregler
    ====================================================================== */
-const EMPTY_COND = { customer_ids: [], location_codes: [], delivery_labels: [], materials: [], task_types: [], priorities: [], day_types: [], container_labels: [], trailer: "", trailer_counts: [], time_from: "", time_to: "", outcome: "completed" };
+const EMPTY_COND = { customer_ids: [], location_codes: [], delivery_labels: [], materials: [], task_types: [], priorities: [], day_types: [], container_labels: [], trailer: "", trailer_counts: [], time_from: "", time_to: "", outcome: "completed", run_roles: [] };
 
 function ruleSummary(rule, options) {
   if (rule.kind === "base") {
@@ -790,6 +806,7 @@ function conditionChips(c, options) {
   if ((c.trailer_counts || []).length) out.push(`${c.trailer_counts.map(n => (Number(n) >= 3 ? "3+" : n)).join("/")} hænger${c.trailer_counts.length === 1 && Number(c.trailer_counts[0]) === 1 ? "" : "e"}`);
   if (c.container_labels?.length) out.push(c.container_labels.join(", "));
   if (c.time_from && c.time_to) out.push(`Start ${c.time_from}–${c.time_to}`);
+  if ((c.run_roles || []).length) out.push(c.run_roles.map(r => RUN_LABEL[r] || r).join(", "));
   if (c.outcome === "not_completed") out.push("Forgæves ture");
   if (c.outcome === "any") out.push("Gennemført + forgæves");
   return out;
@@ -876,8 +893,9 @@ function RulesView({ options, reloadOptions, canEdit = true, initialFilter = "al
   };
   const BundleCard = ({ rs }) => {
     const bb = bundleFromRules(rs);
-    const baseRule = rs.find(r => r.kind === "base" && !isFailedRule(r));
+    const baseRule = rs.find(r => r.kind === "base" && !isFailedRule(r) && !isRunPart(r));
     const failedRule = rs.find(isFailedRule);
+    const runParts = rs.filter(isRunPart);
     const surs = rs.filter(r => r.kind === "surcharge");
     const chips = conditionChips(bb.conditions, options);
     const vf = (baseRule || rs[0]).version_from;
@@ -899,6 +917,10 @@ function RulesView({ options, reloadOptions, canEdit = true, initialFilter = "al
             {baseRule ? <div><span className="text-slate-500">Grundpris:</span> <b className="text-emerald-700 dark:text-emerald-300">{ruleSummary(baseRule, options)}</b></div>
               : <div className="text-slate-500">Ingen grundpris (bruger den generelle)</div>}
             {failedRule && <div><span className="text-slate-500">Forgæves kørsel:</span> <b>{fmtKr(failedRule.pricing?.amount)}</b></div>}
+            {runParts.map(r => (
+              <div key={r.id} data-testid={`bundle-card-run-${r.conditions.run_roles[0]}`}><span className="text-slate-500">{r.conditions.run_roles[0] === "trailer" ? "Container på hængeren" : "Container på bilen (hængerkørsel)"}:</span>{" "}
+                <b>{r.run_spec?.mode === "percent" ? `${String(r.run_spec.value).replace(".", ",")} % af grundprisen (${ruleSummary(r, options)})` : ruleSummary(r, options)}</b></div>
+            ))}
             {surs.map(r => (
               <div key={r.id}><span className="text-slate-500">{options.categories[r.category]}:</span> <b>{Number(r.surcharge?.value) === 0 ? "Fritaget" : ruleSummary(r, options)}</b>
                 {r.category === "stop" && Number(r.surcharge?.value) !== 0 && <span className="text-slate-500"> pr. stop ud over {r.surcharge?.included ?? 2}</span>}</div>
@@ -1230,12 +1252,17 @@ const parseNum = (v) => {
 const BLANK_PRICING = { model: "fixed", amount: "", unit: "paller", hourly_rate: "", start_fee: "", min_minutes: "", min_amount: "", rounding_mode: "up", rounding_minutes: 15, deduct_pause: true };
 // 2026-10-18: Forgæves kørsel er en ekstra grundpris i aftalen (udfald = forgæves).
 const isFailedRule = (r) => r.kind === "base" && (r.conditions || {}).outcome === "not_completed";
+// 2026-10-20: Hængerkørsel - egen pris for containeren på bilen/hængeren (en
+// ekstra grundpris i aftalen med betingelsen Kørsel).
+const isRunPart = (r) => r.kind === "base" && !isFailedRule(r) && ((r.conditions || {}).run_roles || []).length === 1;
+const runSpecOf = (r) => (r ? { id: r.id, mode: r.run_spec?.mode || "amount",
+  value: String(r.run_spec?.value ?? (r.pricing || {}).amount ?? "").replace(".", ",") } : { mode: "same", value: "" });
 
 /** Lav en prisaftale ud fra én eller flere eksisterende regler. */
 function bundleFromRules(rules) {
-  const base = rules.find(r => r.kind === "base" && !isFailedRule(r));
+  const base = rules.find(r => r.kind === "base" && !isFailedRule(r) && !isRunPart(r));
   const failed = rules.find(isFailedRule);
-  const first = base || rules.find(r => !isFailedRule(r)) || rules[0] || {};
+  const first = base || rules.find(r => !isFailedRule(r) && !isRunPart(r)) || rules[0] || {};
   const cond = { ...EMPTY_COND, ...(first.conditions || {}) };
   if (!base && first.kind === "surcharge") (AUTO_KEYS[first.category] || []).forEach(k => { cond[k] = EMPTY_COND[k]; });
   return {
@@ -1246,6 +1273,8 @@ function bundleFromRules(rules) {
     active: first.active !== false, note: first.note || "",
     base: base ? { id: base.id, pricing: { ...BLANK_PRICING, ...base.pricing } } : null,
     failed: failed ? { id: failed.id, amount: String((failed.pricing || {}).amount ?? "") } : null,
+    run_truck: runSpecOf(rules.find(r => isRunPart(r) && r.conditions.run_roles[0] === "truck")),
+    run_trailer: runSpecOf(rules.find(r => isRunPart(r) && r.conditions.run_roles[0] === "trailer")),
     surcharges: rules.filter(r => r.kind === "surcharge").map(r => ({
       id: r.id, category: r.category, unit: (r.surcharge || {}).unit || "kr", value: String((r.surcharge || {}).value ?? ""),
       name: r.name && !r.name.startsWith(`${first.bundle_name || ""} - `) ? r.name : "",
@@ -1259,12 +1288,15 @@ function bundleFromRules(rules) {
 const newBundle = (conditions = {}, name = "") => ({
   bundle_id: "", adopt_ids: [], name, conditions: { ...EMPTY_COND, ...conditions }, valid_from: "", valid_to: "",
   active: true, note: "", base: { pricing: { ...BLANK_PRICING } }, failed: null, surcharges: [],
+  run_truck: { mode: "same", value: "" }, run_trailer: { mode: "same", value: "" },
 });
 
 const copyBundle = (b) => ({
   ...b, bundle_id: "", adopt_ids: [], name: `${b.name} (kopi)`,
   base: b.base ? { pricing: { ...b.base.pricing } } : null,
   failed: b.failed ? { amount: b.failed.amount } : null,
+  run_truck: { mode: b.run_truck?.mode || "same", value: b.run_truck?.value || "" },
+  run_trailer: { mode: b.run_trailer?.mode || "same", value: b.run_trailer?.value || "" },
   surcharges: b.surcharges.map(({ id, ...rest }) => rest),
 });
 
@@ -1274,6 +1306,8 @@ function bundlePayload(b, effective) {
     valid_from: b.valid_from, valid_to: b.valid_to, active: b.active, note: b.note, effective,
     base: b.base ? { id: b.base.id, pricing: b.base.pricing } : null,
     failed: b.failed ? { id: b.failed.id, amount: b.failed.amount } : null,
+    run_truck: b.run_truck && b.run_truck.mode !== "same" ? b.run_truck : null,
+    run_trailer: b.run_trailer && b.run_trailer.mode !== "same" ? b.run_trailer : null,
     surcharges: b.surcharges.map(x => ({
       id: x.id, category: x.category, unit: x.exempt ? "kr" : (x.category === "stop" ? "kr" : x.unit), value: x.exempt ? 0 : x.value,
       name: x.exempt ? `Fritaget for ${(CAT_NAME[x.category] || "tillæg").toLowerCase()}` : x.name,
@@ -1293,7 +1327,7 @@ function ReadBack({ v, unit }) {
 
 /** "Prøv prisen": beregn et tænkt scenarie med aftalen som den står i editoren. */
 function PriceTester({ bundle, options }) {
-  const [sc, setSc] = useState({ day_type: "weekday", priority: "normal", trailer_count: 0, start_time: "08:00", minutes: 60, waiting_min: 0, containers: 1, qty: 10, stops: 2, outcome: "completed" });
+  const [sc, setSc] = useState({ day_type: "weekday", priority: "normal", trailer_count: 0, start_time: "08:00", minutes: 60, waiting_min: 0, containers: 1, qty: 10, stops: 2, outcome: "completed", run_role: "solo" });
   const perUnit = bundle.base?.pricing?.model === "per_unit";
   const unitName = bundle.base?.pricing?.unit || "paller";
   const hasStop = (bundle.surcharges || []).some(x => x.category === "stop");
@@ -1325,7 +1359,9 @@ function PriceTester({ bundle, options }) {
           <select className={input} value={sc.day_type} onChange={e => set("day_type", e.target.value)}>{Object.entries(options.day_types).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></div>
         <div><span className={label}>Prioritet</span>
           <select className={input} value={sc.priority} onChange={e => set("priority", e.target.value)}>{Object.entries(options.priorities).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></div>
-        <div><span className={label}>Hængere</span>
+        <div><span className={label}>Kørsel</span>
+          <select className={input} value={sc.run_role} onChange={e => set("run_role", e.target.value)} data-testid="price-tester-run-role">{Object.entries(RUN_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></div>
+        <div><span className={label}>Hængere (varekørsel)</span>
           <select className={input} value={sc.trailer_count} onChange={e => set("trailer_count", Number(e.target.value))}>{[0, 1, 2, 3].map(n => <option key={n} value={n}>{n === 0 ? "Ingen" : n}</option>)}</select></div>
         <div><span className={label}>Start</span><input type="time" className={input} value={sc.start_time} onChange={e => set("start_time", e.target.value)} /></div>
         <div><span className={label}>Varighed (min)</span><input inputMode="numeric" className={input} value={sc.minutes} onChange={e => set("minutes", e.target.value)} /></div>
@@ -1388,6 +1424,11 @@ function BundleEditor({ bundle: initial, options, onClose, onSaved, firstRule = 
     if (p.model === "per_unit" && !(p.unit || "").trim()) problems.push("Vælg enhed (fx paller)");
   }
   if (b.failed && !(parseNum(b.failed.amount) >= 0)) problems.push("Beløb for forgæves kørsel mangler");
+  [["run_truck", "containeren på bilen"], ["run_trailer", "containeren på hængeren"]].forEach(([k, l]) => {
+    const x = b[k];
+    if (x && x.mode !== "same" && !(parseNum(x.value) >= 0)) problems.push(`Pris for ${l} mangler`);
+    if (x && x.mode === "percent" && !b.base) problems.push(`Procent for ${l} kræver en grundpris`);
+  });
   if (effective === "driven" && !effDate) problems.push("Vælg dato for kørsel");
   b.surcharges.forEach((x, i) => { if (!x.exempt && !(parseNum(x.value) >= 0)) problems.push(`Tillæg ${i + 1} (${options.categories[x.category]}) mangler beløb`); });
 
@@ -1512,6 +1553,28 @@ function BundleEditor({ bundle: initial, options, onClose, onSaved, firstRule = 
                 )}
               </>
             )}
+          </div>
+
+          <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4 space-y-2" data-testid="bundle-run">
+            <span className="text-sm font-bold">Hængerkørsel <InfoTip text="Når chaufføren kører flere containere på én gang: én på bilen og 1-2 på hængeren. Her kan containeren på hængeren (og evt. den på bilen) have sin egen pris - fx solo 1.000 kr og på hængeren 700 kr. En tur kørt alene får altid grundprisen. Ved timepris deles tiden i forvejen mellem turene, der kører samtidig." /></span>
+            <p className="text-[12px] text-slate-500">Gælder containerture. Ture kørt alene (solo) får grundprisen.</p>
+            {[["run_trailer", "Container på hængeren"], ["run_truck", "Container på bilen"]].map(([k, l]) => {
+              const x = b[k] || { mode: "same", value: "" };
+              return (
+                <div key={k} className="space-y-1.5 pt-1" data-testid={`bundle-${k}`}>
+                  <span className="block text-sm font-semibold">{l}</span>
+                  <div className="flex flex-wrap items-start gap-2">
+                    <Segmented value={x.mode} onChange={v => setB({ ...b, [k]: { ...x, mode: v } })}
+                      options={[{ value: "same", label: "Som grundprisen" }, { value: "amount", label: "Fast beløb" }, { value: "percent", label: "% af grundprisen" }]} />
+                    {x.mode !== "same" && (
+                      <div className="w-36"><input inputMode="decimal" className={input} value={x.value} data-testid={`bundle-${k}-value`}
+                        onChange={e => setB({ ...b, [k]: { ...x, value: e.target.value } })} placeholder={x.mode === "percent" ? "Fx 70" : "Fx 700"} />
+                        <ReadBack v={x.value} unit={x.mode === "percent" ? "%" : "kr"} /></div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
 
           <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4 space-y-2" data-testid="bundle-failed">

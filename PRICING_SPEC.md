@@ -184,3 +184,25 @@ Rapport · Kunder & priser · Prisregler · Godkendelser · Helligdage · Indsti
 * Pris pr. ton (deponi-/modtagegebyrer er modtagerens, ikke transportørens).
 * Kunden ser ikke priser.
 * Kilometerpris (kræver kørselsdata vi ikke har pålideligt).
+
+## 3j. Hængerkørsel (2026-10-20)
+
+**Begreber:**
+- **Hængerkørsel:** 2-3 containerture kørt sammen. Den først startede er "på bilen", de øvrige "på hængeren". En containertur kørt alene er "solo".
+- **Felter:** `run_id`, `run_role`, `run_seq` og `run_size` på turen. Serveren holder dem opdateret ved start, stop, nulstilling og sletning (`_run_on_start`, `_run_recompute`).
+- **"Med hænger"** på en containertur = del af en hængerkørsel. Den hænger, der er valgt ved login, tæller ikke. Ældre ture og varekørsel er uændrede.
+
+**Priser:**
+- Prisbetingelsen **Kørsel** (`run_roles`) har 2 point.
+- I prisaftalen kan "Container på hængeren" og "Container på bilen" være:
+  - som grundprisen;
+  - et fast beløb;
+  - en procent af grundprisen.
+- De gemmes som ekstra grundpriser (`run_spec`). Admin kan rette kørslen pr. tur (`fact_overrides.run_role`).
+
+**Chaufføren:**
+- `POST /api/driver/tours/{id}/take` ("Tag turen").
+- `POST /api/driver/tours/start` (én eller flere ture sammen; `op_id` gør kaldet sikkert at gentage).
+- "Uden/Med hænger" og hænger i rettelser er fjernet for containerture.
+
+Se PRISBEREGNING.md A4d-A4e og eksemplerne B8c-B8d.

@@ -92,7 +92,9 @@ export default function FinishSheet({ tour, onClose, onDone, driverName, myId, c
   const plannedTrailers = Number(tour?.trailer_count || 0);
   // 2026-10-18 (P7): Spørg kun om hænger når det er relevant - planlagt
   // hænger, hænger i profilen, eller hænger foreslået da turen startede.
-  const askTrailers = plannedTrailers > 0 || hasTrailer || tour?.used_trailer === true;
+  // 2026-10-20: En containertur i (eller uden for) en hængerkørsel spørges ikke -
+  // kørslen afgør. Varekørsel oplyser antal hængere her som før.
+  const askTrailers = !tour?.run_role && (plannedTrailers > 0 || hasTrailer || tour?.used_trailer === true);
   const [qty, setQty] = useState(() => lines.map(l => (l.actual_qty != null ? String(l.actual_qty) : "")));
   const [weight, setWeight] = useState(() => (tour?.weight ? String(tour.weight) : ""));
   const [photos, setPhotos] = useState([]);

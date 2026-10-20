@@ -441,6 +441,13 @@ class Tour(BaseModel):
     # bekræftet); "driver" = chaufføren har svaret; "planned" = planlagt antal.
     trailer_source: str = ""
     trailer_confirmed: Optional[bool] = None
+    # 2026-10-20: Hængerkørsel - containerture chaufføren kører sammen.
+    # run_role: "solo" | "truck" (på bilen) | "trailer" (på hængeren);
+    # "" = ikke startet, varekørsel/løs afhentning eller ældre tur.
+    run_id: str = ""
+    run_role: str = ""
+    run_seq: int = 0
+    run_size: int = 0
     # 2026-10-18: Kunde fra kunderegistret (logistics_customers.id) og fælles
     # id for ture oprettet med "Gentag" (ret/slet resten af serien).
     customer_ref_id: str = ""
@@ -3075,6 +3082,87 @@ def _tour_write_ok(payload: dict, tour: dict) -> bool:
     return tour.get("company_id") in (current_extra_visible_company_ids.get() or [])
 
 
+# ----- Hængerkørsel (2026-10-20) -------------------------------------------
+# En chauffør med hænger kan køre 2-3 containerture på én gang: én på bilen
+# og 1-2 på hængeren. Turene får fælles run_id og en rolle. Den tur der blev
+# startet først, er "på bilen". Alle chaufførens containerture der er på vej
+# på samme tid, er altid i samme kørsel. Prisen kan afhænge af rollen
+# (betingelsen "Kørsel" i prisreglerne).
+def _run_eligible(t: dict) -> bool:
+    return bool(t) and (t.get("tour_kind") or "container") != "goods" \
+        and (t.get("tour_type") or "normal") not in ("loes_afhentning", "estimat") and not t.get("is_pause")
+
+
+def _run_role(t: dict) -> str:
+    """Kørsel-rollen til prisen. Admin kan rette den (fact_overrides.run_role)."""
+    fo = (t or {}).get("fact_overrides") or {}
+    if fo.get("run_role") in ("solo", "truck", "trailer"):
+        return fo["run_role"]
+    if not _run_eligible(t):
+        return ""
+    r = t.get("run_role") or ""
+    return r if r in ("solo", "truck", "trailer") else ""
+
+
+_RUN_PROJ = {"_id": 0, "id": 1, "run_id": 1, "run_seq": 1, "on_way": 1, "on_way_at": 1, "completed": 1,
+             "not_completed": 1, "price_locked": 1, "tour_kind": 1, "tour_type": 1, "is_pause": 1, "deleted": 1}
+
+
+async def _run_recompute(run_id: str) -> None:
+    """Roller i en kørsel: kun startede ture er med. Én tur tilbage = solo."""
+    if not run_id:
+        return
+    members = await _raw_db.tours.find({"run_id": run_id}, _RUN_PROJ).to_list(20)
+    started = [m for m in members if not m.get("deleted") and (m.get("on_way") or m.get("completed") or m.get("not_completed"))]
+    for m in members:
+        if m in started or m.get("price_locked"):
+            continue
+        await _raw_db.tours.update_one({"id": m["id"]}, {"$set": {
+            "run_id": "", "run_role": "", "run_seq": 0, "run_size": 0,
+            "used_trailer": None, "trailer_source": "", "trailer_confirmed": None}})
+    started.sort(key=lambda m: (m.get("on_way_at") or "", m.get("run_seq") or 0))
+    solo = len(started) <= 1
+    for i, m in enumerate(started):
+        if m.get("price_locked"):
+            continue
+        role = "solo" if solo else ("truck" if i == 0 else "trailer")
+        await _raw_db.tours.update_one({"id": m["id"]}, {"$set": {
+            "run_id": "" if solo else run_id, "run_role": role, "run_size": 1 if solo else len(started),
+            "used_trailer": not solo, "trailer_source": "run", "trailer_confirmed": True}})
+
+
+async def _run_on_start(tour: dict) -> None:
+    driver_id = tour.get("claimed_by_id") or ""
+    others = [o for o in await _raw_db.tours.find(
+        {"claimed_by_id": driver_id, "on_way": True, "completed": {"$ne": True}, "not_completed": {"$ne": True},
+         "deleted": {"$ne": True}, "id": {"$ne": tour["id"]}}, _RUN_PROJ).to_list(20) if _run_eligible(o)]
+    if not others:
+        await _raw_db.tours.update_one({"id": tour["id"]}, {"$set": {
+            "run_id": "", "run_role": "solo", "run_seq": 1, "run_size": 1,
+            "used_trailer": False, "trailer_source": "run", "trailer_confirmed": True}})
+        return
+    others.sort(key=lambda m: (m.get("on_way_at") or "", m.get("run_seq") or 0))
+    run_ids = list(dict.fromkeys(o["run_id"] for o in others if o.get("run_id")))
+    rid = run_ids[0] if run_ids else str(uuid.uuid4())
+    # Alt der kører nu, er én kørsel (også ældre kørsler der aldrig blev samlet).
+    if len(run_ids) > 1:
+        await _raw_db.tours.update_many({"run_id": {"$in": run_ids[1:]}}, {"$set": {"run_id": rid}})
+    for i, o in enumerate(others):
+        if not o.get("run_id"):
+            await _raw_db.tours.update_one({"id": o["id"]}, {"$set": {"run_id": rid, "run_seq": o.get("run_seq") or i + 1}})
+    top = max([int(o.get("run_seq") or 0) for o in await _raw_db.tours.find({"run_id": rid}, {"_id": 0, "run_seq": 1}).to_list(20)] or [0])
+    await _raw_db.tours.update_one({"id": tour["id"]}, {"$set": {"run_id": rid, "run_seq": top + 1}})
+    await _run_recompute(rid)
+
+
+async def _run_on_stop(tour: dict) -> None:
+    if tour.get("run_id"):
+        await _run_recompute(tour["run_id"])
+    else:
+        await _raw_db.tours.update_one({"id": tour["id"], "price_locked": {"$exists": False}}, {"$set": {
+            "run_role": "", "run_seq": 0, "run_size": 0, "used_trailer": None, "trailer_source": "", "trailer_confirmed": None}})
+
+
 def _tour_access_query(payload: dict) -> dict:
     """Samme regel som `_tour_write_ok`, som database-filter (rå samling)."""
     role = (payload or {}).get("role")
@@ -3241,7 +3329,10 @@ async def update_tour(tour_id: str, update: TourUpdate, payload: dict = Depends(
         # ren claim uden start. Hvis on_way ikke sættes til True i denne
         # update, så er der ikke noget aktivt-load der øges → skip check.
         is_starting_tour = bool(update_data.get("on_way")) and not existing_tour.get("on_way")
-        if is_new_claim and is_starting_tour:
+        # 2026-10-20: Også ture chaufføren allerede har taget ("Tag turen") -
+        # før blev kapaciteten kun tjekket når tur blev taget og startet i ét.
+        mine_already = (existing_tour.get("claimed_by_id") or "") == caller_id and role == "driver"
+        if (is_new_claim or mine_already) and is_starting_tour:
             # Find driver's selected trailer (active_trailer_id on user doc)
             user_doc = await _raw_db.users.find_one(
                 {"id": caller_id}, {"_id": 0, "active_trailer_id": 1}
@@ -3478,7 +3569,7 @@ async def update_tour(tour_id: str, update: TourUpdate, payload: dict = Depends(
     if update_data.get("on_way") is True and not existing_tour.get("on_way"):
         update_data["on_way_at"] = datetime.now(DK_TZ).isoformat()
     if (update_data.get("on_way") is True and not existing_tour.get("on_way")
-            and existing_tour.get("used_trailer") is None):
+            and existing_tour.get("used_trailer") is None and not _run_eligible(existing_tour)):
         starter_id = update_data.get("claimed_by_id") or existing_tour.get("claimed_by_id") or ""
         if starter_id:
             _starter = await _raw_db.users.find_one({"id": starter_id}, {"_id": 0, "active_trailer_id": 1})
@@ -3500,6 +3591,18 @@ async def update_tour(tour_id: str, update: TourUpdate, payload: dict = Depends(
         raise HTTPException(status_code=404, detail="Tour not found")
 
     tour = await _raw_db.tours.find_one({"id": tour_id}, {"_id": 0})
+
+    # 2026-10-20: Hængerkørsel. En containertur der startes, mens chaufføren
+    # har andre containerture på vej, kører med dem (bil + hænger). En tur der
+    # stoppes igen (Fortryd / tilbage til Ledige), forlader kørslen.
+    if _run_eligible(tour):
+        _was, _is = bool(existing_tour.get("on_way")), bool(tour.get("on_way"))
+        if _is and not _was and not tour.get("completed") and tour.get("claimed_by_id"):
+            await _run_on_start(tour)
+        elif _was and not _is and not tour.get("completed") and not tour.get("not_completed"):
+            await _run_on_stop(tour)
+        if (_is != _was) or tour.get("run_id"):
+            tour = await _raw_db.tours.find_one({"id": tour_id}, {"_id": 0})
 
     # Fase 6: Audit log on assignment change (LA pre-assigns / reassigns / releases)
     if assignment_changed:
@@ -3644,7 +3747,7 @@ async def delete_tour(tour_id: str, _auth: dict = Depends(get_current_user_paylo
     before = await _raw_db.tours.find_one({"id": tour_id}, {"_id": 0, "driver_id": 1, "claimed_by_id": 1, "driver_name": 1,
                                                             "claimed_by": 1, "fraction": 1, "address": 1, "completed": 1, "date": 1,
                                                             "company_id": 1, "assigned_logistics_company_ids": 1, "source": 1,
-                                                            "order_id": 1})
+                                                            "order_id": 1, "run_id": 1})
     if not before:
         raise HTTPException(status_code=404, detail="Tour not found")
     if not _tour_write_ok(_auth, before):
@@ -3654,6 +3757,8 @@ async def delete_tour(tour_id: str, _auth: dict = Depends(get_current_user_paylo
         # tilbage uden tur. Kunden annullerer under "Mine bestillinger".
         raise HTTPException(status_code=409, detail="Turen hører til en kundebestilling - kunden annullerer den under Mine bestillinger")
     result = await _raw_db.tours.delete_one({"id": tour_id})
+    if result.deleted_count and before.get("run_id"):
+        await _run_recompute(before["run_id"])
     holder = ((before or {}).get("driver_id") or (before or {}).get("claimed_by_id") or "").strip()
     if result.deleted_count and holder and not before.get("completed") and _auth.get("role") in ("logistics_admin", "super_admin"):
         _push_later(_push_driver(_auth.get("company_id") or "", holder, before.get("driver_name") or before.get("claimed_by") or "",
@@ -18582,6 +18687,13 @@ def _trailer_info(t: dict) -> dict:
     fo = t.get("fact_overrides") or {}
     planned = int(t.get("trailer_count") or 0)
     tca = t.get("trailer_count_actual")
+    # 2026-10-20: Containerture: hænger = del af en hængerkørsel (ikke den
+    # hænger chaufføren valgte ved login). Admin kan rette kørslen.
+    role = _run_role(t)
+    if role and (fo.get("run_role") or (fo.get("trailer_count") in (None, "") and fo.get("used_trailer") not in (True, False))):
+        n = 0 if role == "solo" else 1
+        return {"count": n, "trailer": n > 0, "source": "approved" if fo.get("run_role") else "run", "confirmed": True,
+                "planned": planned, "run_role": role}
     if fo.get("trailer_count") not in (None, ""):
         n, src, conf = int(fo["trailer_count"]), "approved", True
     elif fo.get("used_trailer") in (True, False):
@@ -18892,6 +19004,7 @@ class _PricingContext:
             "trailer": ti["trailer"],
             "trailer_count": ti["count"],
             "trailer_confirmed": ti["confirmed"],
+            "run_role": _run_role(t),
             "container_label": t.get("capacity_label") or "",
             "delivery_label": self.delivery_label(t),
             "start_min": _pricing.hhmm_to_min(start),
@@ -18988,6 +19101,20 @@ def _effective_ts(effective: Any) -> Optional[str]:
     return datetime.now(timezone.utc).isoformat()
 
 
+async def _attach_run_partners(rows: list) -> None:
+    """2026-10-20: run_partners pr. rapportrække: de andre ture i samme hængerkørsel."""
+    run_ids = list({r["run_id"] for r in rows if r.get("run_id")})
+    members: Dict[str, list] = {}
+    if run_ids:
+        for x in await _raw_db.tours.find({"run_id": {"$in": run_ids}}, {"_id": 0, "id": 1, "run_id": 1, "tour_number": 1,
+                                                                          "run_role": 1, "container": 1, "fraction": 1}).to_list(500):
+            members.setdefault(x["run_id"], []).append(x)
+    for r in rows:
+        r["run_partners"] = [{"tour_id": x["id"], "run_role": x.get("run_role") or "",
+                              "tour_number": x.get("tour_number") or (f"#{x['container']}" if x.get("container") else (x.get("fraction") or ""))}
+                             for x in members.get(r.get("run_id") or "", []) if x["id"] != r["tour_id"]]
+
+
 def _rule_is_current(r: dict) -> bool:
     vt = _parse_ts(r.get("version_to") or "")
     return not vt or vt > datetime.now(timezone.utc)
@@ -19013,6 +19140,8 @@ def _report_row(ctx: _PricingContext, t: dict, pending: Dict[str, int]) -> dict:
         "trailer": a["trailer"],
         "trailer_count": a["trailer_count"],
         "trailer_confirmed": a.get("trailer_confirmed", True),
+        "run_role": a.get("run_role") or "",
+        "run_id": t.get("run_id") or "",
         "materials": a.get("materials") or [],
         "delivery_label": a["delivery_label"],
         "container_label": a["container_label"],
@@ -19170,6 +19299,7 @@ async def pricing_options(payload: dict = Depends(get_current_user_payload)):
                        else _pricing.TASK_TYPES),
         "priorities": _pricing.PRIORITIES,
         "day_types": _pricing.DAY_TYPES,
+        "run_roles": _pricing.RUN_ROLES,
         "categories": ({k: v for k, v in _pricing.SURCHARGE_CATEGORIES.items() if k != "stop"} if partner
                        else _pricing.SURCHARGE_CATEGORIES),
         "models": ({k: v for k, v in _pricing.BASE_MODELS.items() if k != "per_unit"} if partner else _pricing.BASE_MODELS),
@@ -19179,7 +19309,7 @@ async def pricing_options(payload: dict = Depends(get_current_user_payload)):
 
 # ----- Prisregler ----------------------------------------------------------
 _COND_LISTS = ("customer_ids", "location_codes", "delivery_labels", "materials", "task_types",
-               "priorities", "day_types", "container_labels")
+               "priorities", "day_types", "container_labels", "run_roles")
 
 
 def _parse_dk_number(x) -> float:
@@ -19222,6 +19352,7 @@ def _clean_rule(body: dict) -> dict:
         raise HTTPException(status_code=400, detail="Navn er påkrævet")
     c = body.get("conditions") or {}
     cond = {k: [str(x) for x in (c.get(k) or []) if str(x).strip()] for k in _COND_LISTS}
+    cond["run_roles"] = [x for x in cond["run_roles"] if x in _pricing.RUN_ROLES]
     cond["trailer"] = c.get("trailer") if c.get("trailer") in ("with", "without") else ""
     cond["trailer_counts"] = sorted({int(x) for x in (c.get("trailer_counts") or []) if str(x).isdigit() and 1 <= int(x) <= 3})
     cond["outcome"] = c.get("outcome") if c.get("outcome") in ("completed", "not_completed", "any") else "completed"
@@ -19428,6 +19559,37 @@ def _bundle_rule_bodies(body: dict) -> List[dict]:
     base = body.get("base")
     if base:
         out.append({**common, "id": base.get("id"), "kind": "base", "name": name, "pricing": base.get("pricing") or {}})
+    # 2026-10-20: Hængerkørsel - egen pris for containeren på bilen og/eller på
+    # hængeren: fast beløb eller % af grundprisen. Gemmes som en ekstra
+    # grundpris med betingelsen "Kørsel" (mere specifik end aftalens grundpris).
+    for part, role, label in (("run_truck", "truck", "Container på bilen (hængerkørsel)"),
+                              ("run_trailer", "trailer", "Container på hængeren")):
+        spec = body.get(part) or {}
+        mode = spec.get("mode")
+        if mode not in ("amount", "percent"):
+            continue
+        try:
+            val = _parse_dk_number(spec.get("value"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"{label}: skriv et tal")
+        if val < 0 or (mode == "percent" and val > 200):
+            raise HTTPException(status_code=400, detail=f"{label}: procent skal være 0-200")
+        if mode == "amount":
+            pr = {"model": "fixed", "amount": val}
+        else:
+            bp = dict((base or {}).get("pricing") or {})
+            if not bp.get("model"):
+                raise HTTPException(status_code=400, detail=f"{label}: procent kræver en grundpris i aftalen")
+            pr = dict(bp)
+            for k in ("amount", "hourly_rate", "start_fee", "min_amount"):
+                if bp.get(k) not in (None, ""):
+                    try:
+                        pr[k] = round(_parse_dk_number(bp[k]) * val / 100, 2)
+                    except (TypeError, ValueError):
+                        pass
+        out.append({**common, "id": spec.get("id"), "kind": "base", "name": f"{name} - {label}",
+                    "conditions": {**cond, "run_roles": [role]}, "pricing": pr,
+                    "run_spec": {"mode": mode, "value": val}})
     # 2026-10-18: Forgæves kørsel = en ekstra grundpris med udfald "forgæves".
     failed = body.get("failed")
     if failed:
@@ -19488,7 +19650,8 @@ async def pricing_save_bundle(body: dict, payload: dict = Depends(get_current_us
                 "surcharges": [{**x, "id": None} for x in (body.get("surcharges") or [])]}
     bid = body.get("bundle_id") or str(uuid.uuid4())
     name = str(body.get("name") or "").strip()
-    items = [(raw, _clean_rule(raw)) for raw in _bundle_rule_bodies(body)]
+    items = [(raw, {**_clean_rule(raw), **({"run_spec": raw["run_spec"]} if raw.get("run_spec") else {})})
+             for raw in _bundle_rule_bodies(body)]
     await _check_rule_customers(cid, payload, [c for _, c in items])
     now_dt = datetime.now(timezone.utc)
     current = [r for r in await _active_rules(cid) if _rule_is_current(r)]
@@ -19585,7 +19748,10 @@ async def pricing_simulate(body: dict, payload: dict = Depends(get_current_user_
         "materials": [m for m in (sc.get("materials") or []) if m] or ([sc["material"]] if sc.get("material") else []),
         "units": {str(k): float(v or 0) for k, v in (sc.get("units") or {}).items()},
         "stops": int(sc.get("stops") or 2),
+        "run_role": sc.get("run_role") if sc.get("run_role") in ("solo", "truck", "trailer") else "solo",
     }
+    if attrs["run_role"] in ("truck", "trailer") and not tc:
+        attrs.update({"trailer": True, "trailer_count": 1})
     time_info = {"gross": minutes, "total": minutes, "pause": 0} if minutes else None
     res = _pricing.price_tour(attrs, rules, time_info, None)
     names = {r["id"]: r.get("name") for r in rules}
@@ -19681,6 +19847,9 @@ async def pricing_report(date_from: str, date_to: str, customer_id: str = "", lo
     pending = await _pending_counts([t["id"] for t in tours])
     rows = sorted((_report_row(ctx, t, pending) for t in tours),
                   key=lambda r: (r["service_date"], r["start_time"] or ""), reverse=True)
+    # 2026-10-20: Hvilke ture kørte sammen (hængerkørsel) - også dem der ikke
+    # er med i perioden/udvalget endnu (fx stadig på vej).
+    await _attach_run_partners(rows)
     priced = [r for r in rows if r["price"].get("total") is not None]
     net = round(sum(r["price"]["total"] for r in priced), 2)
     vat = round(net * float(settings.get("vat_percent") or 0) / 100, 2)
@@ -19783,13 +19952,15 @@ async def pricing_tour_detail(tour_id: str, payload: dict = Depends(get_current_
                           await _active_rules(me["company_id"]))
     await ctx.load([t])
     row = _report_row(ctx, t, await _pending_counts([tour_id]))
+    await _attach_run_partners([row])
     requests = await _raw_db.tour_change_requests.find(
         {"tour_id": tour_id}, {"_id": 0}).sort("created_at", -1).to_list(100)
     return {**row, "original": {"start_time": t.get("on_way_time") or "",
                                 "end_time": t.get("time") if t.get("completed") else "",
                                 "used_trailer": t.get("used_trailer"),
                                 "trailer_count": _trailer_info({**t, "fact_overrides": {}})["count"],
-                                "trailer_confirmed": _trailer_info(t)["confirmed"]},
+                                "trailer_confirmed": _trailer_info(t)["confirmed"],
+                                "run_role": _run_role({**t, "fact_overrides": {}}), "run_eligible": _run_eligible(t)},
             "fact_overrides": t.get("fact_overrides") or {},
             "price_override": t.get("price_override") or {},
             "history": t.get("price_history") or [], "requests": requests}
@@ -19818,6 +19989,11 @@ async def pricing_adjust_tour(tour_id: str, body: dict, payload: dict = Depends(
         fo["used_trailer"] = fo_in["used_trailer"]
     if fo_in.get("deduct_pause") in (True, False):
         fo["deduct_pause"] = fo_in["deduct_pause"]
+    # 2026-10-20: Ret kørslen (solo / på bilen / på hængeren) på en containertur.
+    if fo_in.get("run_role") in ("solo", "truck", "trailer"):
+        if not _run_eligible(t):
+            raise HTTPException(status_code=400, detail="Kørsel (solo/hænger) gælder kun containerture")
+        fo["run_role"] = fo_in["run_role"]
     if fo_in.get("waiting_min") not in (None, ""):
         fo["waiting_min"] = max(0, int(float(fo_in["waiting_min"])))
     po_in = body.get("price_override") or {}
@@ -19988,6 +20164,7 @@ async def driver_tour_pricing(ids: str, payload: dict = Depends(require_role("dr
         info["used_trailer"] = _ti["trailer"]
         info["trailer_count"] = _ti["count"]
         info["trailer_confirmed"] = _ti["confirmed"]
+        info["run_role"] = _run_role(t)
         info["pending_requests"] = pending.get(t["id"], 0)
         info["last_request"] = latest.get(t["id"])
         info["invoiced"] = bool(t.get("price_locked"))
@@ -20025,7 +20202,7 @@ async def tour_finish(tour_id: str, body: dict, payload: dict = Depends(get_curr
         raise HTTPException(status_code=409, detail="Kunden har annulleret turen - kontakt planlæggeren")
     steps: Dict[str, Any] = {}
     # 1) Hængere (mens turen ikke er afsluttet - bagefter via rettelse)
-    if not t.get("completed") and (body.get("trailer_count") not in (None, "") or body.get("used_trailer") in (True, False)):
+    if not t.get("completed") and not _run_role(t) and (body.get("trailer_count") not in (None, "") or body.get("used_trailer") in (True, False)):
         # "none" = spørgsmålet blev ikke stillet (ingen planlagt hænger og ingen
         # hænger i profilen) - 0 hængere, regnet som bekræftet (P7).
         tu: Dict[str, Any] = {"trailer_confirmed": True,
@@ -20132,12 +20309,85 @@ async def driver_finish_settings(payload: dict = Depends(get_current_user_payloa
             "unified_finish": bool(st.get("unified_finish"))}
 
 
+class DriverStartIn(BaseModel):
+    tour_ids: List[str]
+    op_id: str = ""
+
+
+@api_router.post("/driver/tours/{tour_id}/take")
+async def driver_take_tour(tour_id: str, payload: dict = Depends(require_role("driver"))):
+    """2026-10-20: "Tag turen" - en ledig tur lægges i chaufførens Mine ture
+    (ikke startet). Startes derfra, eller med det samme (/driver/tours/start)."""
+    me = await _driver_doc(payload)
+    t = await _raw_db.tours.find_one({"id": tour_id}, {"_id": 0, "receipt_image": 0})
+    if not t:
+        raise HTTPException(status_code=404, detail="Tur ikke fundet")
+    if (t.get("driver_id") or "") not in ("", me["id"]) or (t.get("claimed_by_id") or "") not in ("", me["id"]):
+        raise HTTPException(status_code=409, detail="Turen er taget af en anden")
+    if t.get("completed") or t.get("cancelled") or t.get("not_completed"):
+        raise HTTPException(status_code=409, detail="Turen kan ikke tages længere")
+    if (t.get("claimed_by_id") or "") == me["id"]:
+        return {"id": tour_id, "claimed_by": t.get("claimed_by")}
+    await update_tour(tour_id, TourUpdate(claimed_by=me.get("name") or "", claimed_by_id=me["id"],
+                                          claimed_at=datetime.now(DK_TZ).isoformat()), payload)
+    return {"id": tour_id, "claimed_by": me.get("name") or ""}
+
+
+@api_router.post("/driver/tours/start")
+async def driver_start_tours(body: DriverStartIn, payload: dict = Depends(require_role("driver"))):
+    """2026-10-20: Start én tur - eller flere containerture sammen (hængerkørsel).
+    Første id er turen chaufføren trykkede på; de øvrige kommer med på hængeren.
+    Er den første allerede på vej, lægges de øvrige på dens hænger. Sikker at
+    gentage (op_id) - bruges også fra telefonens kø uden net."""
+    me = await _driver_doc(payload)
+    ids = list(dict.fromkeys(x for x in body.tour_ids if x))[:4]
+    if not ids:
+        raise HTTPException(status_code=400, detail="Ingen tur valgt")
+    if body.op_id:
+        prev = await _raw_db.finish_ops.find_one({"op_id": body.op_id, "tour_id": ids[0]}, {"_id": 0})
+        if prev:
+            return prev["result"]
+    tours = {t["id"]: t for t in await _raw_db.tours.find({"id": {"$in": ids}}, {"_id": 0, "receipt_image": 0}).to_list(10)}
+    if ids[0] not in tours:
+        raise HTTPException(status_code=404, detail="Tur ikke fundet")
+    if len(ids) > 1 and not all(_run_eligible(tours.get(i) or {}) for i in ids):
+        raise HTTPException(status_code=400, detail="Kun containerture kan køres sammen på en hænger")
+    now_hm = datetime.now(DK_TZ).strftime("%H:%M")
+    started, failed = [], []
+    for i, tid in enumerate(ids):
+        t = tours.get(tid)
+        if not t:
+            failed.append({"id": tid, "error": "Tur ikke fundet"})
+            continue
+        if t.get("on_way") and not t.get("completed") and (t.get("claimed_by_id") or "") == me["id"]:
+            started.append(tid)  # kører allerede (fx "Tilføj tur på hængeren")
+            continue
+        try:
+            await update_tour(tid, TourUpdate(on_way=True, on_way_time=now_hm, claimed_by=me.get("name") or "",
+                                              claimed_by_id=me["id"]), payload)
+            started.append(tid)
+        except HTTPException as e:
+            if i == 0:
+                raise
+            d = e.detail if isinstance(e.detail, str) else (e.detail or {}).get("message", "Kunne ikke startes")
+            failed.append({"id": tid, "error": d})
+    after = await _raw_db.tours.find({"id": {"$in": started}}, {"_id": 0, "id": 1, "run_id": 1, "run_role": 1, "run_size": 1}).to_list(10)
+    result = {"started": started, "failed": failed, "tours": after}
+    if body.op_id:
+        await _raw_db.finish_ops.insert_one({"op_id": body.op_id, "tour_id": ids[0], "result": result,
+                                             "created_at": datetime.now(timezone.utc).isoformat()})
+    return result
+
+
 @api_router.put("/driver/tours/{tour_id}/trailer")
 async def driver_set_trailer(tour_id: str, body: dict, payload: dict = Depends(require_role("driver"))):
     me = await _driver_doc(payload)
     t = await _driver_own_tour(me, tour_id)
     if t.get("completed"):
         raise HTTPException(status_code=409, detail="Turen er afsluttet - brug 'Ret tur' for at anmode om ændring")
+    # 2026-10-20: På en containertur afgør hængerkørslen om der er hænger.
+    if _run_role(t):
+        return {"used_trailer": bool(t.get("used_trailer")), "run_role": _run_role(t), "ignored": True}
     upd: Dict[str, Any] = {"used_trailer": bool(body.get("used_trailer")),
                            "trailer_confirmed": True, "trailer_source": "driver"}
     # 2026-10-17: Chaufføren oplyser hvor mange hængere der faktisk blev brugt
@@ -20161,6 +20411,9 @@ async def driver_change_request(tour_id: str, body: dict, payload: dict = Depend
     comment = str(body.get("comment") or "").strip()
     if not comment:
         raise HTTPException(status_code=400, detail="Skriv hvad der skal rettes og hvorfor")
+    if _run_role(t):
+        # 2026-10-20: Hænger på en containertur = hængerkørslen (rettes af admin).
+        body = {k: v for k, v in body.items() if k not in ("trailer_count", "used_trailer")}
     changes: Dict[str, Any] = {}
     cur_start, cur_end = _tour_times(t)
     for k, cur in (("start_time", cur_start), ("end_time", cur_end)):

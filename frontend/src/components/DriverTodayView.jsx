@@ -5,7 +5,7 @@ import {
   CheckCircle2, Inbox, Clock,
 } from "lucide-react";
 import DriverTourCard from "./DriverTourCard";
-import { isHaster, openHours, todayStr } from "../lib/tourHelpers";
+import { isHaster, openHours, todayStr, routeOf } from "../lib/tourHelpers";
 
 /**
  * Chaufførens TURE-fane (2026-10-17, ny opbygning).
@@ -20,6 +20,9 @@ import { isHaster, openHours, todayStr } from "../lib/tourHelpers";
  *              tidligere dage der aldrig blev kørt)
  *   Færdige  - hvad har jeg kørt i dag? (ret vægt herfra)
  * En tur der er i gang ligger altid øverst med en stor "Afslut"-knap.
+ *
+ * 2026-10-20: Kompakte rækker i stedet for store kort, grupperet pr. plads.
+ * En hængerkørsel (flere containere på én gang) står samlet med Bil/Hænger.
  */
 const fmtKg = (kg) => (kg >= 1000 ? `${(kg / 1000).toLocaleString("da-DK", { maximumFractionDigits: 1 })} t` : `${Math.round(kg)} kg`);
 const fmtDate = (d) => {
@@ -60,7 +63,7 @@ function Sheet({ title, onClose, children }) {
 export default function DriverTodayView({
   tours = [], myId = "", myName = "", reportDate, setReportDate, onPrevDay, onNextDay,
   customers = [], activeCustomer, onSwitchCustomer, unread = {}, messagesUnread = 0, onMessages,
-  onStart, onFinish, onOpen, onChat, getRouteInfo = () => null, onOptimize, optimizing = false, workedMin = 0, loading = false, showWorked = true,
+  onStart, onTake, onTakeStart, onFinish, onOpen, onChat, getRouteInfo = () => null, onOptimize, optimizing = false, workedMin = 0, loading = false, showWorked = true,
 }) {
   const [tab, setTab] = useState("mine");
   const [q, setQ] = useState("");
@@ -120,9 +123,44 @@ export default function DriverTodayView({
   const freeCount = free.length;
   const multiCustomer = customers.length > 1;
 
-  const card = (t, i) => (
-    <DriverTourCard key={t.id} tour={t} index={i} routeInfo={getRouteInfo(t.id)} unread={unread[t.id] || 0}
-      mine={isMine(t)} onStart={onStart} onFinish={onFinish} onOpen={onOpen} onChat={onChat} />
+  const row = (t, mode, sameRoute = false) => (
+    <DriverTourCard key={t.id} tour={t} routeInfo={getRouteInfo(t.id)} unread={unread[t.id] || 0} mode={mode} sameRoute={sameRoute}
+      run={t.run_role ? { role: t.run_role, size: t.run_size } : null}
+      onStart={onStart} onTake={onTake} onTakeStart={onTakeStart} onFinish={onFinish} onOpen={onOpen} onChat={onChat} />
+  );
+  const box = (children, testid) => (
+    <div className="rounded-2xl bg-white border border-slate-200 overflow-hidden divide-y divide-slate-100" data-testid={testid}>{children}</div>
+  );
+  // I gang: en hængerkørsel står samlet (bil først), solo-ture hver for sig.
+  const activeBlocks = useMemo(() => {
+    const runs = new Map();
+    const out = [];
+    active.filter(match).forEach(t => {
+      if (t.run_id && t.run_role && t.run_role !== "solo") {
+        if (!runs.has(t.run_id)) { runs.set(t.run_id, []); out.push({ key: t.run_id, run: runs.get(t.run_id) }); }
+        runs.get(t.run_id).push(t);
+      } else out.push({ key: t.id, list: [t] });
+    });
+    out.forEach(b => b.run && b.run.sort((a, c) => (a.run_role === "truck" ? -1 : c.run_role === "truck" ? 1 : (a.run_seq || 0) - (c.run_seq || 0))));
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, q]);
+  // Næste (mine, ikke startet): grupperet pr. plads i den rækkefølge turene skal køres.
+  const mineGroups = useMemo(() => {
+    const m = new Map();
+    mine.filter(match).forEach(t => {
+      const k = t.plads || "Uden lokation";
+      if (!m.has(k)) m.set(k, []);
+      m.get(k).push(t);
+    });
+    return Array.from(m.entries()).map(([k, list]) => ({ key: k, title: k, list }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mine, q]);
+  const groupHead = (title, n, icon = <MapPin className="w-4 h-4 text-slate-400" />) => (
+    <div className="flex items-center gap-2 px-1 pt-1">
+      {icon}<span className="font-bold text-sm text-slate-800 truncate">{title}</span>
+      <span className="text-xs font-bold text-slate-500 bg-white border border-slate-200 rounded-full px-2 py-0.5">{n}</span>
+    </div>
   );
 
   return (
@@ -196,7 +234,18 @@ export default function DriverTodayView({
         {active.length > 0 && tab === "mine" && (
           <div className="space-y-2" data-testid="ture-active">
             <p className="text-[11px] font-bold uppercase tracking-wide text-amber-700 px-1">I gang</p>
-            {active.filter(match).map(card)}
+            {activeBlocks.map(b => b.run ? (
+              <div key={b.key} className="rounded-2xl bg-white border-2 border-violet-200 overflow-hidden divide-y divide-slate-100" data-testid="ture-run-block">
+                <div className="px-3 py-1.5 bg-violet-50 text-[12px] font-bold text-violet-800 flex items-center gap-1.5">
+                  <Truck className="w-3.5 h-3.5" /> Hængerkørsel · {b.run.length} containere
+                </div>
+                {b.run.map((t, i) => {
+                  // Samme hent/aflever som containeren før: adressen står kun én gang.
+                  const key = (x) => routeOf(x).map(l => l.address).join("|");
+                  return row(t, "mine", i > 0 && key(t) === key(b.run[i - 1]));
+                })}
+              </div>
+            ) : <React.Fragment key={b.key}>{box(b.list.map(t => row(t, "mine")))}</React.Fragment>)}
           </div>
         )}
         {active.length > 0 && tab !== "mine" && (
@@ -214,7 +263,12 @@ export default function DriverTodayView({
                 {optimizing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Navigation className="w-4 h-4 text-orange-500" />} Optimer rækkefølge fra {optimizePlads}
               </button>
             )}
-            {mine.filter(match).map(card)}
+            {mineGroups.map(g => (
+              <section key={g.key} className="space-y-1.5">
+                {mineGroups.length > 1 && groupHead(g.title, g.list.length)}
+                {box(g.list.map(t => row(t, "mine")), `ture-mine-${g.key}`)}
+              </section>
+            ))}
             {mine.length === 0 && active.length === 0 && (
               <div className="rounded-2xl bg-white border border-slate-200 p-8 text-center" data-testid="ture-empty">
                 {done.length ? <CheckCircle2 className="w-8 h-8 text-emerald-500 mx-auto" /> : <Inbox className="w-8 h-8 text-slate-300 mx-auto" />}
@@ -229,7 +283,7 @@ export default function DriverTodayView({
         {tab === "mine" && cancelled.length > 0 && (
           <div className="space-y-2" data-testid="ture-cancelled">
             <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500 px-1 pt-1">Annulleret</p>
-            {cancelled.filter(match).map(card)}
+            {box(cancelled.filter(match).map(t => row(t, "mine")))}
           </div>
         )}
 
@@ -252,7 +306,7 @@ export default function DriverTodayView({
                     <span className="text-xs font-bold text-slate-500 bg-white border border-slate-200 rounded-full px-2 py-0.5">{g.list.length}</span>
                     <ChevronDown className={`w-4 h-4 text-slate-400 ml-auto transition-transform ${isCol ? "-rotate-90" : ""}`} />
                   </button>
-                  {!isCol && g.list.map(card)}
+                  {!isCol && box(g.list.map(t => row(t, "free")))}
                 </section>
               );
             })}
@@ -264,7 +318,7 @@ export default function DriverTodayView({
             {done.length === 0 && (
               <div className="rounded-2xl bg-white border border-slate-200 p-8 text-center text-sm text-slate-500">Ingen færdige ture endnu.</div>
             )}
-            {done.filter(match).map(card)}
+            {done.length > 0 && box(done.filter(match).map(t => row(t, "done")))}
           </div>
         )}
       </div>

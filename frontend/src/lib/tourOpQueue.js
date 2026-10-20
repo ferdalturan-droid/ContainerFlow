@@ -36,7 +36,7 @@ export function newOpId() {
   return (window.crypto?.randomUUID?.() || `op_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`);
 }
 
-/** Læg en handling i køen. kind: "put" | "stop" | "photo" | "finish". */
+/** Læg en handling i køen. kind: "put" | "stop" | "photo" | "finish" | "take" | "start". */
 export function enqueueOp(op) {
   const q = load();
   // Samme afslutning (op_id) eller samme stop-kryds lægges ikke i køen to gange.
@@ -53,6 +53,9 @@ async function send(op) {
   if (op.kind === "stop") return axios.post(`${API}/tours/${op.tour_id}/stops/${op.stop_id}/done`, op.body, { timeout: 30000 });
   if (op.kind === "photo") return axios.post(`${API}/tours/${op.tour_id}/photos`, { image: op.image }, { timeout: 60000 });
   if (op.kind === "finish") return axios.post(`${API}/tours/${op.tour_id}/finish`, { ...op.body, op_id: op.op_id }, { timeout: 45000 });
+  // 2026-10-20: "Tag turen" og start (evt. flere ture sammen på hængeren).
+  if (op.kind === "take") return axios.post(`${API}/driver/tours/${op.tour_id}/take`, {}, { timeout: 30000 });
+  if (op.kind === "start") return axios.post(`${API}/driver/tours/start`, { tour_ids: op.tour_ids, op_id: op.op_id }, { timeout: 30000 });
   return null;
 }
 

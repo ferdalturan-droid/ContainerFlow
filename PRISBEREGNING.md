@@ -1,8 +1,8 @@
 # Prisberegning i ContainerFlow - komplet forklaring
 
 Skrevet 20.10.2026 til en anden AI eller udvikler, der skal forstå, ændre eller fejlfinde
-priserne. Del A forklarer reglerne trin for trin, med henvisninger til koden. Del B har over 150
-eksempler. De er regnet af den rigtige prismotor og kontrolleret mod håndregnede facitter.
+priserne. Opdateret samme dag med hængerkørsel. Del A forklarer reglerne trin for trin, med
+henvisninger til koden. Del B har over 160 eksempler. De er regnet af den rigtige prismotor og kontrolleret mod håndregnede facitter.
 
 Kilder:
 - `backend/pricing.py` er selve motoren. Den består af rene funktioner uden database.
@@ -57,6 +57,7 @@ til Del B og ned.
 | Aftalt/manuel pris | Et fast beløb for turen, der erstatter reglerne | `tour.price_override` med `mode: "fixed"` |
 | Ekstra linjer | Faste linjer oveni, fx "Ekstra rengøring 300 kr" | `price_override.extra_lines` |
 | Faktureret | Prisen er frosset som et øjebliksbillede | `tour.price_locked` |
+| Hængerkørsel | 2-3 containerture kørt sammen: én "på bilen", resten "på hængeren". En containertur kørt alene er "solo" | `tour.run_id`, `tour.run_role` |
 
 ### A3. Overblik: fra tur til pris
 
@@ -97,10 +98,11 @@ Koden: `_PricingContext.price(t)` i `server.py` kalder `pricing.price_tour(attrs
 | Prioritet | `priority` | urgent, haster og high bliver "haster". low, senere og sidst bliver "lav". Alt andet er "normal" |
 | Dagtype | Kørselsdatoen (A4b) + helligdagskalender (A4c) | Hverdag, Lørdag, Søndag eller Helligdag. Typerne udelukker hinanden: en helligdag er altid "Helligdag" |
 | Hænger / antal hængere | `_trailer_info(t)` | Se A4d |
+| Kørsel (`run_role`) | `_run_role(t)`: admin-rettelse (`fact_overrides.run_role`), ellers turens rolle | solo, truck (på bilen) eller trailer (på hængeren). Tom på varekørsel, løs afhentning og ture startet før 20.10.2026. Se A4e |
 | Containerstørrelse | `capacity_label` på turen/ordren | Tekst, fx "Åben container 20 m³" |
 | Starttid (`start_min`) | Rettet starttid, ellers `on_way_time` ("På vej") | Minutter efter midnat. -1 hvis den mangler |
 | Udfald | Forgæves, hvis turen er markeret "kan ikke gennemføres" og ikke gennemført. Ellers gennemført | |
-| Containere | Se A4e | Bruges af "pris pr. container" |
+| Containere | Se A4f | Bruges af "pris pr. container" |
 | Enheder | Indholdslinjernes antal pr. enhed | Registreret antal (`actual_qty`) vinder over planlagt (`qty`). Samme enhed lægges sammen |
 | Stop | Antal stop på turen | Stop, som chaufføren selv har tilføjet, tæller først når planlæggeren har godkendt dem. Ingen stopliste = 2 (afhentning + aflevering) |
 | Ventetid | Kun `fact_overrides.waiting_min` | Se A10. Den ventetid, chaufføren selv oplyser (`waiting_reported_min`), indgår ikke i prisen |
@@ -158,7 +160,14 @@ Vigtigt: kilderne lægges **ikke** sammen. Har lokationen en kalender for året,
 
 #### A4d. Hængere (`_trailer_info`)
 
-Én sandhed bruges til pris, rapport og chauffør. Rækkefølgen er:
+Én sandhed bruges til pris, rapport og chauffør.
+
+**Containerture med en kørsel-rolle** (startet fra 20.10.2026):
+- "Med hænger" betyder, at turen kørte i en hængerkørsel. Det gælder både containeren på bilen og dem på hængeren, og antallet af hængere er 1.
+- En solo-tur er uden hænger, også selvom chaufføren valgte en hænger ved login. Kunden betaler ikke for en tom hænger.
+- Admin kan rette kørslen. Det er altid bekræftet.
+
+**Alle andre ture** (varekørsel, løs afhentning og ældre containerture) bruger denne rækkefølge:
 
 1. godkendt eller admin-rettet antal (`fact_overrides.trailer_count`);
 2. ældre godkendt ja/nej (`fact_overrides.used_trailer`). "Ja" giver chaufførens antal, ellers det planlagte, ellers 1;
@@ -168,7 +177,23 @@ Vigtigt: kilderne lægges **ikke** sammen. Har lokationen en kalender for året,
 
 Et automatisk forslag fra chaufførens profil (`trailer_source: "auto"`, ikke bekræftet) prissættes **med** hænger. Turen får markeringen "Hænger: automatisk, ikke bekræftet", og Rapport har et filter til den, så planlæggeren kan tjekke før fakturering.
 
-#### A4e. Containere
+#### A4e. Hængerkørsel (`_run_on_start`, `_run_recompute`)
+
+- **Uden hænger** (valgt ved login) kan chaufføren have én tur i gang. Den starter som solo.
+- **Med hænger** kan chaufføren have kapaciteten + 1 ture i gang: en hænger til 1 container giver 2 ture, til 2 containere 3 ture.
+- **Start fra appen.** Når chaufføren trykker Start på en containertur, vises ture fra samme plads samme dag (og forsinkede).
+  - Samme materiale står først.
+  - Både egne og ledige ture vises.
+  - Chaufføren kan vælge 0-2 ture med. De startes i ét kald (`POST /api/driver/tours/start`).
+- **Regel på serveren:** alle chaufførens containerture, der er på vej på samme tid, er én kørsel.
+  - En tur startet, mens andre kører, kommer automatisk med. Det gælder også fra ældre app-versioner.
+  - Den først startede (`on_way_at`) er "på bilen", resten "på hængeren".
+- **Tilføj tur på hængeren** (fra en tur, der kører): den nye tur starter og kommer med.
+- **Tag af hængeren / Fortryd / planlæggeren nulstiller / turen slettes:** turen forlader kørslen, og rollerne regnes igen. Er der én tur tilbage, bliver den solo.
+- **Afsluttede ture** beholder deres rolle. Fakturerede ture røres aldrig.
+- **Varekørsel og løs afhentning** kan ikke indgå. Deres hængere hører til selve turen (planlagt eller oplyst ved afslutning).
+
+#### A4f. Containere
 
 Antallet findes i denne rækkefølge:
 1. antal registrerede vægte (`container_weights`);
@@ -243,6 +268,7 @@ Alle udfyldte betingelser skal passe. En tom betingelse passer altid.
 | Antal hængere | Antallet er i listen | "3" betyder 3 eller flere |
 | Tidsrum | Turens **start**tid ligger i [fra, til) | Over midnat er tilladt (18:00-06:00). Uden starttid passer et tidsrum aldrig |
 | Udfald | Standard er "gennemført" | En almindelig regel gælder **ikke** forgæves ture. Brug "forgæves" eller "alle" |
+| Kørsel | Turens rolle er i listen (solo / på bilen / på hængeren) | En tur uden rolle (varekørsel, ældre ture) passer aldrig |
 
 ### A8. Hvilken regel vinder (`specificity`, `select_rules`)
 
@@ -257,6 +283,7 @@ Specificitet er summen af point for de betingelser, reglen har udfyldt:
 | Materiale | 4 |
 | Containerstørrelse | 2 |
 | Antal hængere | 2 |
+| Kørsel | 2 |
 | Prioritet | 1 |
 | Dagtype | 1 |
 | Hænger med/uden | 1 |
@@ -277,6 +304,12 @@ Specificitet er summen af point for de betingelser, reglen har udfyldt:
   - hænger → med hænger, eller et bestemt antal;
   - aften → tidsrum, standard 18:00-06:00.
 - Tillæggene arver aftalens betingelser (kunde, lokation ...) med udfald "gennemført". Samme tillægstype to gange i én aftale afvises.
+- **Hængerkørsel i aftalen.** "Container på hængeren" og "Container på bilen" kan hver være:
+  - som grundprisen (ingen regel);
+  - et fast beløb (en fast pris);
+  - en procent af grundprisen.
+
+  Ved procent gemmes en kopi af grundprisen, hvor alle beløb er ganget med procenten: fast beløb, pris pr. container/enhed, timepris, startgebyr og minimumsbeløb. Begge gemmes som en ekstra grundpris med aftalens betingelser + "Kørsel", ligesom forgæves-prisen. Den har 2 point mere end aftalens grundpris.
 
 ### A9. Grundbeløbet efter prismodel (`price_tour`)
 
@@ -308,7 +341,7 @@ Grundbeløbet er summen af grundprisens linjer: inkl. startgebyr og evt. "op til
 | kr | Værdien |
 | % | Grundbeløb × værdi / 100. Altid af grundbeløbet, **aldrig af andre tillæg**. Flere %-tillæg lægges sammen, de ganges ikke |
 | kr/t, ventetid | Ventetiden rundet op til påbegyndt kvarter × værdi / 60 |
-| kr/t, andre kategorier | Timepris: de fakturerbare minutter. Andre modeller: turens tid efter deling, **uden** afrunding og pausefradrag. Uden tid: intet tillæg |
+| kr/t, andre kategorier | Timepris: de fakturerbare minutter. Andre modeller: turens tid efter deling, **uden** afrunding og pausefradrag. Uden tid: intet tillæg. Teksten viser minutterne uden ".0" |
 | Ekstra stop | Værdi × (stop - inkluderede). Standard er 2 inkluderede. Enheden er altid kr |
 
 - Ventetidstillæg kommer kun med, når turen har ventetid.
@@ -348,6 +381,7 @@ Admin skal altid skrive en begrundelse. Alt logges i `price_history`.
   - Regler der er slået fra, indgår ikke.
 - **Markeringer** (`flags`):
   - "Minimum N min anvendt";
+  - "Flere grundpriser passer lige godt (A, B) - den senest rettede bruges";
   - "Manuel pris";
   - "Hænger: automatisk, ikke bekræftet";
   - "Faktureret";
@@ -379,15 +413,18 @@ Når ture markeres som faktureret, gemmes turens pris som et øjebliksbillede i 
 
 ### A15. Kendte særheder (vigtige for fejlfinding)
 
-1. **To regler med samme specificitet:** den senest rettede vinder. Det kan se tilfældigt ud. Gemmer man en aftale med præcis de samme betingelser som en eksisterende, svarer editoren 409 og viser konflikten.
+1. **To regler med samme specificitet:** den senest rettede vinder. Turen markeres "Flere grundpriser passer lige godt". Gemmer man en aftale med præcis de samme betingelser som en eksisterende, svarer editoren 409 og viser konflikten.
 2. **Kun ét tillæg pr. kategori.** To "Andet"-gebyrer kan ikke kombineres.
 3. **"Fra en dato" følger oprettelsen.** Brug "Ture kørt fra en dato" ved prisstigninger, der skal følge kørselsdatoen.
 4. **Lokationens helligdagskalender erstatter den egne** (den lægges ikke sammen med den).
 5. **Tillæg i en prisaftale gælder ikke forgæves ture**, fordi de har udfald "gennemført".
-6. **Pris pr. time på fast pris** bruger turens tid uden afrunding og uden pausefradrag. Teksten kan vise "45.0 min".
+6. **Pris pr. time på fast pris** bruger turens tid uden afrunding og uden pausefradrag.
 7. **"Ingen afrunding" runder halve minutter til lige tal** (bankers rounding). Det sker kun ved delt tid.
 8. **Ventetid i prisen kommer kun fra godkendte rettelser** (`fact_overrides.waiting_min`), ikke fra den ventetid chaufføren selv oplyser.
 9. **Tal i beløbsfelter læses dansk:** "1.000" er tusind, "1.000,50" er tusind og halvtreds øre, "1.5" er halvanden.
+10. **En mere specifik aftale uden hængerpris** (fx kunde + lokation) slår kundens generelle hængerpris. Hver aftale skal derfor have sin egen hængerpris.
+11. **Timepris + hængerpris giver dobbelt rabat:** tiden deles allerede mellem turene, der kører samtidig. Overvej om hængerprisen også skal gælde.
+12. **Planlagt antal hængere på en containertur** bruges ikke længere til prisen for ture med en kørsel-rolle. Det, der faktisk blev kørt (kørslen), gælder.
 
 ---
 
@@ -398,7 +435,7 @@ håndregnede facitter. Standardturen er en afhentning for Helsingør Forsyning (
 Materialet er Pap, dagen er en hverdag (tirsdag 20.10.2026), turen starter kl. 08:00 og er gennemført.
 Den har ingen hænger, ingen ventetid og ingen ekstra stop. Hvert eksempel nævner kun det, der afviger.
 
-<!-- Genereret af scripts/prisberegning_eksempler.py - 151 eksempler, alle kontrolleret mod prismotoren -->
+<!-- Genereret af scripts/prisberegning_eksempler.py - 163 eksempler, alle kontrolleret mod prismotoren -->
 
 ### B1. Grundlæggende
 
@@ -559,8 +596,9 @@ Passer flere grundpriser på samme tur, vinder den mest specifikke. Point: kunde
 **Resultat:**
   - Pris B: 950,00 kr
   - **I alt 950,00 kr** (ekskl. moms)
+  - Markeringer: Flere grundpriser passer lige godt (Pris B, Pris A) - den senest rettede bruges
 
-**Hvorfor:** Begge har 0 point. Så vinder den, der senest er rettet (updated_at). Det er en faldgrube: to generelle priser bør ikke findes samtidig. Editoren advarer, når betingelserne er helt ens.
+**Hvorfor:** Begge har 0 point. Så vinder den, der senest er rettet (updated_at). Det er en faldgrube: to generelle priser bør ikke findes samtidig. Editoren advarer, når betingelserne er helt ens, og turen får markeringen "Flere grundpriser passer lige godt".
 
 #### E12. Lige specifikke på hver sin led
 
@@ -573,8 +611,9 @@ Passer flere grundpriser på samme tur, vinder den mest specifikke. Point: kunde
 **Resultat:**
   - Hverdagspris: 1.000,00 kr
   - **I alt 1.000,00 kr** (ekskl. moms)
+  - Markeringer: Flere grundpriser passer lige godt (Hverdagspris, Haster-pris) - den senest rettede bruges
 
-**Hvorfor:** Prioritet og dagtype giver 1 point hver. En haster-tur på en hverdag passer på begge, og så vinder den senest rettede - her hverdagsprisen. Vil man have et haster-pristrin, er et haster-TILLÆG det rigtige.
+**Hvorfor:** Prioritet og dagtype giver 1 point hver. En haster-tur på en hverdag passer på begge, og så vinder den senest rettede - her hverdagsprisen - og turen markeres. Vil man have et haster-pristrin, er et haster-TILLÆG det rigtige.
 
 #### E13. Kundepris for en anden kunde gælder ikke
 
@@ -1407,10 +1446,10 @@ Kører samme chauffør flere ture samtidig (fx flere containere på én hænger)
 
 **Resultat:**
   - Fast pris: 800,00 kr
-  - Kran (45.0 min × 120 kr/t): 90,00 kr
+  - Kran (45 min × 120 kr/t): 90,00 kr
   - **I alt 890,00 kr** (ekskl. moms)
 
-**Hvorfor:** Fast pris har ingen fakturerbar tid. Et kr/t-tillæg (ikke ventetid) bruger så turens tid efter deling - UDEN afrunding og UDEN pausefradrag: 45 min × 120/60 = 90. (Teksten viser "45.0 min".)
+**Hvorfor:** Fast pris har ingen fakturerbar tid. Et kr/t-tillæg (ikke ventetid) bruger så turens tid efter deling - UDEN afrunding og UDEN pausefradrag: 45 min × 120/60 = 90.
 
 
 ### B7. Pris pr. container og pr. enhed
@@ -1628,11 +1667,179 @@ Et automatisk forslag prissættes med hænger, men turen får markeringen "Hæng
 Standardpris 1.000 + hængertillæg 300 = 1.300,00 kr. Markeringer: Hænger: automatisk, ikke bekræftet.
 
 
+### B8c. Hængerkørsel (kørsel: solo, på bilen, på hængeren)
+
+En containertur får en kørsel-rolle, når den startes. Kørt alene = solo. Kører chaufføren flere containere på én gang (hænger), er den først startede "på bilen" og resten "på hængeren". Prisreglernes betingelse "Kørsel" (2 point) kan give hver rolle sin egen pris. "Med hænger" på en containertur betyder: del af en hængerkørsel (både bil og hænger). Varekørsel og løs afhentning har ingen rolle. Ældre ture (før 20.10.2026) har heller ingen rolle og prissættes som før.
+
+#### E88. Solo
+
+**Regler:**
+- **HF** - fast pris 1.000,00 kr. Gælder: kunde = Helsingør Forsyning. Specificitet 64.
+- **HF - Container på hængeren** - fast pris 700,00 kr. Gælder: kunde = Helsingør Forsyning, kørsel = På hængeren. Specificitet 66.
+
+**Turen:** kunde Helsingør Forsyning; lokation 1101; materiale Pap; dagtype Hverdag; kørsel solo; start kl. 08:00
+
+**Resultat:**
+  - HF: 1.000,00 kr
+  - **I alt 1.000,00 kr** (ekskl. moms)
+
+**Hvorfor:** En solo-tur får grundprisen.
+
+#### E89. På hængeren
+
+**Regler:**
+- **HF** - fast pris 1.000,00 kr. Gælder: kunde = Helsingør Forsyning. Specificitet 64.
+- **HF - Container på hængeren** - fast pris 700,00 kr. Gælder: kunde = Helsingør Forsyning, kørsel = På hængeren. Specificitet 66.
+
+**Turen:** kunde Helsingør Forsyning; lokation 1101; materiale Pap; dagtype Hverdag; kørsel på hængeren; start kl. 08:00
+
+**Resultat:**
+  - HF - Container på hængeren: 700,00 kr
+  - **I alt 700,00 kr** (ekskl. moms)
+
+**Hvorfor:** Hængerprisen har kunde + kørsel = 66 point mod 64 og vinder.
+
+#### E90. På bilen uden egen bil-pris
+
+**Regler:**
+- **HF** - fast pris 1.000,00 kr. Gælder: kunde = Helsingør Forsyning. Specificitet 64.
+- **HF - Container på hængeren** - fast pris 700,00 kr. Gælder: kunde = Helsingør Forsyning, kørsel = På hængeren. Specificitet 66.
+
+**Turen:** kunde Helsingør Forsyning; lokation 1101; materiale Pap; dagtype Hverdag; kørsel på bilen (hængerkørsel); start kl. 08:00
+
+**Resultat:**
+  - HF: 1.000,00 kr
+  - **I alt 1.000,00 kr** (ekskl. moms)
+
+**Hvorfor:** Containeren på bilen får grundprisen, når aftalen ikke har en bil-pris.
+
+#### E91. På bilen med egen bil-pris
+
+**Regler:**
+- **HF** - fast pris 1.000,00 kr. Gælder: kunde = Helsingør Forsyning. Specificitet 64.
+- **HF - Container på hængeren** - fast pris 700,00 kr. Gælder: kunde = Helsingør Forsyning, kørsel = På hængeren. Specificitet 66.
+- **HF - Container på bilen** - fast pris 900,00 kr. Gælder: kunde = Helsingør Forsyning, kørsel = På bilen (hængerkørsel). Specificitet 66.
+
+**Turen:** kunde Helsingør Forsyning; lokation 1101; materiale Pap; dagtype Hverdag; kørsel på bilen (hængerkørsel); start kl. 08:00
+
+**Resultat:**
+  - HF - Container på bilen: 900,00 kr
+  - **I alt 900,00 kr** (ekskl. moms)
+
+**Hvorfor:** Aftalen har også en pris for containeren på bilen i en hængerkørsel.
+
+#### E92. Hængertillæg gælder hele kørslen, ikke solo
+
+**Regler:**
+- **HF** - fast pris 1.000,00 kr. Gælder: kunde = Helsingør Forsyning. Specificitet 64.
+- **HF - Container på hængeren** - fast pris 700,00 kr. Gælder: kunde = Helsingør Forsyning, kørsel = På hængeren. Specificitet 66.
+- **Hænger** - tillæg (Hænger): 150,00 kr. Gælder: med hænger. Specificitet 1.
+
+**Turen:** kunde Helsingør Forsyning; lokation 1101; materiale Pap; dagtype Hverdag; kørsel på hængeren; start kl. 08:00
+
+**Resultat:**
+  - HF - Container på hængeren: 700,00 kr
+  - Hænger: 150,00 kr
+  - **I alt 850,00 kr** (ekskl. moms)
+
+**Hvorfor:** 700 + 150. Hængertillægget (med hænger) rammer både bil og hænger i en kørsel.
+
+#### E93. Solo med hænger på bilen (tom hænger)
+
+**Regler:**
+- **HF** - fast pris 1.000,00 kr. Gælder: kunde = Helsingør Forsyning. Specificitet 64.
+- **HF - Container på hængeren** - fast pris 700,00 kr. Gælder: kunde = Helsingør Forsyning, kørsel = På hængeren. Specificitet 66.
+- **Hænger** - tillæg (Hænger): 150,00 kr. Gælder: med hænger. Specificitet 1.
+
+**Turen:** kunde Helsingør Forsyning; lokation 1101; materiale Pap; dagtype Hverdag; kørsel solo; start kl. 08:00
+
+**Resultat:**
+  - HF: 1.000,00 kr
+  - **I alt 1.000,00 kr** (ekskl. moms)
+
+**Hvorfor:** Har chaufføren valgt en hænger ved login men kørt én container, er turen solo: ingen hængertillæg. Kunden skal ikke betale for en tom hænger.
+
+#### E94. Mere specifik aftale uden hængerpris
+
+**Regler:**
+- **HF - Container på hængeren** - fast pris 700,00 kr. Gælder: kunde = Helsingør Forsyning, kørsel = På hængeren. Specificitet 66.
+- **HF på 1101** - fast pris 1.100,00 kr. Gælder: kunde = Helsingør Forsyning, lokation = 1101. Specificitet 96.
+
+**Turen:** kunde Helsingør Forsyning; lokation 1101; materiale Pap; dagtype Hverdag; kørsel på hængeren; start kl. 08:00
+
+**Resultat:**
+  - HF på 1101: 1.100,00 kr
+  - **I alt 1.100,00 kr** (ekskl. moms)
+
+**Hvorfor:** Faldgrube: aftalen for HF på 1101 (96 point) slår HF's hængerpris (66 point). Hver aftale skal derfor have sin egen hængerpris (afsnittet "Hængerkørsel" i aftalen).
+
+#### E95. Forgæves på hængeren
+
+**Regler:**
+- **HF** - fast pris 1.000,00 kr. Gælder: kunde = Helsingør Forsyning. Specificitet 64.
+- **HF - Container på hængeren** - fast pris 700,00 kr. Gælder: kunde = Helsingør Forsyning, kørsel = På hængeren. Specificitet 66.
+- **HF forgæves** - fast pris 450,00 kr. Gælder: kunde = Helsingør Forsyning, udfald = forgæves. Specificitet 65.
+
+**Turen:** kunde Helsingør Forsyning; lokation 1101; materiale Pap; dagtype Hverdag; kørsel på hængeren; start kl. 08:00; FORGÆVES
+
+**Resultat:**
+  - HF forgæves: 450,00 kr
+  - **I alt 450,00 kr** (ekskl. moms)
+
+**Hvorfor:** Hængerprisen gælder gennemførte ture; en forgæves container får forgæves-prisen.
+
+#### E96. Ældre tur uden rolle
+
+**Regler:**
+- **HF** - fast pris 1.000,00 kr. Gælder: kunde = Helsingør Forsyning. Specificitet 64.
+- **HF - Container på hængeren** - fast pris 700,00 kr. Gælder: kunde = Helsingør Forsyning, kørsel = På hængeren. Specificitet 66.
+
+**Turen:** kunde Helsingør Forsyning; lokation 1101; materiale Pap; dagtype Hverdag; 1 hænger(e); start kl. 08:00
+
+**Resultat:**
+  - HF: 1.000,00 kr
+  - **I alt 1.000,00 kr** (ekskl. moms)
+
+**Hvorfor:** En tur startet før hængerkørsel fandtes har ingen rolle. Kørsel-reglerne passer ikke, så prisen er som før.
+
+#### E97. Timepris + hængerkørsel
+
+**Regler:**
+- **HF timepris** - timepris 600 kr/t, ingen afrunding, pause trækkes fra. Gælder: kunde = Helsingør Forsyning. Specificitet 64.
+- **HF timepris - Container på hængeren** - timepris 420 kr/t, ingen afrunding, pause trækkes fra. Gælder: kunde = Helsingør Forsyning, kørsel = På hængeren. Specificitet 66.
+
+**Turen:** kunde Helsingør Forsyning; lokation 1101; materiale Pap; dagtype Hverdag; kørsel på hængeren; start kl. 08:00; tid 90 min (af 180 min før deling med samtidige ture)
+
+**Resultat:**
+  - HF timepris - Container på hængeren (1t 30m × 420 kr/t): 630,00 kr
+  - **I alt 630,00 kr** (ekskl. moms)
+
+**Hvorfor:** Tiden er allerede delt mellem turene (90 af 180 min), og hængerprisen er 70 % af timeprisen: 420 × 90/60 = 630. Overvej om begge dele skal gælde.
+
+
+### B8d. Hængerkørsel i prisaftalen og på turen
+
+#### E98. Procent og fast beløb i aftalen
+
+Aftalen "HF" har timepris 600 kr/t + startgebyr 200 kr. "Container på hængeren: 75 %" gemmes som en grundpris med timepris 450 kr/t og startgebyr 150 kr (samme afrunding). "Container på bilen: 950 kr" gemmes som en fast pris på 950,00 kr. Begge har kørsel-betingelsen og 66 point (aftalens grundpris har 64).
+
+#### E99. Hænger og kørsel på forskellige ture
+
+| Tur | Kørsel | Hængere i prisen | Bekræftet |
+|---|---|---|---|
+| Solo containertur | solo | 0 | ja |
+| På bilen | truck | 1 | ja |
+| På hængeren | trailer | 1 | ja |
+| Admin rettede til 'på hængeren' | trailer | 1 | ja |
+| Varekørsel med 2 planlagte hængere | - | 2 | ja |
+| Ældre containertur, automatisk hænger | - | 1 | NEJ |
+
+
 ### B9. Ventetid
 
 Ventetid kommer fra turens godkendte rettelser (chaufførens anmodning, automatisk godkendelse eller admin). Uden ventetid ingen linje. Kr/t-ventetid afregnes pr. PÅBEGYNDT kvarter.
 
-#### E88. 20 min ventetid
+#### E100. 20 min ventetid
 
 **Regler:**
 - **Standardpris** - fast pris 1.000,00 kr. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -1647,7 +1854,7 @@ Ventetid kommer fra turens godkendte rettelser (chaufførens anmodning, automati
 
 **Hvorfor:** 20 -> 30 min (påbegyndt kvarter). 400 × 30/60 = 200.
 
-#### E89. 15 min ventetid
+#### E101. 15 min ventetid
 
 **Regler:**
 - **Standardpris** - fast pris 1.000,00 kr. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -1662,7 +1869,7 @@ Ventetid kommer fra turens godkendte rettelser (chaufførens anmodning, automati
 
 **Hvorfor:** Præcis ét kvarter.
 
-#### E90. Ingen ventetid
+#### E102. Ingen ventetid
 
 **Regler:**
 - **Standardpris** - fast pris 1.000,00 kr. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -1676,7 +1883,7 @@ Ventetid kommer fra turens godkendte rettelser (chaufførens anmodning, automati
 
 **Hvorfor:** Ingen linje.
 
-#### E91. Ventetid som fast beløb
+#### E103. Ventetid som fast beløb
 
 **Regler:**
 - **Standardpris** - fast pris 1.000,00 kr. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -1691,7 +1898,7 @@ Ventetid kommer fra turens godkendte rettelser (chaufførens anmodning, automati
 
 **Hvorfor:** Fast 150 kr når der er ventetid - uanset hvor lang.
 
-#### E92. Ventetid i procent
+#### E104. Ventetid i procent
 
 **Regler:**
 - **Standardpris** - fast pris 1.000,00 kr. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -1706,7 +1913,7 @@ Ventetid kommer fra turens godkendte rettelser (chaufførens anmodning, automati
 
 **Hvorfor:** 10 % af grundprisen når der er ventetid.
 
-#### E93. Aftalt pris + ventetid oveni
+#### E105. Aftalt pris + ventetid oveni
 
 **Regler:**
 - **Standardpris** - fast pris 1.000,00 kr. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -1722,7 +1929,7 @@ Ventetid kommer fra turens godkendte rettelser (chaufførens anmodning, automati
 
 **Hvorfor:** Aftalt 2.000. Ventetid 25 -> 30 min = 200 lægges oveni (valgt ved aftalen).
 
-#### E94. Aftalt pris uden ventetid oveni
+#### E106. Aftalt pris uden ventetid oveni
 
 **Regler:**
 - **Standardpris** - fast pris 1.000,00 kr. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -1738,7 +1945,7 @@ Ventetid kommer fra turens godkendte rettelser (chaufførens anmodning, automati
 
 **Hvorfor:** Ventetiden er indregnet (0 kr).
 
-#### E95. 61 min ventetid
+#### E107. 61 min ventetid
 
 **Regler:**
 - **Standardpris** - fast pris 1.000,00 kr. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -1758,7 +1965,7 @@ Ventetid kommer fra turens godkendte rettelser (chaufførens anmodning, automati
 
 En tur har som udgangspunkt 2 stop (afhentning + aflevering). Tillægget betales pr. stop ud over de inkluderede (standard 2).
 
-#### E96. 4 stop, 2 inkluderet
+#### E108. 4 stop, 2 inkluderet
 
 **Regler:**
 - **Standardpris** - fast pris 1.000,00 kr. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -1773,7 +1980,7 @@ En tur har som udgangspunkt 2 stop (afhentning + aflevering). Tillægget betales
 
 **Hvorfor:** 2 ekstra × 150.
 
-#### E97. 2 stop
+#### E109. 2 stop
 
 **Regler:**
 - **Standardpris** - fast pris 1.000,00 kr. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -1787,7 +1994,7 @@ En tur har som udgangspunkt 2 stop (afhentning + aflevering). Tillægget betales
 
 **Hvorfor:** Ingen ekstra stop - ingen linje.
 
-#### E98. 3 stop, 1 inkluderet
+#### E110. 3 stop, 1 inkluderet
 
 **Regler:**
 - **Standardpris** - fast pris 1.000,00 kr. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -1807,7 +2014,7 @@ En tur har som udgangspunkt 2 stop (afhentning + aflevering). Tillægget betales
 
 Tidsrummet gælder turens STARTtidspunkt. Fra-tid er med, til-tid er ikke. Et tidsrum over midnat (18:00-06:00) er tilladt.
 
-#### E99. Start 19:30
+#### E111. Start 19:30
 
 **Regler:**
 - **Standardpris** - fast pris 1.000,00 kr. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -1822,7 +2029,7 @@ Tidsrummet gælder turens STARTtidspunkt. Fra-tid er med, til-tid er ikke. Et ti
 
 **Hvorfor:** I tidsrummet.
 
-#### E100. Start 06:00
+#### E112. Start 06:00
 
 **Regler:**
 - **Standardpris** - fast pris 1.000,00 kr. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -1836,7 +2043,7 @@ Tidsrummet gælder turens STARTtidspunkt. Fra-tid er med, til-tid er ikke. Et ti
 
 **Hvorfor:** 06:00 er sluttiden og er ikke med.
 
-#### E101. Start 05:59
+#### E113. Start 05:59
 
 **Regler:**
 - **Standardpris** - fast pris 1.000,00 kr. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -1851,7 +2058,7 @@ Tidsrummet gælder turens STARTtidspunkt. Fra-tid er med, til-tid er ikke. Et ti
 
 **Hvorfor:** Før 06:00 = med.
 
-#### E102. Start 17:59
+#### E114. Start 17:59
 
 **Regler:**
 - **Standardpris** - fast pris 1.000,00 kr. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -1865,7 +2072,7 @@ Tidsrummet gælder turens STARTtidspunkt. Fra-tid er med, til-tid er ikke. Et ti
 
 **Hvorfor:** Før 18:00.
 
-#### E103. Ingen starttid
+#### E115. Ingen starttid
 
 **Regler:**
 - **Standardpris** - fast pris 1.000,00 kr. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -1879,7 +2086,7 @@ Tidsrummet gælder turens STARTtidspunkt. Fra-tid er med, til-tid er ikke. Et ti
 
 **Hvorfor:** Uden starttid kan et tidsrum aldrig passe.
 
-#### E104. Dagtidsrum 06-18, start 18:00
+#### E116. Dagtidsrum 06-18, start 18:00
 
 **Regler:**
 - **Standardpris** - fast pris 1.000,00 kr. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -1893,7 +2100,7 @@ Tidsrummet gælder turens STARTtidspunkt. Fra-tid er med, til-tid er ikke. Et ti
 
 **Hvorfor:** 18:00 er sluttiden.
 
-#### E105. Aftentillæg pr. time på timepris
+#### E117. Aftentillæg pr. time på timepris
 
 **Regler:**
 - **Timepris** - timepris 600 kr/t, ingen afrunding, pause trækkes fra. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -1911,7 +2118,7 @@ Tidsrummet gælder turens STARTtidspunkt. Fra-tid er med, til-tid er ikke. Et ti
 
 ### B12. Dagtyper og helligdage
 
-#### E106. Helligdage 2026 i logistikfirmaets egen kalender (standard)
+#### E118. Helligdage 2026 i logistikfirmaets egen kalender (standard)
 
 Officielle danske helligdage beregnes for ethvert år (påskeformlen). Standard-tilvalg: Grundlovsdag, Juleaften, Nytårsaftensdag. 1. maj kan vælges til. Store bededag findes ikke (afskaffet fra 2024).
 
@@ -1931,7 +2138,7 @@ Officielle danske helligdage beregnes for ethvert år (påskeformlen). Standard-
 | 2026-12-26 | 2. juledag |
 | 2026-12-31 | Nytårsaftensdag |
 
-#### E107. Dagtype for udvalgte datoer
+#### E119. Dagtype for udvalgte datoer
 
 | Dato | Dagtype |
 |---|---|
@@ -1945,23 +2152,23 @@ Officielle danske helligdage beregnes for ethvert år (påskeformlen). Standard-
 
 En helligdag er altid "Helligdag", også på en lørdag eller søndag (26.12.2026 er en lørdag).
 
-#### E108. Egen kalender: fravalgt juleaften, tilføjet firmafest
+#### E120. Egen kalender: fravalgt juleaften, tilføjet firmafest
 
 Indstillinger: fravalg 24.12.2026, ekstra fridag 14.08.2026 "Firmafest". Resultat: 24.12 er en almindelig torsdag, 14.08 er en helligdag (helligdagstillæg gælder).
 
-#### E109. Lokationens kalender bruges i stedet for den egne
+#### E121. Lokationens kalender bruges i stedet for den egne
 
 Indstilling "Brug kundens helligdage først" (standard). Lokation 1101 har en aktiv helligdagskalender for 2026 med kun juledagene. Tur 05.06.2026 (Grundlovsdag): kalenderen kommer fra "Lokationens helligdagskalender", og dagtypen er **Hverdag**. Den egne kalender (som har Grundlovsdag) bruges IKKE - den er kun reserve, når kunden ingen kalender har. Helligdagstillæg gælder derfor ikke.
 
-#### E110. Materialets kalender går forud for lokationens
+#### E122. Materialets kalender går forud for lokationens
 
 Pap på lokation 1101 har sin egen helligdagskalender (samme som bestillingssiden bruger), hvor 05.06 er fridag. Plast bruger lokationens aktive kalender. 05.06.2026: Pap = **Helligdag**, Plast = **Hverdag**.
 
-#### E111. Kundens helligdagsgruppe når lokationen ingen kalender har
+#### E123. Kundens helligdagsgruppe når lokationen ingen kalender har
 
 Ingen kalender på lokationen. HF er i en helligdagsgruppe med 05.06. Kilde: "Kundens helligdagsgruppe", dagtype **Helligdag**.
 
-#### E112. Indstillingen "Brug egen kalender"
+#### E124. Indstillingen "Brug egen kalender"
 
 Med indstillingen "own" bruges altid logistikfirmaets egen kalender (kilde: "Egen helligdagskalender"). Samme tur 05.06.2026 med reglerne Standardpris 1.000 + Helligdag 800: med kundens kalender 1.000,00 kr, med egen kalender 1.800,00 kr.
 
@@ -1970,7 +2177,7 @@ Med indstillingen "own" bruges altid logistikfirmaets egen kalender (kilde: "Ege
 
 En GRUNDPRIS med materialer gælder kun, når ALLE turens materialer er nævnt. Et TILLÆG med materialer gælder, når ét af dem er på turen.
 
-#### E113. Blandet tur matcher ikke betonprisen
+#### E125. Blandet tur matcher ikke betonprisen
 
 **Regler:**
 - **Beton** - fast pris 900,00 kr. Gælder: materiale = Beton. Specificitet 4.
@@ -1984,7 +2191,7 @@ En GRUNDPRIS med materialer gælder kun, når ALLE turens materialer er nævnt. 
 
 **Hvorfor:** Turen har Beton + Træ. Betonprisen gælder kun rene betonture.
 
-#### E114. Blandet tur får den generelle pris
+#### E126. Blandet tur får den generelle pris
 
 **Regler:**
 - **Beton** - fast pris 900,00 kr. Gælder: materiale = Beton. Specificitet 4.
@@ -1998,7 +2205,7 @@ En GRUNDPRIS med materialer gælder kun, når ALLE turens materialer er nævnt. 
 
 **Hvorfor:** 
 
-#### E115. Regel for begge materialer
+#### E127. Regel for begge materialer
 
 **Regler:**
 - **Beton/Træ** - fast pris 950,00 kr. Gælder: materiale = Beton eller Træ. Specificitet 4.
@@ -2011,7 +2218,7 @@ En GRUNDPRIS med materialer gælder kun, når ALLE turens materialer er nævnt. 
 
 **Hvorfor:** Alle turens materialer er nævnt.
 
-#### E116. Regel for begge, tur med ét
+#### E128. Regel for begge, tur med ét
 
 **Regler:**
 - **Beton/Træ** - fast pris 950,00 kr. Gælder: materiale = Beton eller Træ. Specificitet 4.
@@ -2024,7 +2231,7 @@ En GRUNDPRIS med materialer gælder kun, når ALLE turens materialer er nævnt. 
 
 **Hvorfor:** Beton er nævnt - det er nok.
 
-#### E117. Tillæg for ét af materialerne
+#### E129. Tillæg for ét af materialerne
 
 **Regler:**
 - **Standardpris** - fast pris 1.000,00 kr. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -2039,7 +2246,7 @@ En GRUNDPRIS med materialer gælder kun, når ALLE turens materialer er nævnt. 
 
 **Hvorfor:** Tillæg: ét materiale er nok.
 
-#### E118. Store og små bogstaver
+#### E130. Store og små bogstaver
 
 **Regler:**
 - **pap** - fast pris 800,00 kr. Gælder: materiale = pap. Specificitet 4.
@@ -2052,7 +2259,7 @@ En GRUNDPRIS med materialer gælder kun, når ALLE turens materialer er nævnt. 
 
 **Hvorfor:** "pap" = "Pap".
 
-#### E119. Tur uden materiale
+#### E131. Tur uden materiale
 
 **Regler:**
 - **Pap** - fast pris 800,00 kr. Gælder: materiale = Pap. Specificitet 4.
@@ -2071,7 +2278,7 @@ En GRUNDPRIS med materialer gælder kun, når ALLE turens materialer er nævnt. 
 
 Almindelige regler gælder kun gennemførte ture. En forgæves tur skal have en regel med udfald "forgæves" (eller "alle").
 
-#### E120. Forgæves uden forgæves-pris
+#### E132. Forgæves uden forgæves-pris
 
 **Regler:**
 - **Standardpris** - fast pris 1.000,00 kr. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -2085,7 +2292,7 @@ Almindelige regler gælder kun gennemførte ture. En forgæves tur skal have en 
 
 **Hvorfor:** 
 
-#### E121. Forgæves-pris
+#### E133. Forgæves-pris
 
 **Regler:**
 - **Standardpris** - fast pris 1.000,00 kr. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -2099,7 +2306,7 @@ Almindelige regler gælder kun gennemførte ture. En forgæves tur skal have en 
 
 **Hvorfor:** 
 
-#### E122. Timepris for alle udfald
+#### E134. Timepris for alle udfald
 
 **Regler:**
 - **Timepris alle** - timepris 600 kr/t, ingen afrunding, pause trækkes fra. Gælder: udfald = alle (gennemført og forgæves). Specificitet 1.
@@ -2112,7 +2319,7 @@ Almindelige regler gælder kun gennemførte ture. En forgæves tur skal have en 
 
 **Hvorfor:** Tiden for en forgæves tur er fra "På vej" til den blev markeret forgæves.
 
-#### E123. Kundens forgæves-pris slår "alle udfald"
+#### E135. Kundens forgæves-pris slår "alle udfald"
 
 **Regler:**
 - **Alle udfald** - fast pris 700,00 kr. Gælder: udfald = alle (gennemført og forgæves). Specificitet 1.
@@ -2126,7 +2333,7 @@ Almindelige regler gælder kun gennemførte ture. En forgæves tur skal have en 
 
 **Hvorfor:** 65 > 1.
 
-#### E124. Prisaftalens tillæg gælder ikke forgæves ture
+#### E136. Prisaftalens tillæg gælder ikke forgæves ture
 
 **Regler:**
 - **HF forgæves** - fast pris 400,00 kr. Gælder: kunde = Helsingør Forsyning, udfald = forgæves. Specificitet 65.
@@ -2140,7 +2347,7 @@ Almindelige regler gælder kun gennemførte ture. En forgæves tur skal have en 
 
 **Hvorfor:** Tillæg i en prisaftale har udfald "gennemført". En forgæves lørdagstur får kun forgæves-prisen.
 
-#### E125. Tillæg der også gælder forgæves
+#### E137. Tillæg der også gælder forgæves
 
 **Regler:**
 - **Forgæves** - fast pris 450,00 kr. Gælder: udfald = forgæves. Specificitet 1.
@@ -2158,7 +2365,7 @@ Almindelige regler gælder kun gennemførte ture. En forgæves tur skal have en 
 
 ### B15. Aftalt pris, manuel pris og ekstra linjer
 
-#### E126. Aftalt pris erstatter reglerne
+#### E138. Aftalt pris erstatter reglerne
 
 **Regler:**
 - **Standardpris** - fast pris 1.000,00 kr. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -2174,7 +2381,7 @@ Almindelige regler gælder kun gennemførte ture. En forgæves tur skal have en 
 
 **Hvorfor:** Weekend vises som indregnet (0 kr).
 
-#### E127. Aftalt pris uden regler
+#### E139. Aftalt pris uden regler
 
 **Regler:**
 - (ingen regler)
@@ -2188,7 +2395,7 @@ Almindelige regler gælder kun gennemførte ture. En forgæves tur skal have en 
 
 **Hvorfor:** En aftalt pris virker også uden prisregler.
 
-#### E128. Manuel pris + ekstra linje
+#### E140. Manuel pris + ekstra linje
 
 **Regler:**
 - **Standardpris** - fast pris 1.000,00 kr. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -2203,7 +2410,7 @@ Almindelige regler gælder kun gennemførte ture. En forgæves tur skal have en 
 
 **Hvorfor:** 1.500 + 300.
 
-#### E129. Reglernes pris + ekstra linje
+#### E141. Reglernes pris + ekstra linje
 
 **Regler:**
 - **Standardpris** - fast pris 1.000,00 kr. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -2217,7 +2424,7 @@ Almindelige regler gælder kun gennemførte ture. En forgæves tur skal have en 
 
 **Hvorfor:** 1.000 + 300. Ekstra linjer kan bruges uden at overstyre prisen.
 
-#### E130. Ekstra linje redder ikke en manglende pris
+#### E142. Ekstra linje redder ikke en manglende pris
 
 **Regler:**
 - (ingen regler)
@@ -2232,7 +2439,7 @@ Almindelige regler gælder kun gennemførte ture. En forgæves tur skal have en 
 
 **Hvorfor:** Mangler grundprisen, er der stadig ingen total.
 
-#### E131. Manuel pris på en timepris-tur uden tid
+#### E143. Manuel pris på en timepris-tur uden tid
 
 **Regler:**
 - **Timepris** - timepris 600 kr/t, ingen afrunding, pause trækkes fra. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -2246,7 +2453,7 @@ Almindelige regler gælder kun gennemførte ture. En forgæves tur skal have en 
 
 **Hvorfor:** Den manuelle pris gælder; "Mangler tid" forsvinder.
 
-#### E132. Aftalt pris + ventetid + ekstra linje
+#### E144. Aftalt pris + ventetid + ekstra linje
 
 **Regler:**
 - **Standardpris** - fast pris 1.000,00 kr. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -2268,7 +2475,7 @@ Almindelige regler gælder kun gennemførte ture. En forgæves tur skal have en 
 
 To forskellige ting: VERSION afgøres af hvornår turen blev OPRETTET/bestilt (`created_at`). GYLDIGHED (kørselsdato fra/til) afgøres af hvornår turen blev KØRT.
 
-#### E133. Hvilken version gælder for en tur
+#### E145. Hvilken version gælder for en tur
 
 Prisen blev rettet 2026-10-01T10:00:00+02:00 ("Nye ture fra nu"). Den gamle version lukkes på tidspunktet, den nye starter samme tidspunkt. Fra-tidspunktet er med, til-tidspunktet er ikke.
 
@@ -2278,31 +2485,31 @@ Prisen blev rettet 2026-10-01T10:00:00+02:00 ("Nye ture fra nu"). Den gamle vers
 | 2026-10-01T10:00:00+02:00 | nej | ja |
 | 2026-11-01T08:00:00+01:00 | nej | ja |
 
-#### E134. Prisstigning "Nye ture fra nu"
+#### E146. Prisstigning "Nye ture fra nu"
 
 v1 900 kr gælder ture oprettet før 01.10.2026 kl. 10, v2 1.000 kr ture oprettet derefter. Begge ture køres 20.10.2026. Tur oprettet 28.09: **900,00 kr**. Tur oprettet 02.10: **1.000,00 kr**. En prisændring ændrer altså ikke prisen på ture, der allerede var bestilt.
 
-#### E135. "Fra en dato" følger oprettelsen, ikke kørslen
+#### E147. "Fra en dato" følger oprettelsen, ikke kørslen
 
 Ny pris "fra 01.01.2027" (versionen starter 2027-01-01T00:00:00+01:00). En tur oprettet 30.12.2026 og kørt 05.01.2027 får **900,00 kr** - den gamle pris, fordi den blev oprettet før. Skal prisen følge KØRSELSDATOEN, bruges "Ture kørt fra en dato" (næste eksempel).
 
-#### E136. "Ture kørt fra en dato"
+#### E148. "Ture kørt fra en dato"
 
 Den gamle aftale får kørselsdato til 31.12.2026, en ny aftale gælder ture kørt fra 01.01.2027 - også ture der allerede er oprettet (fx en serie). Tur oprettet 30.12, kørt 05.01.2027: **1.000,00 kr**. Tur kørt 30.12.2026: **900,00 kr**.
 
-#### E137. "Nye + ture uden pris" (standard for nye prisaftaler)
+#### E149. "Nye + ture uden pris" (standard for nye prisaftaler)
 
 En aftale oprettet 15.10 med dette valg gælder ture oprettet senere OG ældre ture, der ellers ingen pris har. Ældre tur uden pris: **800,00 kr** med markeringen "Pris fra aftale oprettet efter turen (gælder ture uden pris)". Samme tur, når den allerede havde en standardpris: **1.000,00 kr** - en tur med pris ændres aldrig.
 
-#### E138. Faktureret tur er frosset
+#### E150. Faktureret tur er frosset
 
 Turen blev faktureret til 950 kr. Reglen er siden sat op til 1.200. Turen viser stadig **950,00 kr** med markeringen "Faktureret". Skal den ændres, fjernes markeringen "faktureret" først.
 
-#### E139. Tur uden oprettelsestidspunkt
+#### E151. Tur uden oprettelsestidspunkt
 
 Mangler `created_at` (meget gamle ture), bruges kørselsdatoen som oprettelse: 20.10.2026 -> ny version, **1.000,00 kr**.
 
-#### E140. Danske tal i beløbsfelterne
+#### E152. Danske tal i beløbsfelterne
 
 | Indtastet | Læses som |
 |---|---|
@@ -2322,7 +2529,7 @@ Mangler `created_at` (meget gamle ture), bruges kørselsdatoen som oprettelse: 2
 
 Kørselsdatoen styrer dagtype (weekend/helligdag), kørselsdato-gyldighed og hvilken periode turen står i i Rapport.
 
-#### E141. Kørselsdato i forskellige situationer
+#### E153. Kørselsdato i forskellige situationer
 
 Kørselsdatoen er den dag turen blev STARTET (dansk tid). Uden starttidsstempel regnes den ud fra afslutningen; er sluttiden før starttiden, startede turen dagen før.
 
@@ -2334,18 +2541,18 @@ Kørselsdatoen er den dag turen blev STARTET (dansk tid). Uden starttidsstempel 
 | Forgæves | 2026-10-20 |
 | Ikke kørt endnu | 2026-11-02 |
 
-#### E142. Lørdagstur der først blev afsluttet søndag
+#### E154. Lørdagstur der først blev afsluttet søndag
 
 Reglerne: Standardpris 1.000 + søndagstillæg 600. Turen startede lørdag 23:00 og sluttede søndag 01:30. Pris: **1.000,00 kr** - lørdag, intet søndagstillæg.
 
-#### E143. Tid på en forgæves tur
+#### E155. Tid på en forgæves tur
 
 På vej kl. 09:10, markeret forgæves 07:55 UTC = 09:55 dansk tid. Tid: 09:10-09:55 = 45 min.
 
 
 ### B18. Hvem er kunden (prisnøglen)
 
-#### E144. Prisnøglen for kunden
+#### E156. Prisnøglen for kunden
 
 Logistikfirmaet hedder her `LOGI`. En kunde-betingelse i en prisregel matcher denne nøgle.
 
@@ -2361,7 +2568,7 @@ Navne gøres til små bogstaver med enkelte mellemrum, så "Byg  ApS" og "byg ap
 
 ### B19. Samlede eksempler (mange regler på én gang)
 
-#### E145. HF lørdag, haster, 2 hængere, ventetid, timepris
+#### E157. HF lørdag, haster, 2 hængere, ventetid, timepris
 
 **Regler:**
 - **HF timepris** - timepris 650 kr/t, startgebyr 250,00 kr, op til 15 min, pause trækkes fra. Gælder: kunde = Helsingør Forsyning. Specificitet 64.
@@ -2383,7 +2590,7 @@ Navne gøres til små bogstaver med enkelte mellemrum, så "Byg  ApS" og "byg ap
 
 **Hvorfor:** 128 -> 135 min. 650 × 135/60 = 1.462,50 + startgebyr 250 = 1.712,50. Weekend 20 % = 342,50. Haster 300. Hænger 400. Ventetid 25 -> 30 min × 450/60 = 225. I alt 2.980.
 
-#### E146. Varelevering pr. palle med stop, aften og ventetid
+#### E158. Varelevering pr. palle med stop, aften og ventetid
 
 **Regler:**
 - **Palletakst** - 45,00 kr pr. paller, minimum 600,00 kr. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -2402,7 +2609,7 @@ Navne gøres til små bogstaver med enkelte mellemrum, så "Byg  ApS" og "byg ap
 
 **Hvorfor:** 18 × 45 = 810 (over minimum). 2 ekstra stop = 350. Aften 15 % af 810 = 121,50. Ventetid 10 -> 15 min = 100. I alt 1.381,50.
 
-#### E147. Forgæves på en helligdag
+#### E159. Forgæves på en helligdag
 
 **Regler:**
 - **Standardpris** - fast pris 1.000,00 kr. Gælder: ingen betingelser (gælder alle ture). Specificitet 0.
@@ -2417,7 +2624,7 @@ Navne gøres til små bogstaver med enkelte mellemrum, så "Byg  ApS" og "byg ap
 
 **Hvorfor:** Helligdagstillægget har udfald "gennemført" og gælder ikke.
 
-#### E148. Nærmeste regel i forklaringen
+#### E160. Nærmeste regel i forklaringen
 
 **Regler:**
 - **HF Pap** - fast pris 900,00 kr. Gælder: kunde = Helsingør Forsyning, materiale = Pap. Specificitet 68.
@@ -2432,7 +2639,7 @@ Navne gøres til små bogstaver med enkelte mellemrum, så "Byg  ApS" og "byg ap
 
 **Hvorfor:** "HF Pap" fejler kun på kunde (1 betingelse), "ARGO 1101 Plast" på lokation og materiale (2). Forklaringen viser reglen med færrest fejl.
 
-#### E149. Lige mange fejl: den mest specifikke vises
+#### E161. Lige mange fejl: den mest specifikke vises
 
 **Regler:**
 - **Lokation 1102** - fast pris 900,00 kr. Gælder: lokation = 1102. Specificitet 32.
@@ -2450,7 +2657,7 @@ Navne gøres til små bogstaver med enkelte mellemrum, så "Byg  ApS" og "byg ap
 
 ### B20. Prisaftaler (sådan gemmes en aftale)
 
-#### E150. En prisaftale bliver til flere regler
+#### E162. En prisaftale bliver til flere regler
 
 Aftalen "HF aftale" (kunde HF): grundpris 1.200, forgæves 400, weekend 300, aften 250, 2 hængere 350, ekstra stop 150. Hvert tillæg får aftalens betingelser + sin egen situation automatisk:
 
@@ -2468,7 +2675,6 @@ Samme tillægstype to gange i én aftale afvises ("Tillægget 'Weekend' står to
 
 ### B21. Moms
 
-#### E151. Moms i Rapport
+#### E163. Moms i Rapport
 
 Alle priser er ekskl. moms. Rapporten lægger moms på summen: netto 10.000,00 kr + 25 % moms 2.500,00 kr = 12.500,00 kr. Momssatsen kan ændres under Indstillinger.
-

@@ -73,6 +73,8 @@ def cond_text(c: dict) -> str:
         p.append("antal hængere = " + " eller ".join("3+" if int(k) >= 3 else str(k) for k in c["trailer_counts"]))
     if c.get("time_from") and c.get("time_to"):
         p.append(f"start kl. {c['time_from']}-{c['time_to']}")
+    if c.get("run_roles"):
+        p.append("kørsel = " + " eller ".join(P.RUN_ROLES.get(x, x) for x in c["run_roles"]))
     if (c.get("outcome") or "completed") == "not_completed":
         p.append("udfald = forgæves")
     if c.get("outcome") == "any":
@@ -135,7 +137,7 @@ DEFAULT_ATTRS = {
     "priority": "normal", "day_type": "weekday", "trailer": False, "trailer_count": 0, "trailer_confirmed": True,
     "container_label": "", "delivery_label": "", "start_min": 8 * 60, "outcome": "completed",
     "service_date": "2026-10-20", "containers": 1, "waiting_min": 0, "deduct_pause_override": None,
-    "units": {}, "units_source": {}, "stops": 2,
+    "units": {}, "units_source": {}, "stops": 2, "run_role": "",
 }
 
 
@@ -148,7 +150,9 @@ def tour_text(a: dict, time_info, override) -> str:
     if a["priority"] != "normal":
         p.append(f"prioritet {P.PRIORITIES.get(a['priority'])}")
     p.append(f"dagtype {P.DAY_TYPES.get(a['day_type'])}")
-    if a["trailer"] or a["trailer_count"]:
+    if a.get("run_role"):
+        p.append(f"kørsel {P.RUN_ROLES[a['run_role']].lower()}")
+    elif a["trailer"] or a["trailer_count"]:
         p.append(f"{a['trailer_count'] or 1} hænger(e)")
     if a.get("container_label"):
         p.append(f"containerstørrelse \"{a['container_label']}\"")
@@ -361,12 +365,14 @@ def run_engine_examples():
     ex("Lige specifikke: den senest rettede vinder",
        [FIX("Pris A", 900, upd="2026-03-01T08:00:00", _show_updated=True), FIX("Pris B", 950, upd="2026-05-01T08:00:00", _show_updated=True)], A(),
        "Begge har 0 point. Så vinder den, der senest er rettet (updated_at). Det er en faldgrube: to "
-       "generelle priser bør ikke findes samtidig. Editoren advarer, når betingelserne er helt ens.", 950)
+       "generelle priser bør ikke findes samtidig. Editoren advarer, når betingelserne er helt ens, og turen får "
+       "markeringen \"Flere grundpriser passer lige godt\".", 950, extra_check=has_flag("Flere grundpriser passer lige godt"))
     ex("Lige specifikke på hver sin led", [FIX("Haster-pris", 1100, {"priorities": ["haster"]}, upd="2026-02-01T08:00:00", _show_updated=True),
                                           FIX("Hverdagspris", 1000, {"day_types": ["weekday"]}, upd="2026-04-01T08:00:00", _show_updated=True)],
        A(priority="haster"),
        "Prioritet og dagtype giver 1 point hver. En haster-tur på en hverdag passer på begge, og så vinder den "
-       "senest rettede - her hverdagsprisen. Vil man have et haster-pristrin, er et haster-TILLÆG det rigtige.", 1000)
+       "senest rettede - her hverdagsprisen - og turen markeres. Vil man have et haster-pristrin, er et haster-TILLÆG det rigtige.", 1000,
+       extra_check=has_flag("Flere grundpriser passer lige godt"))
     ex("Kundepris for en anden kunde gælder ikke", [G, FIX("ARGO-pris", 1500, {"customer_ids": ["ARGO"]})], A(),
        "ARGO-reglen passer ikke på en HF-tur. Den generelle pris bruges.", 1000)
     ex("Lokationspris for en anden lokation", [G, FIX("Lokation 1102", 1250, {"location_codes": ["1102"]})], A(),
@@ -535,8 +541,8 @@ def run_engine_examples():
     tm = split({"A": ("08:00", "09:00"), "B": ("08:30", "09:00")})
     ex("Tillæg pr. time på en tur med fast pris", [FIX("Fast pris", 800), SUR("Kran", "other", 120, unit="per_hour")], A(),
        "Fast pris har ingen fakturerbar tid. Et kr/t-tillæg (ikke ventetid) bruger så turens tid efter deling "
-       "- UDEN afrunding og UDEN pausefradrag: 45 min × 120/60 = 90. (Teksten viser \"45.0 min\".)", 890, time=tm["A"],
-       extra_check=line_has("45.0 min"))
+       "- UDEN afrunding og UDEN pausefradrag: 45 min × 120/60 = 90.", 890, time=tm["A"],
+       extra_check=line_has("(45 min × 120 kr/t)"))
 
     section("B7. Pris pr. container og pr. enhed")
     ex("Pr. container, 3 containere", [PERC("Pr. container", 350)], A(containers=3), "3 × 350.", 1050)
@@ -564,6 +570,41 @@ def run_engine_examples():
     ex("Antal hængere slår \"med hænger\"", [G, SUR("Hænger", "trailer", 300, {"trailer": "with"}),
                                             SUR("2 hængere", "trailer", 450, {"trailer_counts": [2]})], A(trailer=True, trailer_count=2),
        "Samme kategori. Antal (2 point) > med/uden (1 point).", 1450)
+
+    section("B8c. Hængerkørsel (kørsel: solo, på bilen, på hængeren)",
+            "En containertur får en kørsel-rolle, når den startes. Kørt alene = solo. Kører chaufføren flere "
+            "containere på én gang (hænger), er den først startede \"på bilen\" og resten \"på hængeren\". "
+            "Prisreglernes betingelse \"Kørsel\" (2 point) kan give hver rolle sin egen pris. \"Med hænger\" "
+            "på en containertur betyder: del af en hængerkørsel (både bil og hænger). Varekørsel og løs "
+            "afhentning har ingen rolle. Ældre ture (før 20.10.2026) har heller ingen rolle og prissættes som før.")
+    HFB = FIX("HF", 1000, {"customer_ids": ["HF"]})
+    HFT = FIX("HF - Container på hængeren", 700, {"customer_ids": ["HF"], "run_roles": ["trailer"]})
+    HFC = FIX("HF - Container på bilen", 900, {"customer_ids": ["HF"], "run_roles": ["truck"]})
+    ex("Solo", [HFB, HFT], A(run_role="solo"), "En solo-tur får grundprisen.", 1000)
+    ex("På hængeren", [HFB, HFT], A(run_role="trailer", trailer=True, trailer_count=1),
+       "Hængerprisen har kunde + kørsel = 66 point mod 64 og vinder.", 700)
+    ex("På bilen uden egen bil-pris", [HFB, HFT], A(run_role="truck", trailer=True, trailer_count=1),
+       "Containeren på bilen får grundprisen, når aftalen ikke har en bil-pris.", 1000)
+    ex("På bilen med egen bil-pris", [HFB, HFT, HFC], A(run_role="truck", trailer=True, trailer_count=1),
+       "Aftalen har også en pris for containeren på bilen i en hængerkørsel.", 900)
+    ex("Hængertillæg gælder hele kørslen, ikke solo", [HFB, HFT, SUR("Hænger", "trailer", 150, {"trailer": "with"})],
+       A(run_role="trailer", trailer=True, trailer_count=1),
+       "700 + 150. Hængertillægget (med hænger) rammer både bil og hænger i en kørsel.", 850)
+    ex("Solo med hænger på bilen (tom hænger)", [HFB, HFT, SUR("Hænger", "trailer", 150, {"trailer": "with"})], A(run_role="solo"),
+       "Har chaufføren valgt en hænger ved login men kørt én container, er turen solo: ingen hængertillæg. "
+       "Kunden skal ikke betale for en tom hænger.", 1000)
+    ex("Mere specifik aftale uden hængerpris", [HFT, FIX("HF på 1101", 1100, {"customer_ids": ["HF"], "location_codes": ["1101"]})],
+       A(run_role="trailer", trailer=True, trailer_count=1),
+       "Faldgrube: aftalen for HF på 1101 (96 point) slår HF's hængerpris (66 point). Hver aftale skal derfor "
+       "have sin egen hængerpris (afsnittet \"Hængerkørsel\" i aftalen).", 1100)
+    ex("Forgæves på hængeren", [HFB, HFT, FIX("HF forgæves", 450, {"customer_ids": ["HF"], "outcome": "not_completed"})],
+       A(run_role="trailer", outcome="not_completed"), "Hængerprisen gælder gennemførte ture; en forgæves container får forgæves-prisen.", 450)
+    ex("Ældre tur uden rolle", [HFB, HFT], A(run_role="", trailer=True, trailer_count=1),
+       "En tur startet før hængerkørsel fandtes har ingen rolle. Kørsel-reglerne passer ikke, så prisen er som før.", 1000)
+    ex("Timepris + hængerkørsel", [HOUR("HF timepris", 600, {"customer_ids": ["HF"]}),
+                                   HOUR("HF timepris - Container på hængeren", 420, {"customer_ids": ["HF"], "run_roles": ["trailer"]})],
+       A(run_role="trailer"), "Tiden er allerede delt mellem turene (90 af 180 min), og hængerprisen er 70 % af timeprisen: "
+       "420 × 90/60 = 630. Overvej om begge dele skal gælde.", 630, time=T(90, gross=180))
 
     section("B9. Ventetid", "Ventetid kommer fra turens godkendte rettelser (chaufførens anmodning, automatisk "
             "godkendelse eller admin). Uden ventetid ingen linje. Kr/t-ventetid afregnes pr. PÅBEGYNDT kvarter.")
@@ -780,6 +821,36 @@ def run_server_examples():
          f"Tur uden stop-liste = **{a7['stops']}** stop (afhentning + aflevering). Tre stop, hvor chaufføren selv har "
          f"tilføjet det tredje og planlæggeren ikke har godkendt det = **{a8['stops']}**. Når det er godkendt = **{a9['stops']}**.",
          ok=(a7["stops"], a8["stops"], a9["stops"]) == (2, 2, 3), msg=str((a7["stops"], a8["stops"], a9["stops"])))
+
+    section("B8d. Hængerkørsel i prisaftalen og på turen")
+    hb = {"name": "HF", "conditions": {"customer_ids": ["HF"]},
+          "base": {"pricing": {"model": "hourly", "hourly_rate": "600", "start_fee": "200", "min_amount": "", "rounding_mode": "up", "rounding_minutes": 15}},
+          "run_trailer": {"mode": "percent", "value": "75"}, "run_truck": {"mode": "amount", "value": "950"}}
+    gen = [S._clean_rule(r) for r in S._bundle_rule_bodies(hb)]
+    tr = next(g for g in gen if g["conditions"]["run_roles"] == ["trailer"])
+    tk = next(g for g in gen if g["conditions"]["run_roles"] == ["truck"])
+    note("Procent og fast beløb i aftalen",
+         "Aftalen \"HF\" har timepris 600 kr/t + startgebyr 200 kr. \"Container på hængeren: 75 %\" gemmes som en "
+         f"grundpris med timepris {tal(tr['pricing']['hourly_rate'])} kr/t og startgebyr {tal(tr['pricing']['start_fee'])} kr "
+         f"(samme afrunding). \"Container på bilen: 950 kr\" gemmes som en fast pris på {kr(tk['pricing']['amount'])}. "
+         f"Begge har kørsel-betingelsen og {P.specificity(tr)} point (aftalens grundpris har {P.specificity(gen[0])}).",
+         ok=tr["pricing"]["hourly_rate"] == 450 and tr["pricing"]["start_fee"] == 150 and tk["pricing"] == {"model": "fixed", "amount": 950}
+         and P.specificity(tr) == 66 and P.specificity(gen[0]) == 64, msg=f"{tr} {tk}")
+    rows = []
+    cases_r = [("Solo containertur", {"run_role": "solo"}, (0, "run")),
+               ("På bilen", {"run_role": "truck", "run_id": "r"}, (1, "run")),
+               ("På hængeren", {"run_role": "trailer", "run_id": "r"}, (1, "run")),
+               ("Admin rettede til 'på hængeren'", {"run_role": "solo", "fact_overrides": {"run_role": "trailer"}}, (1, "approved")),
+               ("Varekørsel med 2 planlagte hængere", {"tour_kind": "goods", "trailer_count": 2}, (2, "planned")),
+               ("Ældre containertur, automatisk hænger", {"used_trailer": True, "trailer_source": "auto"}, (1, "auto"))]
+    ok_r = True
+    for label, t, (n, src) in cases_r:
+        ti = S._trailer_info(t)
+        ok_r = ok_r and ti["count"] == n and ti["source"] == src
+        rows.append(f"| {label} | {S._run_role(t) or '-'} | {ti['count']} | {'ja' if ti['confirmed'] else 'NEJ'} |")
+    note("Hænger og kørsel på forskellige ture",
+         "| Tur | Kørsel | Hængere i prisen | Bekræftet |\n|---|---|---|---|\n" + "\n".join(rows),
+         ok=ok_r, msg="\n".join(rows))
 
     section("B8b. Hvor antallet af hængere kommer fra")
     cases = [

@@ -38,6 +38,10 @@ SURCHARGE_CATEGORIES = {
     "stop": "Ekstra stop",
     "other": "Andet",
 }
+# 2026-10-20: Hængerkørsel - containerture der køres sammen (én på bilen,
+# 1-2 på hængeren). En tur kørt alene er "solo". Varekørsel og løs afhentning
+# har ingen kørsel-rolle (deres hængere hører til selve turen).
+RUN_ROLES = {"solo": "Solo", "truck": "På bilen (hængerkørsel)", "trailer": "På hængeren"}
 BASE_MODELS = {"fixed": "Fast pris", "hourly": "Timepris", "per_container": "Pris pr. container",
                # 2026-10-18: pr. palle/kolli/m³/ton ... ud fra linjernes antal
                # (registreret, ellers planlagt), med valgfrit minimumsbeløb.
@@ -48,7 +52,7 @@ BASE_MODELS = {"fixed": "Fast pris", "hourly": "Timepris", "per_container": "Pri
 # (64 > 32+16+8+4+2+1*5).
 _WEIGHTS = {
     "customer_ids": 64, "location_codes": 32, "delivery_labels": 16,
-    "task_types": 8, "materials": 4, "container_labels": 2,
+    "task_types": 8, "materials": 4, "container_labels": 2, "run_roles": 2,
     "priorities": 1, "day_types": 1,
 }
 
@@ -230,6 +234,7 @@ CONDITION_LABELS = {
     "materials": "materiale", "task_types": "opgavetype", "priorities": "prioritet",
     "day_types": "dagtype", "container_labels": "containerstørrelse", "delivery_labels": "leveringsadresse",
     "trailer_counts": "antal hængere", "trailer": "hænger", "time": "tidsrum",
+    "run_roles": "kørsel (solo/bil/hænger)",
 }
 
 
@@ -253,6 +258,7 @@ def failing_conditions(rule: dict, attrs: dict) -> List[str]:
         "day_types": attrs.get("day_type"),
         "container_labels": norm_label(attrs.get("container_label") or ""),
         "delivery_labels": norm_label(attrs.get("delivery_label") or ""),
+        "run_roles": attrs.get("run_role") or "",
     }
     for key, value in checks.items():
         wanted = c.get(key) or []
@@ -373,6 +379,14 @@ def price_tour(attrs: dict, rules: List[dict], time_info: Optional[dict],
     base, surcharges = select_rules(rules, attrs)
     base_amount = None
     billable_min = None
+    # 2026-10-20: To grundpriser der passer lige godt -> den senest rettede
+    # vinder. Det ser tilfældigt ud, så det markeres på turen.
+    if base:
+        top = specificity(base)
+        ties = [r for r in rules if r.get("kind") == "base" and r is not base and specificity(r) == top and rule_matches(r, attrs)]
+        if ties:
+            names = ", ".join(sorted({r.get("name") or "?" for r in ties}))
+            result["flags"].append(f"Flere grundpriser passer lige godt ({base.get('name')}, {names}) - den senest rettede bruges")
 
     if base:
         p = base.get("pricing") or {}
@@ -478,7 +492,7 @@ def price_tour(attrs: dict, rules: List[dict], time_info: Optional[dict],
                         time_info["total"] if time_info else None)
                 if not mins:
                     continue
-                amt, detail = value * mins / 60, f"{mins} min × {value:g} kr/t"
+                amt, detail = value * mins / 60, f"{float(mins):g} min × {value:g} kr/t"
             else:
                 amt, detail = value, ""
             if s.get("category") == "waiting" and not attrs.get("waiting_min"):
