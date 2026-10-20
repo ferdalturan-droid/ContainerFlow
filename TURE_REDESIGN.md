@@ -242,3 +242,7 @@ Se BESLUTNINGER_2026-10-19.md for alternativer og runder.
   - "Overskriv" giver et manuelt containernummer.
   - Kundens låste nummer respekteres; det indtastede bestilles så som en anden container.
 - **Faste tømninger kan også være månedlige:** første, anden, tredje, fjerde eller sidste ugedag i måneden.
+- **Faste tømninger (20.10):**
+  - Én liste over kommende datoer med status ("Bestilt" / "Bestilles <dato>" / "Sprunget over" / "Lukket").
+  - Bestillingerne indhentes også, når appen bruges (højst hvert 10. min), ikke kun hvert time - en serverless-container kan sove om natten.
+- **Mine bestillinger** viser et manuelt containernummer (fra "Bestil for kunden" › Overskriv) i stedet for "Container-nr. ikke angivet".

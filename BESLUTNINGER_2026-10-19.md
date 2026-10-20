@@ -368,3 +368,35 @@ Varslet på 7 dage er beholdt fast. Det er én ting mindre at forklare
 lokationsadmin, og logistikfirmaet har altid en uge at planlægge i.
 
 e2e: flow_fixed 16.
+
+## 10. Faste tømninger – datoliste, hvad der opretter dem, og containernummer (2026-10-20)
+
+- **"Næste" lignede dubletter.** Kortet viste de næste 6 datoer og under dem
+  de datoer, der allerede var bestilt, så det lignede samme datoer plus én.
+  Nu er der én liste: hver dato én gang med status ("Bestilt", "Bestilles
+  tor. 22.10", "Sprunget over", "Lukket", "Chaufføren er i gang").
+- **Hvad opretter bestillingerne:** app-serveren.
+  - Med det samme, når den faste tømning gemmes.
+  - Hver time i baggrunden.
+  - Nyt: når appen bruges (Ture, chaufførappen, bestillingssiden), højst hvert
+    10. minut.
+
+  Grunden er, at Scaleway Serverless kan lukke containeren ned, når ingen
+  bruger appen, og så kører timejobbet ikke. Indhentningen sikrer, at de
+  oprettes, så snart nogen bruger appen. Med 7 dages varsel er der god margin.
+  Hvis I altid vil have mindst én kørende instans, kan "min scale = 1" sættes
+  i Scaleway.
+- **Hvorfor 7 dage frem og ikke hele perioden på én gang:**
+  - Logistikfirmaet ser en uge frem og kan planlægge chauffører.
+  - Leveringsadresse og åbningstid hentes for netop den dag. Kalenderændringer
+    og helligdage, der lægges ind senere, kommer med.
+  - Ret, pause og stop har kun få bestillinger at rydde op i.
+  - Mine bestillinger og Ture fyldes ikke med måneder af fremtidige
+    bestillinger.
+  - Prisen versioneres ved oprettelse og følger dermed aftalen, som den er
+    ugen før.
+- **"Container-nr. ikke angivet"** på en bestilling med et manuelt nummer.
+  - Nummeret lå i bestillingen, men listen viste kun numre fra pladsens
+    containeropsætning.
+  - Nu vises det manuelle nummer på bestillingssiden og hos lokationsadmin.
+  - e2e: behalf 37, fixed 14a.

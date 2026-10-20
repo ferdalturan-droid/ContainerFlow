@@ -99,6 +99,12 @@ def run():
            "13 en anden kundes lokationsadmin kan ikke se pladsens faste tømninger")
         lst = call("GET", "/org/fixed-schedules", t=la, params={"location_code": "1121"})
         ok(any(x["id"] == sid and x["next_dates"] and x["text"] for x in lst), "14 listen viser hvornår og de næste datoer")
+        tl = next(x for x in lst if x["id"] == sid)["timeline"]
+        booked = {o["order_date"] for o in orders_of(sid) if o["status"] != "cancelled"}
+        ok(tl and all((t["status"] in ("ordered", "started")) == (t["date"] in booked) for t in tl)
+           and all(t["order_on"] == max(today, date.fromisoformat(t["date"]) - timedelta(days=7)).isoformat() for t in tl if t["status"] == "planned")
+           and len({t["date"] for t in tl}) == len(tl),
+           "14a én liste: hver dato én gang - 'Bestilt' eller 'Bestilles <dato>' (7 dage før)")
 
         # Månedligt: første mandag i måneden
         far = (today + timedelta(days=40)).isoformat()   # start langt fremme - ingen bestillinger nu

@@ -177,6 +177,9 @@ def run():
             ok(tour(lk["tour_id"])["container"] == "E2E-12345", "35 kundens låste containernummer kan ikke overskrives på den container")
             mn = behalf(material=cmat, container_number="E2E-9999", custom_container_id="E2E-9999", custom_address="Energivej 10, 3000 Helsingør")
             ok(tour(mn["tour_id"])["container"] == "E2E-9999", "36 et manuelt nummer uden for listen bestilles som en anden container")
+            mine2 = call("GET", "/container-orders/by-location/1121", t=ou, params={"all": 1, "include_cancelled": "true"})
+            ok(next((x for x in mine2 if x["id"] == mn["order_id"]), {}).get("container_id_resolved") == "E2E-9999",
+               "37 kunden ser det manuelle containernummer i Mine bestillinger (før: 'Container-nr. ikke angivet')")
         finally:
             db.container_counts.delete_many({"location_code": "1121", "material": cmat})
             db.container_overrides.delete_many({"location_code": "1121", "material": cmat})

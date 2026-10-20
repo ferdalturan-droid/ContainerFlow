@@ -1296,6 +1296,7 @@ async def get_tours(report_id: Optional[str] = None, plads: Optional[str] = None
                     date_to: Optional[str] = None,
                     pending: bool = False,
                     payload: Optional[dict] = Depends(get_optional_user_payload)):
+    _fixed_catch_up()
     query = {}
     # 2026-10-16: Periode + "kun uafsluttede" - bruges af Ture-arbejdsfladen til
     # at finde ture fra tidligere dage der aldrig blev kørt.
@@ -9757,6 +9758,7 @@ async def get_orders_by_location(location_code: str, date: str = "",
     name (`created_by_name`) and a derived `status_label` (afventer / accepteret
     / afhentet / annulleret) so the UI doesn't need to duplicate the mapping.
     """
+    _fixed_catch_up()  # 2026-10-20: faste tømninger indhentes når bestillingssiden bruges
     query = {"location_code": location_code}
     if not include_cancelled:
         query["status"] = {"$ne": "cancelled"}
@@ -9803,7 +9805,12 @@ async def get_orders_by_location(location_code: str, date: str = "",
         # the order); fall back to the saved default from container_overrides.
         override_id = (o.get("container_id_override") or "").strip()
         default_id = default_id_map.get((o.get("location_code"), o.get("material"), o.get("container_number")), "")
-        o["container_id_resolved"] = override_id or default_id
+        # 2026-10-20: Et containernummer der ikke står på pladsens liste (fx
+        # skrevet af logistikfirmaet under "Bestil for kunden") ligger i
+        # container_number - vis det i stedet for "Container-nr. ikke angivet".
+        cn = (o.get("container_number") or "").strip()
+        manual_no = cn if cn and not _re.match(r"^Container \d+$", cn) and cn not in ("Løs afhentning", "Tilpasset bestilling") else ""
+        o["container_id_resolved"] = override_id or default_id or manual_no
         # Derive a "lifecycle status" the UI can filter on. Original `status`
         # field is preserved untouched.
         # Fase 15.51 (2026-02-22): Estimat-bestillinger har ingen rigtige
@@ -18085,6 +18092,22 @@ async def _fixed_generate_all():
         logger.warning(f"Faste tømninger: {e}")
 
 
+_fixed_last_catchup = 0.0
+
+
+def _fixed_catch_up():
+    """2026-10-20: Indhent faste tømninger når appen bruges (højst hvert 10.
+    minut pr. proces). En serverless-container kan være lukket ned om natten,
+    og så kører timejobbet ikke - men så snart nogen bruger appen, oprettes
+    de tømninger der er kommet inden for de 7 dage."""
+    global _fixed_last_catchup
+    now = _time.time()
+    if now - _fixed_last_catchup < 600:
+        return
+    _fixed_last_catchup = now
+    _push_later(_fixed_generate_all())
+
+
 async def fixed_schedule_task():
     """Hver time: opret de faste tømninger der nu er inden for 7 dage."""
     await async_lib.sleep(20)
@@ -18151,9 +18174,26 @@ async def _fixed_out(s: dict) -> dict:
         {"_id": 0, "id": 1, "order_date": 1, "status": 1, "on_way": 1}).sort("order_date", 1).to_list(20)
     runs = await _raw_db.fixed_schedule_runs.find(
         {"schedule_id": s["id"], "status": {"$in": ["skipped_closed", "error"]}}, {"_id": 0}).sort("date", -1).to_list(5)
-    nxt = _fixed_dates(s, today, today + timedelta(days=120))[:6] if s.get("active", True) and not s.get("paused") else []
+    nxt = _fixed_dates(s, today, today + timedelta(days=120))[:8] if s.get("active", True) and not s.get("paused") else []
+    # 2026-10-20: Én liste - hver kommende dato med sin status (før stod de
+    # bestilte datoer både under "Næste" og "bestilt", så det lignede dubletter).
+    lead = max(1, min(int(s.get("lead_days") or _FIXED_LEAD_DAYS), 21))
+    by_date = {o["order_date"]: o for o in upcoming}
+    run_map = {r["date"]: r async for r in _raw_db.fixed_schedule_runs.find(
+        {"schedule_id": s["id"], "date": {"$gte": today.isoformat()}}, {"_id": 0})}
+    timeline = []
+    for d in nxt:
+        o, r = by_date.get(d), run_map.get(d) or {}
+        if o:
+            st = "skipped" if o.get("status") == "cancelled" else ("started" if o.get("on_way") or o.get("status") in ("in_progress", "completed") else "ordered")
+            timeline.append({"date": d, "status": st})
+        elif r.get("status") in ("skipped_closed", "error"):
+            timeline.append({"date": d, "status": "closed" if r["status"] == "skipped_closed" else "error", "note": r.get("note") or ""})
+        else:
+            timeline.append({"date": d, "status": "planned",
+                             "order_on": max(today, date.fromisoformat(d) - timedelta(days=lead)).isoformat()})
     return {**s, "text": _fixed_text(s), "partner_name": partner.get("name") or "", "next_dates": nxt,
-            "upcoming_orders": upcoming, "problems": runs}
+            "timeline": timeline, "lead_days": lead, "upcoming_orders": upcoming, "problems": runs}
 
 
 @org_router.get("/fixed-schedules")

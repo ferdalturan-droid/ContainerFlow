@@ -269,13 +269,29 @@ export default function FixedSchedulesTab({ locations: locProp = null }) {
                   </div>
                   {s.paused && <span className="shrink-0 px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-[11px] font-bold">På pause</span>}
                 </div>
-                {!s.paused && (
-                  <p className="text-xs text-slate-600 dark:text-slate-300 mt-2"><b>Næste:</b> {(s.next_dates || []).map(fmtDay).join(", ") || "ingen (perioden er slut)"}</p>
+                {!s.paused && (s.timeline || []).length > 0 && (
+                  <div className="mt-2.5" data-testid={`fixed-timeline-${s.id}`}>
+                    <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500 mb-1">Kommende tømninger</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {s.timeline.map(t => {
+                        const meta = {
+                          ordered: ["Bestilt", "bg-emerald-50 text-emerald-800 border-emerald-200 dark:bg-emerald-950/30 dark:text-emerald-200 dark:border-emerald-900"],
+                          started: ["Chaufføren er i gang", "bg-amber-50 text-amber-800 border-amber-200"],
+                          skipped: ["Sprunget over", "bg-slate-50 text-slate-500 border-slate-200 line-through"],
+                          closed: [t.note || "Lukket", "bg-amber-50 text-amber-800 border-amber-200"],
+                          error: [t.note || "Ikke oprettet", "bg-rose-50 text-rose-700 border-rose-200"],
+                          planned: [`Bestilles ${fmtDay(t.order_on)}`, "bg-white text-slate-600 border-slate-200 dark:bg-slate-900 dark:text-slate-300 dark:border-slate-700"],
+                        }[t.status] || ["", ""];
+                        return (
+                          <span key={t.date} className={`px-2 py-1 rounded-lg border text-[11px] leading-tight ${meta[1]}`}>
+                            <b className="font-semibold">{fmtDay(t.date)}</b> · {meta[0]}
+                          </span>
+                        );
+                      })}
+                    </div>
+                    <p className="text-[11px] text-slate-500 mt-1">Hver tømning bliver automatisk en bestilling {s.lead_days || 7} dage før - så kan logistikfirmaet planlægge, og I kan springe den over under Bestillinger.</p>
+                  </div>
                 )}
-                {booked.length > 0 && <p className="text-xs text-emerald-700 dark:text-emerald-400 mt-1">{booked.length} bestilt: {booked.map(o => fmtDay(o.order_date)).join(", ")}</p>}
-                {(s.problems || []).map((p, i) => (
-                  <p key={i} className="text-xs text-amber-800 dark:text-amber-300 mt-1 inline-flex items-start gap-1"><AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" /> {fmtDay(p.date)}: {p.note || "ikke oprettet"}</p>
-                ))}
                 <div className="flex gap-1.5 mt-3">
                   <button onClick={() => setForm(s)} className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200" data-testid={`fixed-edit-${s.id}`}><Edit2 className="w-3.5 h-3.5" /> Ret</button>
                   {s.paused
