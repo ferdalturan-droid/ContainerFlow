@@ -113,6 +113,12 @@ def run():
                           headers={"Authorization": f"Bearer {cd}"}, timeout=20)
         ok(r.status_code == 403 and r.json().get("premium_required") == "economy",
            "12e basic: rettelser til godkendelse kræver Økonomi (ingen Godkendelser at sende dem til)")
+        r = _session.post(f"{BASE}/optimize-route", json={"plads_name": site.get("name") or "", "tour_ids": [tid]},
+                          headers={"Authorization": f"Bearer {ca}"}, timeout=20)
+        ok(r.status_code == 403 and r.json().get("premium_required") == "routes"
+           and not call("GET", "/logistics/profile", t=ca)["capabilities"].get("routes")
+           and status_of("POST", "/optimize-route", {"plads_name": site.get("name") or "", "tour_ids": [tid]}, t=la) != 403,
+           "12f 'Optimer rækkefølge' (ruteoptimering) er kun for premium")
 
         # Super admin giver Økonomi enkeltvis (overgang / prøve)
         sa = login(os.environ["SUPER_ADMIN_EMAIL"])

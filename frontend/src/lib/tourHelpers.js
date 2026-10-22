@@ -85,11 +85,22 @@ export const openHours = (t) => {
 export const capacityText = (t) => {
   const label = (t?.capacity_label || "").trim();
   const m3 = t?.capacity_volume_m3;
+  if (label && /m³|m3/i.test(label)) return label;  // "Åben container 20 m³" - ikke "(20 m³)" to gange
   if (label && m3 != null && m3 !== "") return `${label} (${m3} m³)`;
   if (label) return label;
   if (m3 != null && m3 !== "") return `${m3} m³`;
   return "";
 };
+
+/** 2026-10-22: Kort containertype til chaufførens liste: "Åben container 20 m³" -> "Åben 20 m³". */
+export const capacityShort = (t) => {
+  const full = capacityText(t);
+  if (!full) return "";
+  return full.replace(/\s*\(\d+(?:[.,]\d+)?\s*m³\)/, "").replace(/\s*container\s*/i, " ").replace(/\s+/g, " ").trim();
+};
+
+/** Containerens nummer til visning ("9999", "Container 2"). Tomt for løs afhentning og varekørsel. */
+export const containerNo = (t) => (t?.tour_type === "loes_afhentning" || t?.tour_kind === "goods" ? "" : String(t?.container || "").trim());
 
 export const assigneeName = (t) => t?.claimed_by || t?.driver_name || "";
 

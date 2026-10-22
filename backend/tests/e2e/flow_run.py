@@ -178,6 +178,21 @@ def run():
         ok(T(m2)["run_role"] == "solo" and not T(m2).get("run_id"), "30 en tur i kørslen slettes: den sidste bliver solo")
         call("PUT", f"/tours/{m2}", {"on_way": False, "claimed_by": "", "claimed_by_id": "", "on_way_time": ""}, t=la)
 
+        # --- 2026-10-22: containertype slås op når turen mangler den -----------------
+        cm = db.capacity_measures.find_one({"location_code": "1101"}, {"_id": 0, "id": 1, "label": 1})
+        if cm:
+            t9, _ = order(9)
+            db.container_overrides.insert_one({"location_code": "1101", "material": MAT, "container_label": "Container 99",
+                                               "custom_container_id": "E2E Run 9", "capacity_measure_id": cm["id"], "partner_id": ""})
+            try:
+                row9 = next((x for x in call("GET", "/tours", t=la, params={"date": today(), "limit": 500}) if x["id"] == t9), {})
+                ok(not T(t9).get("capacity_label") and row9.get("capacity_label") == cm["label"],
+                   f"30a containertype ({cm['label']}) vises fra pladsens container, også når turen ikke har fået den med")
+            finally:
+                db.container_overrides.delete_many({"custom_container_id": "E2E Run 9"})
+        else:
+            ok(False, "30a testdata mangler et kapacitetsmål på 1101")
+
         # --- Ældre ture (før hængerkørsel) prissættes som før ---------------------------
         db.tours.update_one({"id": t7}, {"$set": {"on_way": True, "on_way_time": "08:00", "completed": True, "time": "09:00",
                                                   "completed_at": datetime.now(DK).isoformat(), "claimed_by": user_name(dc),

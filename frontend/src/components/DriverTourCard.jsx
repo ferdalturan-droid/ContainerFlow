@@ -6,7 +6,7 @@ import {
   Navigation, MessageSquare, Flag, Play, CheckCircle2, ChevronRight, X, Phone, Truck,
 } from "lucide-react";
 import TourChat from "./TourChat";
-import { TOUR_TYPE_LABEL, isHaster, openHours, capacityText, daysLate, routeOf, navUrl } from "../lib/tourHelpers";
+import { TOUR_TYPE_LABEL, isHaster, openHours, capacityShort, containerNo, daysLate, routeOf, navUrl } from "../lib/tourHelpers";
 
 /**
  * Tur-række til chaufføren (2026-10-20, runde 2: endnu mere kompakt).
@@ -52,15 +52,18 @@ export default function DriverTourCard({ tour, routeInfo, unread = 0, mode = "mi
   const what = lines.length > 1 ? lines.map(l => l.text).join(" + ")
     : lines.length === 1 ? `${lines[0].text}${lines[0].qty ? ` · ${lines[0].qty} ${lines[0].unit || ""}` : ""}` : (tour.fraction || "—");
   const typeLabel = tour.tour_type !== "normal" ? (TOUR_TYPE_LABEL[tour.tour_type] || "") : "";
+  // 2026-10-22: Containertype kort ("Lukket 30 m³") forrest i den grå linje,
+  // containernummeret i titlen ("Restaffald (9999)").
   const cap = tour.tour_type === "loes_afhentning"
     ? (tour.loose_estimated_count ? `${tour.loose_estimated_count} containere` : "")
-    : capacityText(tour);
+    : capacityShort(tour);
+  const cno = containerNo(tour);
   const meta = done
     ? [tour.time ? `Færdig ${tour.time}` : "Færdig", tour.weight ? `${Number(tour.weight).toLocaleString("da-DK")} kg` : ""]
     : cancelled ? [tour.cancelled_on_way ? "Annulleret undervejs" : "Annulleret", tour.cancel_reason || ""]
       : [oh.from ? `${oh.from}–${oh.to}` : "", onWay && tour.on_way_time ? `På vej ${tour.on_way_time}` : "",
         late > 0 ? `${late} ${late === 1 ? "dag" : "dage"} for sent` : ""];
-  const facts = [...meta, typeLabel, cap, tour.container && tour.tour_type !== "loes_afhentning" ? `#${tour.container}` : "",
+  const facts = [...(done || cancelled ? [...meta, cap] : [cap, ...meta]), typeLabel,
     Number(tour.trailer_count) > 0 ? `${tour.trailer_count} hænger${Number(tour.trailer_count) === 1 ? "" : "e"}` : "",
     goods && !typeLabel ? "Fragt" : "", routeInfo?.distance_km > 0 && !done ? `${routeInfo.distance_km} km` : ""].filter(Boolean);
   const legs = done || cancelled || hideLegs ? [] : legsOf(tour).filter(l => !hideAddrs.includes(l.address)).slice(0, 2);
@@ -81,7 +84,7 @@ export default function DriverTourCard({ tour, routeInfo, unread = 0, mode = "mi
             )}
             {haster && !done && !cancelled && <span className={`${chip} bg-rose-600 text-white ${!onWay ? "animate-haster-pulse" : ""}`} data-testid={`tour-priority-${tour.id}`}><Flag className="w-3 h-3" />Haster</span>}
             {tour.queued && <span className={`${chip} bg-slate-200 text-slate-600`} data-testid={`tour-queued-${tour.id}`}>Venter på net</span>}
-            <span className="min-w-0 truncate text-[15px] font-bold text-slate-900">{what}</span>
+            <span className="min-w-0 truncate text-[15px] font-bold text-slate-900">{what}{cno ? <span className="font-semibold text-slate-600"> ({cno})</span> : null}</span>
             {done && <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />}
           </div>
           <div className={`mt-0.5 text-[12px] truncate ${onWay ? "text-amber-800" : late > 0 && !done ? "text-amber-700" : "text-slate-500"}`}>

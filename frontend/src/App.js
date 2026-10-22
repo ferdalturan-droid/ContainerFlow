@@ -33,7 +33,7 @@ import FinishSheet, { effectiveCapture } from "@/components/FinishSheet";
 import DriverStopList from "@/components/DriverStopList";
 import { initTourOpQueue, enqueueOp, isNetworkError, subscribeOps, newOpId } from "@/lib/tourOpQueue";
 import DriverRunSheet from "@/components/DriverRunSheet";
-import { routeOf, navUrl } from "@/lib/tourHelpers";
+import { routeOf, navUrl, capacityText, containerNo, daysLate, openHours, TOUR_TYPE_LABEL, isHaster } from "@/lib/tourHelpers";
 import { installPremiumInterceptor, subscribePremiumRefresh } from "@/lib/premium";
 import { AuthedImg, downloadAuthed, fetchBlobUrl, openAuthed } from "@/lib/authedFile";
 
@@ -6783,7 +6783,7 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
   const mod = useMemo(() => {
     const has = (k) => authUser?.role !== "logistics_admin"
       || (!!logisticsProfile && (!!logisticsProfile.failed || !!(logisticsProfile.capabilities || {})[k]));
-    return { economy: has("economy"), time: has("time"), reports: has("reports"), team_roles: has("team_roles"),
+    return { economy: has("economy"), time: has("time"), reports: has("reports"), team_roles: has("team_roles"), routes: has("routes"),
              loaded: authUser?.role !== "logistics_admin" || !!logisticsProfile };
   }, [authUser?.role, logisticsProfile]);
   // Premium-firmaer arbejder med "lokationer"; partnere med genbrugspladser.
@@ -7246,7 +7246,8 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
 
   const adminOptimizeRef = useRef(null);
   useEffect(() => {
-    if (!adminSelectedPlads) { setAdminRouteOptimization(null); return; }
+    // 2026-10-22: Ruteoptimering er premium.
+    if (!adminSelectedPlads || !mod.routes) { setAdminRouteOptimization(null); return; }
     if (adminOptimizeRef.current) clearTimeout(adminOptimizeRef.current);
     setAdminRouteOptimization(null);
     adminOptimizeRef.current = setTimeout(() => {
@@ -7258,7 +7259,7 @@ const AdminPage = ({ onLogout, showConfirm, hideConfirm }) => {
         .catch(() => setAdminRouteOptimization(null));
     }, 800);
     return () => { if (adminOptimizeRef.current) clearTimeout(adminOptimizeRef.current); };
-  }, [adminSelectedPlads, adminReportDate]);
+  }, [adminSelectedPlads, adminReportDate, mod.routes]);
 
   const getAdminRouteInfo = useCallback((tourId) => {
     if (!adminRouteOptimization?.optimized || !adminRouteOptimization?.tours) return null;
@@ -12448,167 +12449,185 @@ const MobileTourPanel = ({ tour, onClose, onUpdate, onDelete, onToggleOnWay, onT
         style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Header */}
-        <div className="flex items-start justify-between p-4 border-b border-slate-200 dark:border-slate-700">
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 flex-wrap mb-1">
-              <h3 className="font-bold text-lg text-slate-900 dark:text-white truncate">
-                {tour.fraction || "Tur"}
-              </h3>
-              {tour.priority && tour.priority !== "normal" && (
-                <span className={`px-1.5 py-0.5 text-[10px] font-black rounded ${
-                  tour.priority === "urgent" ? "bg-red-500 text-white" :
-                  tour.priority === "high" ? "bg-orange-500 text-white" :
-                  "bg-blue-500 text-white"
-                }`}>
-                  {tour.priority === "urgent" ? "HASTER" : tour.priority === "high" ? "HØJ" : "LAV"}
-                </span>
-              )}
-              {tour.is_same_day && (
-                <span className="px-1.5 py-0.5 bg-orange-500 text-white text-[10px] font-bold rounded">SD</span>
-              )}
-            </div>
-            <p className="text-xs text-slate-500 dark:text-slate-400 truncate">
-              {/* Fase 15.41 (2026-02-22): Skjul container-id for løs
-                  afhentning - vis i stedet estimeret antal containere. */}
-              {[tour.plads,
-                tour.tour_type === "loes_afhentning"
-                  ? `Løs afhentning · ${tour.loose_estimated_count || 0} container(e)`
-                  : isGoodsTour
-                    ? `Fragt${Number(tour.trailer_count) ? ` · ${tour.trailer_count} hængere` : ""}`
-                    : (tour.container ? `Container ${tour.container}` : (Number(tour.trailer_count) ? `${tour.trailer_count} hængere` : "")),
-              ].filter(Boolean).join(" • ")}
-            </p>
-          </div>
-          <button
-            onClick={onClose}
-            className="ml-2 p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500"
-            data-testid="mobile-tour-panel-close"
-            aria-label="Luk"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        {onChat && (
-          <div className="px-4 pt-3 grid grid-cols-1 min-[380px]:grid-cols-2 gap-2">
-            <CallPlannerButton tourId={tour.id} />
-            <button
-              onClick={onChat}
-              className="w-full min-h-[44px] rounded-xl border border-emerald-200 bg-emerald-50 text-emerald-800 font-semibold text-sm inline-flex items-center justify-center gap-2"
-              data-testid="mobile-tour-panel-chat"
-            >
-              <MessageSquare className="w-4 h-4" /> Skriv til planlæggeren
-            </button>
-          </div>
-        )}
-
-        {/* Details */}
-        <div className="p-4 space-y-3 text-sm">
-          {/* 2026-10-19: Værksteds-ture viser hvor containeren hentes og hvor den skal hen
-              (begge med Google Maps) + ring til værkstedet. */}
-          {tour.cancelled && !tour.completed && (
-            <div className="rounded-xl bg-slate-100 border border-slate-300 px-3 py-2.5" data-testid="mobile-tour-panel-cancelled">
-              <div className="font-bold text-slate-800">{tour.cancelled_on_way ? "Annulleret mens du var på vej" : "Turen er annulleret"}</div>
-              <div className="text-slate-600">{tour.cancelled_by_name ? `Af ${tour.cancelled_by_name}` : "Af kunden"}{tour.cancel_reason ? `: ${tour.cancel_reason}` : ""}</div>
-              <div className="text-xs text-slate-500 mt-0.5">Kør ikke turen. Har du allerede kørt den, så skriv til planlæggeren.</div>
-            </div>
-          )}
-          {/* 2026-10-20: Hængerkørsel - hvilke containere kører sammen, og
-              tilføj/tag en tur af hængeren. */}
-          {run && !isClaimedByOther && tour.on_way && !tour.completed && (run.members.length > 1 || run.canAdd) && (
-            <div className="rounded-xl border border-violet-200 bg-violet-50/60 p-3 space-y-2" data-testid="mobile-tour-panel-run">
-              <div className="text-xs font-bold uppercase tracking-wide text-violet-800 flex items-center gap-1.5">
-                <Truck className="w-3.5 h-3.5" /> {run.members.length > 1 ? `Hængerkørsel · ${run.members.length} containere` : "Kører solo"}
-              </div>
-              {run.members.length > 1 && (
-                <div className="space-y-1">
-                  {[...run.members].sort((a, b) => (a.run_role === "truck" ? -1 : b.run_role === "truck" ? 1 : (a.run_seq || 0) - (b.run_seq || 0))).map(m => (
-                    <div key={m.id} className="flex items-center gap-2 text-[13px]">
-                      <span className={`px-1.5 py-0.5 rounded-md text-[10px] font-bold ${m.run_role === "truck" ? "bg-slate-900 text-white" : "bg-violet-600 text-white"}`}>{m.run_role === "truck" ? "Bil" : "Hænger"}</span>
-                      <span className={`truncate ${m.id === tour.id ? "font-bold text-slate-900" : "text-slate-700"}`}>{m.fraction || "Tur"}{m.container ? ` · #${m.container}` : ""}{m.completed ? " · færdig" : ""}</span>
-                      {m.id === tour.id && <span className="text-[11px] text-slate-500 shrink-0">denne tur</span>}
+        {/* 2026-10-22: Turens vindue samlet: overskrift (indhold, container,
+            type, status), rute med "Kør", alle oplysninger i ét felt og noter
+            for sig. Vægt, afslutning og knapper nedenfor er uændrede. */}
+        {(() => {
+          const late = daysLate(tour);
+          const cno = containerNo(tour);
+          const capT = capacityText(tour);
+          const oh = openHours(tour);
+          const typeL = TOUR_TYPE_LABEL[tour.tour_type || "normal"] || "";
+          const lines = cargoLines.filter(l => (l.text || "").trim());
+          const status = tour.cancelled && !tour.completed ? { t: tour.cancelled_on_way ? "Annulleret undervejs" : "Annulleret", c: "bg-slate-200 text-slate-700" }
+            : tour.completed ? { t: `Færdig${tour.time ? ` ${tour.time}` : ""}`, c: "bg-emerald-100 text-emerald-800" }
+            : tour.not_completed ? { t: "Kan ikke gennemføres", c: "bg-rose-100 text-rose-800" }
+            : tour.on_way ? { t: `På vej${tour.on_way_time ? ` siden ${tour.on_way_time}` : ""}`, c: "bg-amber-100 text-amber-800" }
+            : tour.claimed_by || tour.driver_id ? { t: "Ikke startet", c: "bg-slate-100 text-slate-700" }
+            : { t: "Ledig", c: "bg-orange-100 text-orange-800" };
+          const fmtD = (d) => { try { return new Date(`${String(d).slice(0, 10)}T12:00:00`).toLocaleDateString("da-DK", { weekday: "short", day: "numeric", month: "short" }); } catch (_) { return d; } };
+          // Note: kundens kommentar / planlæggerens note. Standardtekster
+          // ("Kundeordre fra ...", "Fast tømning ...") er ikke en note.
+          const rm = String(tour.remark || "").trim();
+          const boiler = !rm || /^Kundeordre( fra .*)?$/.test(rm) || /^Fast tømning/.test(rm);
+          const note = boiler ? null : rm.startsWith("Kundeordre:") ? { k: "Kundens kommentar", v: rm.replace(/^Kundeordre:\s*/, "") } : { k: "Note", v: oh.note && oh.from ? oh.note : rm };
+          const orderedBy = tour.on_behalf_company_name
+            ? `${tour.on_behalf_company_name} for kunden${tour.requested_by ? ` (${tour.requested_by})` : ""}`
+            : (tour.created_by_name && tour.created_by_name !== "Fast tømning" ? tour.created_by_name : "");
+          const facts = [
+            ["Dato", <span>{fmtD(tour.date)}{late > 0 && !tour.completed ? <b className="text-amber-700"> · {late} {late === 1 ? "dag" : "dage"} for sent</b> : null}</span>],
+            ["Tidsrum", oh.from ? `${oh.from}–${oh.to}` : ""],
+            ["Container", cno],
+            ["Containertype", tour.tour_kind === "goods" || tour.tour_type === "loes_afhentning" ? "" : (capT || <span className="text-slate-400">Ikke angivet på pladsen</span>)],
+            ["Løs afhentning", tour.tour_type === "loes_afhentning" ? `${tour.loose_estimated_count || 0} containere (anslået)` : ""],
+            [lines.length > 1 ? "Indhold" : "Materiale", lines.length ? (
+              <span className="block space-y-0.5">{lines.map((l, i) => (
+                <span key={i} className="block">{l.trailer ? <b className="text-slate-500">H{l.trailer} · </b> : null}{l.text}{l.qty ? <span className="text-slate-500"> · {l.qty} {l.unit || ""}</span> : null}</span>
+              ))}</span>) : (tour.fraction || "")],
+            ["Opgave", typeL],
+            ["Hængere (planlagt)", isGoodsTour && Number(tour.trailer_count) > 0 ? String(tour.trailer_count) : ""],
+            ["Kunde", tour.customer_name || tour.private_company || ""],
+            ["Plads", tour.plads || ""],
+            ["Bestilt af", orderedBy],
+            ["Bestilt", tour.order_date && tour.order_date !== tour.date ? fmtD(tour.order_date) : ""],
+            ["Vægt", tour.weight != null && tour.weight !== "" && Number(tour.weight) > 0 ? `${Number(tour.weight).toLocaleString("da-DK")} kg` : ""],
+            ["Chauffør", tour.claimed_by ? (
+              <span>{tour.claimed_by}{tour.completed && tour.completed_at ? <span className="text-slate-500" data-testid={`panel-completed-stamp-${tour.id}`}> · afsluttet {formatCompletedAt(tour.completed_at)}</span> : null}</span>) : ""],
+            ["Tur-nr.", tour.tour_number || ""],
+          ].filter(([, v]) => v);
+          return (
+            <>
+              <div className="sticky top-0 z-10 bg-white dark:bg-slate-900 px-4 pt-3 pb-3 border-b border-slate-200 dark:border-slate-700">
+                <div className="flex items-start gap-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className={`px-2 py-0.5 rounded-md text-[11px] font-bold ${status.c}`} data-testid="mobile-tour-panel-status">{status.t}</span>
+                      {isHaster(tour) && !tour.completed && <span className="px-2 py-0.5 rounded-md text-[11px] font-extrabold bg-rose-600 text-white uppercase">Haster</span>}
+                      {tour.run_role && tour.run_role !== "solo" && (
+                        <span className={`px-2 py-0.5 rounded-md text-[11px] font-extrabold uppercase ${tour.run_role === "truck" ? "bg-slate-900 text-white" : "bg-violet-600 text-white"}`}>{tour.run_role === "truck" ? "Bil" : "Hænger"}</span>
+                      )}
                     </div>
-                  ))}
-                </div>
-              )}
-              <div className="flex flex-wrap gap-2">
-                {run.canAdd && (
-                  <button type="button" onClick={run.onAdd} data-testid="mobile-tour-panel-run-add"
-                    className="flex-1 min-h-[44px] px-3 rounded-lg bg-violet-600 text-white text-sm font-bold">+ Tilføj tur på hængeren</button>
-                )}
-                {run.members.length > 1 && (
-                  <button type="button" onClick={run.onLeave} data-testid="mobile-tour-panel-run-leave"
-                    className="flex-1 min-h-[44px] px-3 rounded-lg border border-violet-300 bg-white text-violet-800 text-sm font-bold">
-                    {tour.run_role === "trailer" ? "Tag af hængeren" : "Tag ud af kørslen"}
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-          {tourStops.length === 0 && routeLegs.length > 0 && (
-            <div className="space-y-2.5" data-testid="mobile-tour-panel-route">
-              {routeLegs.map((l, i) => {
-                const isWs = isWorkshopRoute && l.name === (tour.workshop_name || "Værksted") && l.address === tour.workshop_address;
-                return (
-                  <div key={i}>
-                    <div className="text-xs uppercase tracking-wide text-slate-500 mb-0.5">{routeLegs.length > 1 ? `${i + 1} · ` : ""}{l.label}{l.name ? ` · ${l.name}` : ""}</div>
-                    <a href={navUrl(l.address)} target="_blank" rel="noopener noreferrer"
-                      data-testid={isWorkshopRoute ? `mobile-tour-panel-route-${isWs ? "workshop" : "plads"}` : `mobile-tour-panel-route-${i}`}
-                      className="inline-flex items-center gap-1.5 text-blue-600 dark:text-blue-400 hover:underline font-medium">
-                      <MapPin className="w-4 h-4" />{l.address}<ExternalLink className="w-3 h-3" />
-                    </a>
-                    {isWs && tour.workshop_phone && (
-                      <a href={`tel:${tour.workshop_phone.replace(/\s/g, "")}`} className="mt-1 flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400 font-semibold">
-                        <Phone className="w-4 h-4" /> Ring til værkstedet ({tour.workshop_phone})
-                      </a>
+                    <h3 className="mt-1 text-xl font-extrabold leading-tight text-slate-900 dark:text-white break-words" data-testid="mobile-tour-panel-title">
+                      {tour.fraction || "Tur"}{cno ? <span className="font-bold text-slate-500"> ({cno})</span> : null}
+                    </h3>
+                    {(capT || (typeL && tour.tour_type !== "normal")) && (
+                      <p className="text-sm text-slate-600 dark:text-slate-300 mt-0.5">{[capT, tour.tour_type !== "normal" ? typeL : ""].filter(Boolean).join(" · ")}</p>
                     )}
                   </div>
-                );
-              })}
-            </div>
-          )}
-          {(tourStops.length > 0 || (canAddStop && tour.on_way && !tour.completed && !isClaimedByOther)) && (
-            <DriverStopList tour={tour} stops={tourStops} codes={deviationCodes} canAdd={canAddStop}
-              canTick={!tour.completed && !isClaimedByOther && !!(tour.on_way || tour.claimed_by)}
-              onChanged={(st, queued) => { setLocalStops(st); if (!queued) onRefresh?.(); }} />
-          )}
-          {(tour.open_from || tour.open_to) && (
-            <div>
-              <div className="text-xs uppercase tracking-wide text-slate-500 mb-0.5">Åbningstid</div>
-              <div className="text-slate-800 dark:text-slate-200">
-                {tour.open_from || "-"} – {tour.open_to || "-"}
+                  <button onClick={onClose} className="p-2 -mr-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500" data-testid="mobile-tour-panel-close" aria-label="Luk">
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
               </div>
-            </div>
-          )}
-          {/* 2026-10-20: Kunde og note står her (ikke længere på listen). */}
-          {(tour.customer_name || tour.private_company) && (
-            <div data-testid="mobile-tour-panel-customer">
-              <div className="text-xs uppercase tracking-wide text-slate-500 mb-0.5">Kunde</div>
-              <div className="text-slate-800 dark:text-slate-200">{tour.customer_name || tour.private_company}</div>
-            </div>
-          )}
-          {tour.remark && (
-            <div data-testid="mobile-tour-panel-note">
-              <div className="text-xs uppercase tracking-wide text-slate-500 mb-0.5">Note</div>
-              <div className="text-amber-900 bg-amber-50 rounded-lg px-2.5 py-2 whitespace-pre-wrap">{tour.remark}</div>
-            </div>
-          )}
-          {tour.weight != null && tour.weight !== "" && (tour.tour_type || "normal") === "normal" && (
-            <div>
-              <div className="text-xs uppercase tracking-wide text-slate-500 mb-0.5">Vægt</div>
-              <div className="text-slate-800 dark:text-slate-200 font-mono">{tour.weight} kg</div>
-            </div>
-          )}
-          {tour.claimed_by && (
-            <div className="flex items-center gap-2 text-blue-600 dark:text-blue-400">
-              <Users className="w-4 h-4" />
-              <span className="font-medium">{tour.claimed_by}</span>
-              {tour.completed && <span className="text-slate-500 text-xs" data-testid={`panel-completed-stamp-${tour.id}`}>har afsluttet{tour.completed_at ? ` ${formatCompletedAt(tour.completed_at)}` : ""}</span>}
-              {tour.on_way && !tour.completed && <span className="text-slate-500 text-xs">kører</span>}
-            </div>
-          )}
-        </div>
+
+              {onChat && (
+                <div className="px-4 pt-3 grid grid-cols-1 min-[380px]:grid-cols-2 gap-2">
+                  <CallPlannerButton tourId={tour.id} />
+                  <button onClick={onChat} data-testid="mobile-tour-panel-chat"
+                    className="w-full min-h-[44px] rounded-xl border border-emerald-200 bg-emerald-50 text-emerald-800 font-semibold text-sm inline-flex items-center justify-center gap-2">
+                    <MessageSquare className="w-4 h-4" /> Skriv til planlæggeren
+                  </button>
+                </div>
+              )}
+
+              <div className="p-4 space-y-3 text-sm">
+                {tour.cancelled && !tour.completed && (
+                  <div className="rounded-xl bg-slate-100 border border-slate-300 px-3 py-2.5" data-testid="mobile-tour-panel-cancelled">
+                    <div className="font-bold text-slate-800">{tour.cancelled_on_way ? "Annulleret mens du var på vej" : "Turen er annulleret"}</div>
+                    <div className="text-slate-600">{tour.cancelled_by_name ? `Af ${tour.cancelled_by_name}` : "Af kunden"}{tour.cancel_reason ? `: ${tour.cancel_reason}` : ""}</div>
+                    <div className="text-xs text-slate-500 mt-0.5">Kør ikke turen. Har du allerede kørt den, så skriv til planlæggeren.</div>
+                  </div>
+                )}
+                {/* 2026-10-20: Hængerkørsel - hvilke containere kører sammen, og
+                    tilføj/tag en tur af hængeren. */}
+                {run && !isClaimedByOther && tour.on_way && !tour.completed && (run.members.length > 1 || run.canAdd) && (
+                  <div className="rounded-xl border border-violet-200 bg-violet-50/60 p-3 space-y-2" data-testid="mobile-tour-panel-run">
+                    <div className="text-xs font-bold uppercase tracking-wide text-violet-800 flex items-center gap-1.5">
+                      <Truck className="w-3.5 h-3.5" /> {run.members.length > 1 ? `Hængerkørsel · ${run.members.length} containere` : "Kører solo"}
+                    </div>
+                    {run.members.length > 1 && (
+                      <div className="space-y-1">
+                        {[...run.members].sort((a, b) => (a.run_role === "truck" ? -1 : b.run_role === "truck" ? 1 : (a.run_seq || 0) - (b.run_seq || 0))).map(m => (
+                          <div key={m.id} className="flex items-center gap-2 text-[13px]">
+                            <span className={`px-1.5 py-0.5 rounded-md text-[10px] font-bold ${m.run_role === "truck" ? "bg-slate-900 text-white" : "bg-violet-600 text-white"}`}>{m.run_role === "truck" ? "Bil" : "Hænger"}</span>
+                            <span className={`truncate ${m.id === tour.id ? "font-bold text-slate-900" : "text-slate-700"}`}>{m.fraction || "Tur"}{containerNo(m) ? ` (${containerNo(m)})` : ""}{m.completed ? " · færdig" : ""}</span>
+                            {m.id === tour.id && <span className="text-[11px] text-slate-500 shrink-0">denne tur</span>}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div className="flex flex-wrap gap-2">
+                      {run.canAdd && (
+                        <button type="button" onClick={run.onAdd} data-testid="mobile-tour-panel-run-add"
+                          className="flex-1 min-h-[44px] px-3 rounded-lg bg-violet-600 text-white text-sm font-bold">+ Tilføj tur på hængeren</button>
+                      )}
+                      {run.members.length > 1 && (
+                        <button type="button" onClick={run.onLeave} data-testid="mobile-tour-panel-run-leave"
+                          className="flex-1 min-h-[44px] px-3 rounded-lg border border-violet-300 bg-white text-violet-800 text-sm font-bold">
+                          {tour.run_role === "trailer" ? "Tag af hængeren" : "Tag ud af kørslen"}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {tourStops.length === 0 && routeLegs.length > 0 && (
+                  <div className="rounded-xl border border-slate-200 dark:border-slate-700 divide-y divide-slate-100 dark:divide-slate-800" data-testid="mobile-tour-panel-route">
+                    {routeLegs.map((l, i) => {
+                      const isWs = isWorkshopRoute && l.name === (tour.workshop_name || "Værksted") && l.address === tour.workshop_address;
+                      return (
+                        <div key={i} className="flex items-center gap-3 px-3 py-2.5">
+                          {routeLegs.length > 1 && <span className="w-6 h-6 shrink-0 rounded-full bg-slate-900 text-white text-[12px] font-bold flex items-center justify-center">{i + 1}</span>}
+                          <div className="min-w-0 flex-1">
+                            <div className="text-[11px] font-bold uppercase tracking-wide text-slate-500">{l.label}{l.name ? ` · ${l.name}` : ""}</div>
+                            <div className="text-[15px] font-semibold text-slate-900 dark:text-white break-words">{l.address}</div>
+                            {isWs && tour.workshop_phone && (
+                              <a href={`tel:${tour.workshop_phone.replace(/\s/g, "")}`} className="mt-0.5 inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-400 text-[13px] font-semibold">
+                                <Phone className="w-3.5 h-3.5" /> Ring til værkstedet ({tour.workshop_phone})
+                              </a>
+                            )}
+                          </div>
+                          <a href={navUrl(l.address)} target="_blank" rel="noopener noreferrer"
+                            data-testid={isWorkshopRoute ? `mobile-tour-panel-route-${isWs ? "workshop" : "plads"}` : `mobile-tour-panel-route-${i}`}
+                            aria-label={`Kør til ${l.name || l.address}`}
+                            className="shrink-0 min-h-[40px] px-3 rounded-xl border border-slate-200 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-[13px] font-bold inline-flex items-center gap-1.5">
+                            <Navigation className="w-4 h-4" /> Kør
+                          </a>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                {(tourStops.length > 0 || (canAddStop && tour.on_way && !tour.completed && !isClaimedByOther)) && (
+                  <DriverStopList tour={tour} stops={tourStops} codes={deviationCodes} canAdd={canAddStop}
+                    canTick={!tour.completed && !isClaimedByOther && !!(tour.on_way || tour.claimed_by)}
+                    onChanged={(st, queued) => { setLocalStops(st); if (!queued) onRefresh?.(); }} />
+                )}
+
+                {note && (
+                  <div className="rounded-xl bg-amber-50 border border-amber-200 px-3 py-2.5" data-testid="mobile-tour-panel-note">
+                    <div className="text-[11px] font-bold uppercase tracking-wide text-amber-800">{note.k}</div>
+                    <div className="text-amber-950 whitespace-pre-wrap">{note.v}</div>
+                  </div>
+                )}
+                {tour.fixed_label && (
+                  <div className="rounded-xl bg-sky-50 border border-sky-200 px-3 py-2 text-[13px] text-sky-900" data-testid="mobile-tour-panel-fixed">
+                    <b>Fast tømning</b> · {tour.fixed_label}
+                  </div>
+                )}
+
+                <dl className="rounded-xl border border-slate-200 dark:border-slate-700 grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1.5 px-3 py-2.5" data-testid="mobile-tour-panel-facts">
+                  {facts.map(([k, v]) => (
+                    <React.Fragment key={k}>
+                      <dt className="text-[12px] text-slate-500 dark:text-slate-400 pt-px" data-testid={k === "Kunde" ? "mobile-tour-panel-customer" : undefined}>{k}</dt>
+                      <dd className="text-[14px] text-slate-900 dark:text-slate-100 font-medium min-w-0 break-words">{v}</dd>
+                    </React.Fragment>
+                  ))}
+                </dl>
+              </div>
+            </>
+          );
+        })()}
 
         {/* Inline weight prompt - shown when user clicked "Afslut" but no weight yet.
             Fase 15.41 (2026-02-22): Når tour.tour_type === "loes_afhentning"
@@ -13409,6 +13428,8 @@ function App() {
   // 2026-10-20: Tidsregistrering (stempling) er premium. Uden den åbner
   // chaufførappen direkte på Ture, og "Tid"-fanen vises ikke.
   const driverHasTime = !driverCaps._loaded || !!driverCaps.time;
+  // 2026-10-22: "Optimer rækkefølge" (ruteberegning) er premium.
+  const driverHasRoutes = !!driverCaps._loaded && !!driverCaps.routes;
   const [activeCustomer, setActiveCustomer] = useState(null); // { id, name, customer_id, city }
   const [customerSwitchOpen, setCustomerSwitchOpen] = useState(false);
 
@@ -13639,7 +13660,7 @@ function App() {
   useEffect(() => { toursRef.current = tours; }, [tours]);
 
   useEffect(() => {
-    if (!selectedPlads || !routeOptEnabled) { setRouteOptimization(null); return; }
+    if (!selectedPlads || !routeOptEnabled || !driverHasRoutes) { setRouteOptimization(null); return; }
     if (autoOptimizeRef.current) clearTimeout(autoOptimizeRef.current);
     setRouteOptimization(null);
     autoOptimizeRef.current = setTimeout(() => {
@@ -13675,7 +13696,7 @@ function App() {
       });
     }, 800);
     return () => { if (autoOptimizeRef.current) clearTimeout(autoOptimizeRef.current); };
-  }, [selectedPlads, reportDate, routeOptEnabled]);
+  }, [selectedPlads, reportDate, routeOptEnabled, driverHasRoutes]);
 
   // Mobile tour panel state
   const [selectedTourForPanel, setSelectedTourForPanel] = useState(null);
@@ -15076,7 +15097,7 @@ function App() {
   // 2026-10-17: Optimér chaufførens egne ture fra den plads de fleste hører
   // til - uden at skulle vælge en plads først (ny TURE-fane).
   const handleOptimizeFor = async (pladsName, tourIds) => {
-    if (!pladsName || !tourIds?.length) return;
+    if (!pladsName || !tourIds?.length || !driverHasRoutes) return;
     setIsOptimizing(true);
     try {
       const res = await axios.post(`${API}/optimize-route`, { plads_name: pladsName, tour_ids: tourIds });
@@ -15094,6 +15115,7 @@ function App() {
   };
 
   const handleOptimizeRoute = async () => {
+    if (!driverHasRoutes) return;
     if (!selectedPlads) { toast.error("Vælg en lokation først"); return; }
     const activeTours = tours.filter(t => t.plads === selectedPlads && !t.is_pause);
     if (activeTours.length === 0) { toast.error("Ingen ture at optimere"); return; }
@@ -16125,7 +16147,7 @@ function App() {
           onOpen={(t) => setSelectedTourForPanel(t)}
           onChat={(t) => setChatTour(t)}
           getRouteInfo={getRouteInfo}
-          onOptimize={handleOptimizeFor}
+          onOptimize={driverHasRoutes ? handleOptimizeFor : null}
           optimizing={isOptimizing}
           showWorked={driverHasTime}
           workedMin={(timeEntries || []).filter(e => e && !e.deleted && e.date === reportDate && (e.slice_type || "work") !== "pause")
@@ -17476,11 +17498,8 @@ function App() {
         </div>
       )}
 
-      {/* Footer */}
-      <footer className="bg-slate-900 text-slate-400 py-4 px-4 text-center text-xs mt-8" data-testid="app-footer">
-        <p>&copy; 2026 ContainerFlow. All rights reserved.</p>
-        <p className="text-slate-500 mt-1">Smart Container Logistics</p>
-      </footer>
+      {/* 2026-10-22: Den mørke footer ("All rights reserved") er fjernet - den
+          fyldte nederst i chaufførappen uden at give chaufføren noget. */}
 
       {/* Confirmation Modal */}
       <ConfirmModal

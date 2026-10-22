@@ -1511,11 +1511,43 @@ async def get_tours(report_id: Optional[str] = None, plads: Optional[str] = None
             else:
                 t["customer_name"] = ""
                 t["customer_code"] = ""
+        await _enrich_capacity(tours)
         return tours
 
     # All other roles use the standard tenant-aware filter
     tours = await db.tours.find(query, {"_id": 0, "receipt_image": 0}).to_list(min(limit, 500))
     return tours
+
+async def _enrich_capacity(tours: list) -> None:
+    """2026-10-22: Containertype og størrelse (fx "Åben container 20 m³") står
+    på pladsens container (container_overrides -> capacity_measures). Turen får
+    en kopi ved bestilling - men mangler den (sat bagefter, eller bestilt på
+    containerens eget nummer), slås den op her, så chaufføren altid ser den."""
+    need = [t for t in tours if (t.get("tour_kind") or "container") != "goods" and not t.get("capacity_label")
+            and t.get("plads") and (t.get("container") or "").strip() and t.get("fraction")]
+    if not need:
+        return
+    codes = {p["name"]: p.get("location_code") for p in await _raw_db.plads.find(
+        {"name": {"$in": list({t["plads"] for t in need})}}, {"_id": 0, "name": 1, "location_code": 1}).to_list(500)}
+    ovs = await _raw_db.container_overrides.find(
+        {"location_code": {"$in": [c for c in codes.values() if c]}, "capacity_measure_id": {"$nin": ["", None]}},
+        {"_id": 0, "location_code": 1, "material": 1, "container_label": 1, "custom_container_id": 1,
+         "capacity_measure_id": 1, "partner_id": 1}).to_list(5000)
+    if not ovs:
+        return
+    cms = {c["id"]: c for c in await _raw_db.capacity_measures.find(
+        {"id": {"$in": list({o["capacity_measure_id"] for o in ovs})}}, {"_id": 0, "id": 1, "label": 1, "volume_m3": 1}).to_list(500)}
+    for t in need:
+        code, cont, mat = codes.get(t["plads"]), (t.get("container") or "").strip(), t["fraction"]
+        partners = set(t.get("assigned_logistics_company_ids") or [])
+        hits = [o for o in ovs if o["location_code"] == code and o.get("material") == mat
+                and cont in ((o.get("container_label") or "").strip(), (o.get("custom_container_id") or "").strip())]
+        hits.sort(key=lambda o: 0 if o.get("partner_id") in partners else 1)  # partnerens egen definition først
+        cm = cms.get(hits[0]["capacity_measure_id"]) if hits else None
+        if cm:
+            t["capacity_label"] = cm.get("label") or ""
+            t["capacity_volume_m3"] = cm.get("volume_m3")
+
 
 async def _duplicate_tours(docs: List[dict]) -> List[dict]:
     """Ikke-færdige ture samme dag med samme plads + container-nr. (container)
@@ -2574,6 +2606,8 @@ PREMIUM_CAPABILITIES = {
     "time": "Tid & ressourcer (stempling, timer og løn)",
     "reports": "Rapportering",
     "team_roles": "Koordinatorroller med rettigheder",
+    # 2026-10-22: Optimer rækkefølge (ruteberegning) - kun premium.
+    "routes": "Ruteoptimering",
 }
 # Moduler super admin kan give et basic-firma enkeltvis.
 PREMIUM_MODULES = ["economy", "time", "reports", "team_roles"]
@@ -11808,6 +11842,7 @@ _PREMIUM_ROUTES = [
     ({"GET", "POST", "PUT", "DELETE", "PATCH"}, re.compile(r"^/api/driver/time-entries(/|$)"), "time"),
     ({"PATCH", "PUT"}, re.compile(r"^/api/company/payroll-settings$"), "time"),
     ({"GET"}, re.compile(r"^/api/admin/statistics$"), "reports"),
+    ({"POST"}, re.compile(r"^/api/optimize-route$"), "routes"),
     # Rettelser godkendes i Økonomi > Godkendelser - uden Økonomi ingen at sende til.
     ({"POST"}, re.compile(r"^/api/driver/tours/[^/]+/change-request$"), "economy"),
 ]

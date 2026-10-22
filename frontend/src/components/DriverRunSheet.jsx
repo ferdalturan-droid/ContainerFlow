@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { X, Truck, Check, Clock, Flag, Loader2 } from "lucide-react";
-import { isHaster, openHours, daysLate } from "../lib/tourHelpers";
+import { isHaster, openHours, daysLate, containerNo, capacityShort } from "../lib/tourHelpers";
 
 /**
  * Hængerkørsel (2026-10-20). Vises når en chauffør med hænger starter en
@@ -38,7 +38,7 @@ export default function DriverRunSheet({ anchor, active = [], candidates = [], s
   const label = addMode
     ? (sel.length ? `Læg ${sel.length === 1 ? "turen" : `${sel.length} ture`} på hængeren` : "Vælg en tur")
     : (sel.length ? `Start ${sel.length + 1} ture` : others.length ? "Start på hængeren" : "Start kun denne tur");
-  const name = (t) => `${t.fraction || "Tur"}${t.container ? ` · #${t.container}` : ""}`;
+  const name = (t) => `${t.fraction || "Tur"}${containerNo(t) ? ` (${containerNo(t)})` : ""}${capacityShort(t) ? ` · ${capacityShort(t)}` : ""}`;
 
   return createPortal(
     <div className="fixed inset-0 z-[85] flex items-end sm:items-center justify-center" data-testid="run-sheet">

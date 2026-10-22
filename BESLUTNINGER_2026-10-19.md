@@ -639,3 +639,30 @@ Listen "Kører du flere containere?" havde en egen gruppe "Fra tidligere dage". 
 - Login og bruger-svar caches aldrig.
 - Login siger "Ingen forbindelse til serveren. Prøv igen om lidt."
 - Åbnes appen igen uden net, bruges den sidst kendte bruger for samme login, så en chauffør ikke bliver logget ud. Kun en rigtig afvisning logger ud.
+
+### 13g. Containernummer og -type, turens vindue, ruteoptimering (2026-10-22)
+
+**Listen:** titlen er "Restaffald (9999)". Containertypen står kort forrest i den grå linje ("Lukket 30 m³"). Rækken er ikke blevet højere.
+
+**Containertypen manglede:**
+- Den kopieres ved bestilling fra pladsens container (kapacitetsmål).
+- Har kunden ikke sat typen på containeren, findes den ikke. Sådan er det på fx Træ 5555 og Papir "Container 2" på Cirklen.
+- Sættes typen senere, fik turen den aldrig. Nu slås den op, når turerne hentes (`_enrich_capacity`). Både pladsens nummer ("Container 1") og containerens eget nummer (5555) bruges, og logistikpartnerens egen definition kommer først.
+- Inde i turen står "Ikke angivet på pladsen", når den mangler.
+
+**Turens vindue** er skrevet om:
+- **Overskrift:** status (Ledig / Ikke startet / På vej siden … / Færdig …), haster, Bil/Hænger, "Materiale (container)" og containertype · opgave.
+- **Ring til / skriv til planlæggeren.**
+- **Rute:** nummererede adresser, hver med "Kør". Værkstedets telefon står ved værkstedet.
+- **Kundens kommentar eller planlæggerens note** i gult. Standardtekster som "Kundeordre fra …" er ikke en note og vises ikke.
+- **Fast tømning** for sig.
+- **Ét felt med alle oplysninger:** dato (+ for sent), tidsrum, container, containertype, materiale/indhold (linjer med antal og hænger), opgave, planlagte hængere (varekørsel), kunde, plads, bestilt af (også "… for kunden (person)"), bestilt, vægt, chauffør (+ afsluttet) og tur-nr.
+- Vægt, afslutning og knapperne nedenfor er uændrede.
+
+**"Optimer rækkefølge"** er premium (ny evne "routes"). Serveren afviser for basic (`/optimize-route` → 403), og knappen og den automatiske beregning vises ikke for basic hos chauffør og planlægger.
+
+**Den mørke bjælke** nederst ("© ContainerFlow. All rights reserved") er fjernet.
+
+**Test:**
+- flow_tiers 12f (ruteoptimering kun premium);
+- flow_run 30a (containertype slået op, når turen mangler den).
