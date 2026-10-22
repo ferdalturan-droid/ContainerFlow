@@ -38,13 +38,19 @@ export function formatApiError(err) {
   return String(detail);
 }
 
+const OFFLINE_MSG = "Ingen forbindelse til serveren. Prøv igen om lidt.";
+
 export const authApi = {
   async login(email, password) {
     const { data } = await axios.post(`${API}/auth/login`, { email, password });
+    // 2026-10-22: Et svar uden bruger/token (fx fra en gammel offline-hjælper
+    // når serveren ikke svarer) er ikke et login.
+    if (!data || !data.token || !data.user) throw new Error(OFFLINE_MSG);
     return data;
   },
   async me() {
     const { data } = await axios.get(`${API}/auth/me`);
+    if (!data || !data.id || !data.role) throw new Error(OFFLINE_MSG);
     return data;
   },
   async logout() {

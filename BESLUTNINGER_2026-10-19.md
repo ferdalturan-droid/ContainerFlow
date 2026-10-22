@@ -621,3 +621,21 @@ logistikfirmaer uden friktion?
 - Står som tydelig knap inde i en tur, man selv har taget og ikke har startet. Turen kommer tilbage under Ledige.
 - Ledige ture har også "Tag turen" inde i turen.
 - Ture, planlæggeren har tildelt, kan ikke gives tilbage af chaufføren; det er som før.
+
+### 13e. Hængerlisten: materiale først, også for forsinkede ture (2026-10-22)
+Listen "Kører du flere containere?" havde en egen gruppe "Fra tidligere dage". Den samme container kunne derfor stå to steder, fx Papir #Container 2 fra i dag under "Samme materiale" og fra 20.10 under "Fra tidligere dage". Nu sorteres der først på materiale, som ønsket:
+- Der er to grupper: "Samme materiale" og "Andre materialer".
+- En forsinket tur står under sit materiale med et gult mærke ("20.10 · 2 dage for sent").
+- I hver gruppe kommer egne ture først, så haster, så forsinkede (ældste først), og til sidst efter tidsrum.
+- Fravalgt: forsinkede i en egen gruppe. Materialet er det, chaufføren vælger efter (samme fraktion til samme modtager).
+
+### 13f. Login når serveren ikke svarer (2026-10-22)
+**Fejlen:** login gav "Cannot read properties of undefined (reading 'name')" og hang på "Indlæser...".
+- Serveren kørte ikke (Docker var stoppet).
+- Appens offline-hjælper (service worker) svarede "OK" på login uden en bruger.
+
+**Rettet:**
+- Offline-hjælperen (v4) svarer med en rigtig fejl (503) i stedet for falske "OK"-svar. Det gælder også for start, afslutning osv., så appens egen kø gemmer chaufførens handlinger rigtigt.
+- Login og bruger-svar caches aldrig.
+- Login siger "Ingen forbindelse til serveren. Prøv igen om lidt."
+- Åbnes appen igen uden net, bruges den sidst kendte bruger for samme login, så en chauffør ikke bliver logget ud. Kun en rigtig afvisning logger ud.

@@ -1,7 +1,17 @@
-const CACHE_NAME = 'containerflow-pwa-v3';
-const STATIC_CACHE = 'containerflow-static-v3';
-const DATA_CACHE = 'containerflow-data-v3';
-const OFFLINE_QUEUE_KEY = 'ilk-offline-queue';
+// v4 (2026-10-22): Ingen falske "OK"-svar længere. Når serveren ikke svarer,
+// får appen en rigtig fejl (503), så login, start af ture osv. kan sige
+// "Ingen forbindelse" - og appens egen kø (tourOpQueue) gemmer chaufførens
+// handlinger. Før svarede vi 200 {offline: true}, og login brød sammen med
+// "Cannot read properties of undefined (reading 'name')".
+const CACHE_NAME = 'containerflow-pwa-v4';
+const STATIC_CACHE = 'containerflow-static-v4';
+const DATA_CACHE = 'containerflow-data-v4';
+const OFFLINE_DETAIL = 'Ingen forbindelse til serveren. Prøv igen om lidt.';
+
+const offlineResponse = () => new Response(JSON.stringify({ offline: true, detail: OFFLINE_DETAIL }), {
+  status: 503,
+  headers: { 'Content-Type': 'application/json' }
+});
 
 // Core static assets to precache
 const PRECACHE_URLS = [
@@ -39,35 +49,19 @@ self.addEventListener('fetch', (event) => {
   const { request } = event;
   const url = new URL(request.url);
 
-  // Skip non-GET requests (except for offline queue)
+  // POST/PUT/DELETE går altid direkte til serveren. Uden forbindelse: en rigtig
+  // fejl (503) - aldrig et falsk "OK".
   if (request.method !== 'GET') {
-    // For POST/PUT/DELETE - try network, if offline queue it
-    if (request.method === 'POST' || request.method === 'PUT') {
-      event.respondWith(
-        fetch(request.clone()).catch(async () => {
-          // Only queue API requests
-          if (url.pathname.startsWith('/api/')) {
-            const body = await request.clone().text();
-            const queueItem = {
-              url: request.url,
-              method: request.method,
-              headers: Object.fromEntries(request.headers.entries()),
-              body: body,
-              timestamp: Date.now()
-            };
-            // Store in IndexedDB via message to client
-            const clients = await self.clients.matchAll();
-            clients.forEach(client => {
-              client.postMessage({ type: 'OFFLINE_QUEUE_ADD', data: queueItem });
-            });
-          }
-          return new Response(JSON.stringify({ offline: true, queued: true }), {
-            status: 200,
-            headers: { 'Content-Type': 'application/json' }
-          });
-        })
-      );
+    if (url.pathname.startsWith('/api/')) {
+      event.respondWith(fetch(request).catch(() => offlineResponse()));
     }
+    return;
+  }
+
+  // Login/bruger må aldrig komme fra cachen (en anden bruger kan have været
+  // logget ind på samme enhed).
+  if (url.pathname.startsWith('/api/auth/')) {
+    event.respondWith(fetch(request).catch(() => offlineResponse()));
     return;
   }
 
@@ -87,14 +81,7 @@ self.addEventListener('fetch', (event) => {
         })
         .catch(() => {
           // Network failed, try cache
-          return caches.match(request).then((cached) => {
-            if (cached) return cached;
-            // Return offline fallback for API
-            return new Response(JSON.stringify({ offline: true, message: 'Offline - viser cached data' }), {
-              status: 200,
-              headers: { 'Content-Type': 'application/json' }
-            });
-          });
+          return caches.match(request).then((cached) => cached || offlineResponse());
         })
     );
     return;

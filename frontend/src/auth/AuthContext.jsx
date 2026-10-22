@@ -21,6 +21,21 @@ try {
   if (persisted) applyActingHeader(persisted);
 } catch (_) { /* ignore */ }
 
+// 2026-10-22: Uden forbindelse til serveren (telefon uden net, server nede)
+// bruges den sidst kendte bruger for samme login, så chaufføren ikke bliver
+// logget ud. Kun en rigtig afvisning (401/403) logger ud.
+const LAST_USER_KEY = "containerflow_last_user";
+const isOffline = (e) => !e?.response || e.response.status >= 500;
+function saveLastUser(token, user) {
+  try { localStorage.setItem(LAST_USER_KEY, JSON.stringify({ t: String(token || "").slice(-24), user })); } catch (_) { /* ignore */ }
+}
+function loadLastUser(token) {
+  try {
+    const v = JSON.parse(localStorage.getItem(LAST_USER_KEY) || "null");
+    return v && token && v.t === String(token).slice(-24) ? v.user : null;
+  } catch (_) { return null; }
+}
+
 export function AuthProvider({ children }) {
   // user: null = unauthenticated, undefined = still checking, object = logged in
   const [user, setUser] = useState(undefined);
@@ -47,8 +62,10 @@ export function AuthProvider({ children }) {
     }
     authApi
       .me()
-      .then((u) => setUser(u))
-      .catch(() => {
+      .then((u) => { setUser(u); saveLastUser(token, u); })
+      .catch((e) => {
+        const last = loadLastUser(token);
+        if (isOffline(e) && last) { setUser(last); return; }
         setAuthToken(null);
         setUser(null);
       });
@@ -58,6 +75,7 @@ export function AuthProvider({ children }) {
     const data = await authApi.login(email, password);
     setAuthToken(data.token);
     setUser(data.user);
+    saveLastUser(data.token, data.user);
     // Clear any stale acting-company on fresh login
     applyActingHeader("");
     _setActingCompanyId("");
@@ -77,6 +95,7 @@ export function AuthProvider({ children }) {
       localStorage.removeItem("korkman2_vehicle_reg");
       localStorage.removeItem("korkman2_session");
       localStorage.removeItem(ACTING_KEY);
+      localStorage.removeItem(LAST_USER_KEY);
     } catch (_) { /* ignore */ }
   }, []);
 
@@ -84,8 +103,10 @@ export function AuthProvider({ children }) {
     try {
       const u = await authApi.me();
       setUser(u);
+      saveLastUser(getAuthToken(), u);
       return u;
-    } catch (_) {
+    } catch (e) {
+      if (isOffline(e)) return null;  // behold den nuværende bruger uden net
       setUser(null);
       return null;
     }

@@ -1,33 +1,33 @@
 import React, { useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { X, Truck, Check, Clock, Flag, Loader2 } from "lucide-react";
-import { isHaster, openHours, todayStr } from "../lib/tourHelpers";
+import { isHaster, openHours, daysLate } from "../lib/tourHelpers";
 
 /**
  * Hængerkørsel (2026-10-20). Vises når en chauffør med hænger starter en
  * containertur: flere containere fra samme plads kan komme med (ikke
- * obligatorisk). Samme materiale står øverst, derefter andre materialer og
- * ture fra tidligere dage. Både chaufførens egne og ledige ture vises.
+ * obligatorisk). Samme materiale står øverst, derefter andre materialer.
+ * 2026-10-22: Ture fra tidligere dage står under deres materiale (ikke i en
+ * egen gruppe) med et "for sent"-mærke - materialet er det man vælger efter.
+ * I hver gruppe: egne ture, haster, forsinkede (ældste først), tidsrum.
+ * Både chaufførens egne og ledige ture vises.
  * addMode: turen kører allerede - vælg den næste til hængeren.
  */
 export default function DriverRunSheet({ anchor, active = [], candidates = [], slots = 0, trailerName = "", addMode = false, onConfirm, onClose }) {
   const [sel, setSel] = useState([]);
   const [busy, setBusy] = useState(false);
-  const today = todayStr();
   const groups = useMemo(() => {
     const mat = (anchor?.fraction || "").trim().toLowerCase();
     const order = (a, b) => (a._mine === b._mine ? 0 : a._mine ? -1 : 1) || (isHaster(a) === isHaster(b) ? 0 : isHaster(a) ? -1 : 1)
+      || String(a.date || "").slice(0, 10).localeCompare(String(b.date || "").slice(0, 10))
       || String(openHours(a).to || "99").padStart(5, "0").localeCompare(String(openHours(b).to || "99").padStart(5, "0"));
-    const past = (t) => (t.date || "").slice(0, 10) < today;
-    const same = candidates.filter(t => !past(t) && (t.fraction || "").trim().toLowerCase() === mat).sort(order);
-    const other = candidates.filter(t => !past(t) && (t.fraction || "").trim().toLowerCase() !== mat).sort(order);
-    const old = candidates.filter(past).sort(order);
+    const same = candidates.filter(t => (t.fraction || "").trim().toLowerCase() === mat).sort(order);
+    const other = candidates.filter(t => (t.fraction || "").trim().toLowerCase() !== mat).sort(order);
     return [
       { key: "same", title: `Samme materiale${anchor?.fraction ? ` (${anchor.fraction})` : ""}`, list: same },
       { key: "other", title: "Andre materialer", list: other },
-      { key: "past", title: "Fra tidligere dage", list: old },
     ].filter(g => g.list.length);
-  }, [anchor, candidates, today]);
+  }, [anchor, candidates]);
   if (!anchor) return null;
   const toggle = (id) => setSel(s => (s.includes(id) ? s.filter(x => x !== id) : s.length >= slots ? s : [...s, id]));
   const confirm = async () => {
@@ -77,7 +77,7 @@ export default function DriverRunSheet({ anchor, active = [], candidates = [], s
           {slots > 0 && groups.map(g => (
             <section key={g.key} className="space-y-1.5">
               <div className="flex items-center gap-1.5 px-1 text-[11px] font-bold uppercase tracking-wide text-slate-500">
-                {g.key === "past" && <Clock className="w-3.5 h-3.5 text-amber-600" />}{g.title}
+                {g.title}
               </div>
               <div className="rounded-xl border border-slate-200 divide-y divide-slate-100 overflow-hidden">
                 {g.list.map(t => {
@@ -95,7 +95,11 @@ export default function DriverRunSheet({ anchor, active = [], candidates = [], s
                         <span className="flex items-center gap-1.5 text-[12px] text-slate-500 flex-wrap">
                           {isHaster(t) && <span className="inline-flex items-center gap-0.5 font-bold text-rose-600"><Flag className="w-3 h-3" />Haster</span>}
                           {oh.from && <span>{oh.from}–{oh.to}</span>}
-                          {g.key === "past" && <span>{t.date}</span>}
+                          {daysLate(t) > 0 && (
+                            <span className="inline-flex items-center gap-0.5 px-1.5 rounded bg-amber-100 text-amber-800 font-bold" data-testid={`run-candidate-late-${t.id}`}>
+                              <Clock className="w-3 h-3" />{new Date(`${String(t.date).slice(0, 10)}T12:00:00`).toLocaleDateString("da-DK", { day: "numeric", month: "numeric" })} · {daysLate(t)} {daysLate(t) === 1 ? "dag" : "dage"} for sent
+                            </span>
+                          )}
                           <span className={`px-1.5 rounded ${t._mine ? "bg-indigo-50 text-indigo-700" : "bg-orange-50 text-orange-700"} font-bold`}>{t._mine ? "Din tur" : "Ledig"}</span>
                         </span>
                       </span>
