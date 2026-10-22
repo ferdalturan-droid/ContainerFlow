@@ -26,6 +26,7 @@ All test users share one password: `LOCAL_TEST_PASSWORD` in `.env.local`.
 | See the test logins (who is who) | `cat local-logins.txt` |
 | See invitation/reset emails the app made | `./scripts/local-test.sh --mails` |
 | Wipe local data and create clean test data (~10 min) | `./scripts/local-test.sh --seed` |
+| Wipe local data and create demo data: ILK Logistics (basic) + ILK Logistics Premium, Helsingør Forsyning, ARGO, prices, 6 weeks of tours for the reports. Every created user: password `123456` (~10 min) | `./scripts/local-test.sh --demo` |
 | Page looks blank/old in the browser | ⌘ Cmd + Shift + R (hard refresh) |
 | Price engine unit tests (fast, no server) | `docker exec cf-app sh -c "cd backend && python -m pytest -q tests/test_pricing_engine.py"` |
 | End-to-end flows: B2B order, goods, pricing, stops, finish (~1 min, cleans up after itself) | `docker exec -e PW="$(grep '^LOCAL_TEST_PASSWORD=' .env.local \| cut -d= -f2-)" cf-app python /app/backend/tests/e2e/run.py` |
@@ -51,6 +52,7 @@ The end-to-end tests (`backend/tests/e2e/`) only run against the **local** datab
 | 2. Switch the live site to it | console.scaleway.com → Serverless → Containers → containerflow → image tag → `v4` → Deploy |
 | 3. Check | open https://containerflow.dk |
 | Something broke after deploy | In the Scaleway console set the tag back to the previous version → Deploy |
+| Same demo data on containerflow.dk (DELETES all data there; JSON backup in `~/containerflow-backups`; asks for MONGO_URL + super admin login; a few minutes) | `./scripts/seed-production.sh` (after deploying the latest version) |
 
 ---
 

@@ -5,6 +5,7 @@
 #   ./scripts/local-test.sh          build current code + (re)start app on http://localhost:8080
 #                                    (an empty database gets clean test data automatically)
 #   ./scripts/local-test.sh --seed   wipe the local database and create clean test data
+#   ./scripts/local-test.sh --demo   wipe the local database and create demo data (password 123456)
 #   ./scripts/local-test.sh --mails  show the latest emails (invitation/reset links) the app made
 #   ./scripts/local-test.sh --stop   stop app + database
 #
@@ -75,7 +76,12 @@ until docker exec "$DB_CT" mongosh --quiet --eval 'db.runCommand({ping:1}).ok' >
 
 SEED=no
 USERS=$(docker exec "$DB_CT" mongosh --quiet containerflow --eval 'db.users.countDocuments()')
-if [ "${1:-}" = "--seed" ] || [ "${1:-}" = "--reset" ] || [ "$USERS" = "0" ]; then
+if [ "${1:-}" = "--demo" ]; then
+  SEED=demo
+  docker rm -f "$APP_CT" >/dev/null 2>&1 || true
+  docker exec "$DB_CT" mongosh --quiet containerflow --eval 'db.dropDatabase()' >/dev/null
+  echo "Local database wiped."
+elif [ "${1:-}" = "--seed" ] || [ "${1:-}" = "--reset" ] || [ "$USERS" = "0" ]; then
   SEED=yes
   docker rm -f "$APP_CT" >/dev/null 2>&1 || true
   docker exec "$DB_CT" mongosh --quiet containerflow --eval 'db.dropDatabase()' >/dev/null
@@ -108,6 +114,18 @@ if [ "$SEED" = yes ]; then
   OUT=$(docker exec -i -e SEED_PASSWORD="$PASSWORD" -e SEED_EMAIL_BASE="$(val SEED_EMAIL_BASE)" \
         -e SUPER_ADMIN_EMAIL="$SA_EMAIL" "$APP_CT" python - < scripts/seed_local.py)
   echo "${OUT%%@@LOGINS@@*}" | head -8
+  echo "${OUT#*@@LOGINS@@}" | sed 1d > local-logins.txt
+fi
+
+if [ "$SEED" = demo ]; then
+  # 2026-10-22: Demo-data (ILK Logistics basic + Premium, Helsingør Forsyning,
+  # ARGO, priser, 6 ugers historik). Alle oprettede brugere: kode 123456.
+  NOMAIL=$(mktemp); grep -v '^RESEND_API_KEY=' "$ENV_FILE" > "$NOMAIL"
+  start_app "$NOMAIL"; rm -f "$NOMAIL"
+  echo "Creating demo data (takes a few minutes) ..."
+  OUT=$(docker exec -i -e SEED_PASSWORD=123456 -e SEED_EMAIL_BASE="$(val SEED_EMAIL_BASE)" \
+        -e SA_EMAIL="$SA_EMAIL" -e SA_PASSWORD="$PASSWORD" "$APP_CT" python - < scripts/seed_demo.py)
+  echo "${OUT%%@@LOGINS@@*}"
   echo "${OUT#*@@LOGINS@@}" | sed 1d > local-logins.txt
 fi
 
